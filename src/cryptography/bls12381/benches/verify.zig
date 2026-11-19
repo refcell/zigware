@@ -75,29 +75,8 @@ fn bench_aggregate_same_message(runner: *bench.Runner) !void {
     }
 }
 
-/// commonware's `combine_messages` across a strategy: a fold of the message hashes.
-const CombineMessages = struct {
-    const Sum = aggregate.Message(MinSig);
-
-    pub fn identity(_: CombineMessages) Sum {
-        return .zero;
-    }
-
-    pub fn fold(_: CombineMessages, acc: Sum, item: *const aggregate.NamespacedMessage) Sum {
-        var sum = acc;
-        sum.add(ops.hash_with_namespace(MinSig, MinSig.message, item.namespace, item.message));
-        return sum;
-    }
-
-    pub fn reduce(_: CombineMessages, a: Sum, b: Sum) Sum {
-        var sum = a;
-        sum.add(b.value);
-        return sum;
-    }
-};
-
-/// Combines the message hashes (across `strategy` when it plans more than one task), then
-/// verifies one signer's aggregate signature.
+/// Combines the message hashes across `strategy`, then verifies one signer's aggregate
+/// signature.
 const AggregateSameSigner = struct {
     public: G2,
     messages: []const aggregate.NamespacedMessage,
@@ -105,10 +84,7 @@ const AggregateSameSigner = struct {
     strategy: parallel.Rayon,
 
     pub fn iter(workload: *AggregateSameSigner) !void {
-        const combined = if (workload.strategy.parallelism() > 1)
-            workload.strategy.fold(workload.messages, CombineMessages{})
-        else
-            aggregate.combine_messages(MinSig, workload.messages);
+        const combined = aggregate.combine_messages(MinSig, workload.messages, workload.strategy);
         try aggregate.verify_same_signer(MinSig, workload.public, combined, workload.signature);
     }
 };
@@ -351,9 +327,7 @@ fn bench_msm(runner: *bench.Runner) !void {
     }
 }
 
-/// `polynomial.eval_msm(scalar)`, or with a strategy planning more than one task, the same
-/// powers of `scalar` and one multi-scalar multiplication across it (commonware's
-/// `eval_msm(&scalar, &strategy)`).
+/// `polynomial.eval_msm(scalar, strategy)`.
 const EvaluatePoint = struct {
     gpa: Allocator,
     polynomial: math.poly.Poly(G1),
@@ -361,15 +335,8 @@ const EvaluatePoint = struct {
     strategy: parallel.Rayon,
 
     pub fn iter(workload: *EvaluatePoint) !G1 {
-        if (workload.strategy.parallelism() == 1) {
-            return workload.polynomial.eval_msm(workload.gpa, Scalar, workload.scalar);
-        }
-        const coeffs = workload.polynomial.coeffs;
-        const weights = try workload.gpa.alloc(Scalar, coeffs.len);
-        defer workload.gpa.free(weights);
-        var iterator = math.algebra.powers(Scalar, Scalar.one, workload.scalar);
-        for (weights) |*weight| weight.* = iterator.next();
-        return G1.msm_strategy(workload.gpa, coeffs, weights, workload.strategy);
+        const polynomial = workload.polynomial;
+        return polynomial.eval_msm(workload.gpa, Scalar, workload.scalar, workload.strategy);
     }
 };
 

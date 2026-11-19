@@ -319,7 +319,7 @@ test "aggregate: same signer over many messages" {
             signature.* = ops.sign_message(V, pair.private, item.namespace, item.message);
         }
         const sum = aggregate.combine_signatures(V, &signatures);
-        const combined = aggregate.combine_messages(V, &messages);
+        const combined = aggregate.combine_messages(V, &messages, parallel.sequential);
         try aggregate.verify_same_signer(V, pair.public, combined, sum);
         try testing.expectError(
             error.InvalidSignature,
@@ -354,6 +354,27 @@ fn same_signer_explored(
     try testing.expectEqual(std.meta.isError(serial), !verdict);
     rng.* = serial_rng;
     return verdict;
+}
+
+test "aggregate: combine_messages across pools equals the sequential sum" {
+    var rng = utils.test_rng();
+    var bytes: [200][16]u8 = undefined;
+    var messages: [200]aggregate.NamespacedMessage = undefined;
+    for (&bytes, &messages) |*message, *item| {
+        rng.fill_bytes(message);
+        item.* = .{ .namespace = "test", .message = message };
+    }
+    inline for (.{ MinPk, MinSig }) |V| {
+        for ([_]usize{ 1, 2, 7, 200 }) |count| {
+            const serial = aggregate.combine_messages(V, messages[0..count], parallel.sequential);
+            for ([_]u32{ 0, 1, 3, 8 }) |workers| {
+                const strategy = try parallel.mocks.pooled(gpa, testing.io, workers, 8);
+                defer strategy.pool.destroy();
+                const pooled = aggregate.combine_messages(V, messages[0..count], strategy);
+                try testing.expect(serial.eql(pooled));
+            }
+        }
+    }
 }
 
 test "batch: same signer accepts valid and rejects identity and wrong signatures" {

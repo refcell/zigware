@@ -86,14 +86,36 @@ pub fn combine_signatures(comptime V: type, signatures: []const V.Signature) Sig
     return sum;
 }
 
-/// Sums the hashes of namespaced messages. Messages must not repeat.
-pub fn combine_messages(comptime V: type, messages: []const NamespacedMessage) Message(V) {
+/// Sums the hashes of namespaced messages, hashing them across `strategy` (a `parallel`
+/// strategy; `parallel.sequential` hashes on the caller). Messages must not repeat.
+pub fn combine_messages(
+    comptime V: type,
+    messages: []const NamespacedMessage,
+    strategy: anytype,
+) Message(V) {
     assert(messages.len > 0);
-    var sum: Message(V) = .zero;
-    for (messages) |item| {
-        sum.add(ops.hash_with_namespace(V, V.message, item.namespace, item.message));
-    }
-    return sum;
+    return strategy.fold(messages, CombineMessages(V){});
+}
+
+/// `combine_messages`' fold: each chunk sums its messages' hashes, and chunk sums add.
+fn CombineMessages(comptime V: type) type {
+    return struct {
+        pub fn identity(_: @This()) Message(V) {
+            return .zero;
+        }
+
+        pub fn fold(_: @This(), acc: Message(V), item: *const NamespacedMessage) Message(V) {
+            var sum = acc;
+            sum.add(ops.hash_with_namespace(V, V.message, item.namespace, item.message));
+            return sum;
+        }
+
+        pub fn reduce(_: @This(), a: Message(V), b: Message(V)) Message(V) {
+            var sum = a;
+            sum.add(b.value);
+            return sum;
+        }
+    };
 }
 
 /// Verifies an aggregate signature over one message from the keys summed in `public`.

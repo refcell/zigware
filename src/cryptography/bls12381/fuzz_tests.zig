@@ -218,7 +218,7 @@ fn aggregate_operation(comptime V: type, kind: AggregateKind, u: *Unstructured) 
             const signature = try arbitrary_point(V.Signature, u);
             // The concurrency; results do not depend on it, so this runs sequentially.
             _ = u.int_in_range(usize, 1, 8);
-            const combined_message = aggregate.combine_messages(V, messages);
+            const combined_message = aggregate.combine_messages(V, messages, parallel.sequential);
             const combined = aggregate.combine_signatures(V, &.{signature});
             aggregate.verify_same_signer(V, public_key, combined_message, combined) catch {};
         },

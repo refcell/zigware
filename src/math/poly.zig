@@ -14,6 +14,7 @@ const algebra = @import("algebra.zig");
 const codec = @import("codec");
 const minifuzz = @import("invariants").minifuzz;
 const ntt = @import("ntt.zig");
+const parallel = @import("parallel");
 const Unstructured = minifuzz.Unstructured;
 
 /// Below this many polynomials, `Poly.msm` uses the naive algorithm.
@@ -100,12 +101,25 @@ pub fn Poly(comptime K: type) type {
             return accumulator;
         }
 
-        /// Like `eval`, but as one multi-scalar multiplication against `1, r, r^2, ...`.
-        pub fn eval_msm(self: Self, allocator: Allocator, comptime R: type, r: R) !K {
+        /// Like `eval`, but as one multi-scalar multiplication against `1, r, r^2, ...`, run
+        /// through `strategy` (commonware's `eval_msm(&r, &strategy)`): `K.msm_strategy` when
+        /// `K` provides one, else `algebra.msm` on the caller. Every strategy gives `eval`'s
+        /// value.
+        pub fn eval_msm(
+            self: Self,
+            allocator: Allocator,
+            comptime R: type,
+            r: R,
+            strategy: anytype,
+        ) !K {
+            assert(self.coeffs.len > 0);
             const weights = try allocator.alloc(R, self.coeffs.len);
             defer allocator.free(weights);
             var iterator = algebra.powers(R, R.one, r);
             for (weights) |*weight| weight.* = iterator.next();
+            if (comptime @hasDecl(K, "msm_strategy")) {
+                return K.msm_strategy(allocator, self.coeffs, weights, strategy);
+            }
             return algebra.msm(K, R, self.coeffs, weights);
         }
 
@@ -526,7 +540,8 @@ pub fn fuzz_plan(_: void, u: *Unstructured) !void {
         .eval_zero => try expect(f.eval(TF, TF.zero).eql(f.constant())),
         .eval_msm => {
             const x = try u.arbitrary(TF);
-            try expect(f.eval(TF, x).eql(try f.eval_msm(allocator, TF, x)));
+            const msm = try f.eval_msm(allocator, TF, x, parallel.sequential);
+            try expect(f.eval(TF, x).eql(msm));
         },
         .lin_comb_eval => try check_lin_comb_eval(allocator, f, u),
         .interpolate => try check_interpolate(allocator, f, .shifted),

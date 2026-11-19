@@ -16,6 +16,7 @@ const utils = @import("utils");
 const minifuzz = @import("invariants").minifuzz;
 const group = @import("group.zig");
 const tiled = @import("arithmetic/root.zig").msm;
+const math = @import("math");
 
 const Scalar = group.Scalar;
 const SmallScalar = group.SmallScalar;
@@ -274,6 +275,26 @@ test "group msm: matches the naive sum through cut and one-point tiles" {
         const expected = naive(G1, points, scalars);
         for (strategies) |strategy| {
             try testing.expect((try G1.msm_strategy(gpa, points, scalars, strategy)).eql(expected));
+        }
+    }
+}
+
+test "group msm: eval_msm across pools equals eval and the sequential msm" {
+    var rng = utils.test_rng();
+    for ([_]u32{ 1, 2, 5, 34, 334 }) |degree_plus_one| {
+        var secret = try math.poly.Poly(Scalar).random(gpa, &rng, degree_plus_one - 1);
+        defer secret.deinit(gpa);
+        var public = try math.poly.commit(gpa, G1, secret);
+        defer public.deinit(gpa);
+        const x = Scalar.random(&rng);
+        const expected = public.eval(Scalar, x);
+        const serial = try public.eval_msm(gpa, Scalar, x, parallel.sequential);
+        try testing.expect(serial.eql(expected));
+        for ([_]u32{ 0, 1, 3, 8 }) |workers| {
+            const strategy = try parallel.mocks.pooled(gpa, testing.io, workers, 8);
+            defer strategy.pool.destroy();
+            const pooled = try public.eval_msm(gpa, Scalar, x, strategy);
+            try testing.expect(pooled.eql(expected));
         }
     }
 }

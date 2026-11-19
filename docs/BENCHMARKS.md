@@ -193,9 +193,7 @@ Ported by this audit: utils' `bitmap`, `cache`, `rational`, and `sequence` bench
 cases), storage's `ordinal` (13) and `rmap` (5), curve25519's batch verify at
 commonware's concurrency levels 16 and 32, `sha256::hash_parts` (4), and the `conc=8` rows of
 `blake3::hash_message` (8, after `Blake3.hash_across` learned to split a long message into
-subtrees across the strategy, as commonware does) and of six bls12381 groups (100).
-`bls12381::aggregate_verify_same_signer` and `evaluate_point` fold and multiply across the
-strategy in the bench, because zigware's `combine_messages` and `eval_msm` take no strategy yet. Renamed to commonware's Criterion names:
+subtrees across the strategy, as commonware does) and of six bls12381 groups (100). Renamed to commonware's Criterion names:
 `curve25519::batch_verify` to `batch_verify::verify_batch_bytes_bench`, and
 `iobuf::decode_fixed` to `iobuf::iobuf::decode_fixed`.
 
