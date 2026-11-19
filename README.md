@@ -27,7 +27,7 @@ chain: each pane shows dealings and acks arriving, dealer logs observed on chain
 `completed reshare ceremony ... success=true`, and the orchestrator entering the next epoch
 with the new key. After the first reshare, the bottom pane starts a fifth validator with
 `--state-sync`: its first block is a peer's floor rather than genesis, and it enters the
-current epoch and reshares in step with the rest ([video](docs/assets/dkg-demo.mp4)).
+current epoch and reshares in step with the rest ([video](docs/assets/dkg-demo.mp4?raw=true)).
 `etc/scripts/record-demo.sh dkg` records it again.
 
 <p align="center">
@@ -41,7 +41,7 @@ epoch-zero DKG together, and all six genesis files come out identical. Then comm
 validators 0, 1 and 4 and zigware's validators 2 and 3 run Simplex, marshal, and the
 stateful application together, and zigware's validator 5 joins with `--state-sync`. Every
 pane shows the same digest at each height through every epoch's reshare
-([video](docs/assets/interop-dkg-demo.mp4)). `etc/scripts/interop.sh` runs this check, and
+([video](docs/assets/interop-dkg-demo.mp4?raw=true)). `etc/scripts/interop.sh` runs this check, and
 `etc/scripts/record-demo.sh interop-dkg` records it again.
 
 <p align="center">
@@ -53,7 +53,7 @@ zigware and commonware run one network together. Here commonware's Rust [log](ex
 validators 0 and 1 and zigware's validators 2 and 3 form one Simplex committee: each
 implementation proposes about half the views, and all four finalize every view with the same
 digest. A zigware validator that is stopped and restarted on its storage rejoins and finalizes
-later views with the same digests ([video](docs/assets/interop-log-demo.mp4)).
+later views with the same digests ([video](docs/assets/interop-log-demo.mp4?raw=true)).
 `etc/scripts/interop.sh` runs this check, after a chat session between the two
 implementations, and `etc/scripts/record-demo.sh interop-log` records it again.
 
@@ -68,7 +68,7 @@ runs Simplex and proposes either random data or the other network's latest final
 which its validators verify against the other network's public identity before voting. The
 top pane is the indexer storing blocks and finalizations from both networks; the bottom panes
 are one validator from each network, where `block=Bridge(..)` marks a proposal carrying the
-other network's finalization ([video](docs/assets/bridge-demo.mp4)).
+other network's finalization ([video](docs/assets/bridge-demo.mp4?raw=true)).
 `etc/scripts/record-demo.sh bridge` records it again.
 
 The other examples have their own READMEs and recordings: [chat](examples/chat), an
