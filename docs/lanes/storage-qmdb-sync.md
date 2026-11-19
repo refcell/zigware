@@ -38,7 +38,13 @@ it comes first once `any` lands.
 - [x] current variable (`Variable(Digest)` values): `CurrentMmr/Mmb{Unordered,Ordered}
   VariableConf`; the db tests run over one database per variant. Values that own memory wait
   on `any`.
-- [ ] current sync glue (moved to the crypto lane, T-01a1d57b-08a0-72a4-a12b-10ff47f6049d).
+- [x] any sync glue (`any.sync.Database(Db, H)` on `sync.database.Persisted`), back from the
+  crypto lane (2026-11-19): genesis and sync-boundary syncs, post-sync batches, the four
+  `from_sync_result` cases, local pins at the last commit's floor, and a wrong root, over all
+  eight any variants.
+- [ ] current sync glue (`current/sync.zig`) and the `qmdb_any_{fixed,variable}_sync` fuzz
+  targets. Keyless and immutable glue, the engine, and the shared harness stay with the
+  crypto lane.
 - [x] sync journal (`journal.init`/`resize`/`append` over contiguous journals, `Memory(Op)`)
   and the request tracker (`requests.Requests(F)`), with their commonware tests.
 - [ ] sync engine, database, source, harness; per-variant sync glue
@@ -185,3 +191,4 @@ it comes first once `any` lands.
 - 2026-11-18: current batch-root and recovery fuzz targets (planted bugs caught).
 - 2026-11-18: current operations and MMB prune-grow fuzz targets; ordered batch neighbors.
 - 2026-11-18: compact sync `Database` interface.
+- 2026-11-19: any sync glue.

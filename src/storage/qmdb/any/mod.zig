@@ -10,6 +10,8 @@ pub const db = @import("db.zig");
 pub const Db = db.Db;
 pub const Config = db.Config;
 pub const initial_root = db.initial_root;
+/// State sync (`sync.Database(Db, H)`).
+pub const sync = @import("sync.zig");
 
 test {
     std.testing.refAllDecls(@This());
