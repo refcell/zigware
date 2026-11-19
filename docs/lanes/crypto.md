@@ -128,6 +128,11 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   own variable-time multiscalar loop because std's `mul*Public` rejects them.
 - ed25519 batch verification derives its coefficients from a transcript as commonware
   does (see the strategy entry below).
+- ed25519 batch shards of 44 or more signatures sum through the bucket MSM in
+  `ed25519/msm.zig` (shared with curve25519's `batch.zig`), in stack chunks of at most 128
+  signatures with one `A` term per distinct key, as commonware's `batch.rs` coalesces;
+  smaller shards keep `core.MultiScalar` (Straus). Before, every shard went through
+  `MultiScalar`, whose 8-point flushes each ran their own 256-doubling chain.
 - `verify_batch(rng, items, projector, strategy)`: `projector.project(index, *const Item)`
   returns a `BatchEntry`; `cryptography.entries` projects a slice of entries.
 - Conformance hashes that run signature schemes thousands of times skip in Debug unless

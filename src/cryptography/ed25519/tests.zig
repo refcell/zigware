@@ -291,7 +291,7 @@ test "ed25519 private key is redacted" {
 
 /// Signs `count` 32-byte random messages with each of `signers` keys from `test_rng`.
 const Fixture = struct {
-    const capacity = 32;
+    const capacity = 160;
     keys: [capacity]PublicKey = undefined,
     signatures: [capacity]Signature = undefined,
     messages: [capacity][32]u8 = undefined,
@@ -367,6 +367,15 @@ test "ed25519 batch rejects each altered item in every shape" {
     try testing.expect(try many.verify());
     many.messages[29][0] ^= 1;
     try testing.expect(!try many.verify());
+    // Past the Straus cutoff a whole batch is two bucket chunks of 65, one key straddling them.
+    const large = Fixture.init(13, 10);
+    comptime std.debug.assert(130 > ed25519.msm.chunk_signatures);
+    try testing.expect(try large.verify());
+    for ([_]usize{ 0, 64, 65, 129 }) |altered| {
+        var items = large;
+        items.messages[altered][0] ^= 1;
+        try testing.expect(!try items.verify());
+    }
 }
 
 test "ed25519 batch framing matches union_unique" {

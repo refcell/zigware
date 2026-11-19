@@ -6,6 +6,7 @@
 const scheme = @import("ed25519/scheme.zig");
 
 pub const core = @import("ed25519/core.zig");
+pub const msm = @import("ed25519/msm.zig");
 pub const PrivateKey = scheme.PrivateKey;
 pub const PublicKey = scheme.PublicKey;
 pub const Signature = scheme.Signature;
