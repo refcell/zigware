@@ -124,6 +124,30 @@ test "setup: writes commonware's config and peer files" {
     );
 }
 
+test "setup: a missing dashboard.json falls back to commonware's" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const output = try std.fmt.allocPrint(arena, "{s}/assets", .{home});
+    const chosen = options(output, "dashboard.json");
+    var rng = TestRng.init(7);
+    const generated = try setup.generate(arena, &rng, tag, &chosen);
+    // The test runs from the repository root, which has no dashboard.json.
+    try setup.write_files(testing.io, arena, &generated, "dashboard.json", output);
+    const copied = try read(arena, tmp.dir, "assets/dashboard.json");
+    try testing.expectEqualStrings(setup.default_dashboard, copied);
+    try testing.expect(std.mem.indexOf(u8, copied, "flood") != null);
+    // Any other missing dashboard is still an error, as in commonware.
+    const other = try std.fmt.allocPrint(arena, "{s}/other", .{home});
+    try testing.expectError(
+        error.FileNotFound,
+        setup.write_files(testing.io, arena, &generated, "missing.json", other),
+    );
+}
+
 test "setup: refuses more bootstrappers or regions than peers" {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();

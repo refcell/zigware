@@ -48,12 +48,11 @@ peer 4         3938          630       1.249 ms
 
 ### Create Deployer Artifacts
 
-`setup` copies a Grafana dashboard from `--dashboard` into the output. Fetch commonware's
-[`dashboard.json`][dashboard] into the directory you run from first; without it `setup` fails
-with `FileNotFound`, as commonware's does:
+`setup` copies the Grafana dashboard named by `--dashboard` into the output.
+[`dashboard.json`](dashboard.json) is commonware's, shipped here as upstream ships it. Run the
+command from the repository root or from `examples/flood`:
 
 ```sh
-curl -sO https://raw.githubusercontent.com/commonwarexyz/monorepo/main/examples/flood/dashboard.json
 zig build run-flood-setup -Doptimize=ReleaseFast -- --peers 3 --bootstrappers 1 \
     --regions us-west-2,us-east-1,eu-west-1 --instance-type c7g.xlarge --storage-size 10 \
     --storage-class gp3 --worker-threads 4 --message-size 1024 --message-rate 16384 \
@@ -70,8 +69,6 @@ peers spread over the regions in turn:
 info(setup): generated deployment tag: tag=14a3c41c-1f05-48de-be9b-cc511243244e
 info(setup): wrote configuration files: path=assets/config.yaml
 ```
-
-[dashboard]: https://github.com/commonwarexyz/monorepo/blob/main/examples/flood/dashboard.json
 
 ### Deploy
 
@@ -94,6 +91,9 @@ zig build run-flood-setup -- --help   # setup's CLI
   the deployer's hosts file ([decisions](../../docs/lanes/examples-estimator.md#decisions)).
 - A peer whose host IP is loopback binds that IP instead of `0.0.0.0`, so local peers share
   flood's fixed ports on `127.0.0.1`, `127.0.0.2`, and so on
+  ([decisions](../../docs/lanes/examples-estimator.md#decisions)).
+- A missing `--dashboard dashboard.json` falls back to the copy embedded in `setup`, so the
+  command runs from the repository root too
   ([decisions](../../docs/lanes/examples-estimator.md#decisions)).
 - The local deployment (`local.sh`, `demo.sh`) is zigware's; commonware runs flood only on EC2.
 - commonware builds an ARM64 binary for EC2 with Docker; Zig cross-compiles without it, for

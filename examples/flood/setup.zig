@@ -151,8 +151,13 @@ pub fn sample(
     return reservoir;
 }
 
+/// commonware's `examples/flood/dashboard.json`, shipped beside this file.
+pub const default_dashboard = @embedFile("dashboard.json");
+
 /// Writes the generated files into `output` (which must not exist), with `dashboard` copied
-/// in as `dashboard.json`.
+/// in as `dashboard.json`. A missing `dashboard.json` (the name commonware's README passes)
+/// falls back to the embedded copy, so the README's command runs from the repository root
+/// as well as from `examples/flood`.
 pub fn write_files(
     io: Io,
     arena: Allocator,
@@ -164,7 +169,12 @@ pub fn write_files(
     if (cwd.access(io, output, .{})) |_| return error.OutputDirectoryAlreadyExists else |_| {}
     try cwd.createDirPath(io, output);
     const copy = try std.fs.path.join(arena, &.{ output, "dashboard.json" });
-    try cwd.copyFile(dashboard, cwd, copy, io, .{});
+    cwd.copyFile(dashboard, cwd, copy, io, .{}) catch |err| {
+        if (err != error.FileNotFound) return err;
+        if (!std.mem.eql(u8, dashboard, "dashboard.json")) return err;
+        try cwd.writeFile(io, .{ .sub_path = copy, .data = default_dashboard });
+    };
+    assert(default_dashboard.len > 0);
     for (generated.peers) |file| {
         var text: Io.Writer.Allocating = .init(arena);
         try file.config.write(&text.writer);

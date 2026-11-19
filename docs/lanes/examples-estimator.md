@@ -38,6 +38,10 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
   127.0.0.1, 127.0.0.2, ... (`examples/flood/local.sh` writes such a deployment and
   `demo.sh` runs it). Logs are tracing-subscriber's JSON lines on stdout, written by
   `lib.write_json_event`.
+- flood `setup` embeds commonware's `dashboard.json` (shipped in `examples/flood`) and writes
+  it when `--dashboard dashboard.json` is missing from the working directory, so the README's
+  command runs from the repository root as well as from `examples/flood`. Any other missing
+  dashboard fails as commonware's `unwrap` does.
 - flood's `messages` counter also counts sends made before any peer connects, as
   commonware's does (an empty `Recipients::All` send is accepted); the demo shows received
   messages instead.
