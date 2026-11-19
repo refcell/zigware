@@ -373,7 +373,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/db/current.rs | 11 | 11 | 0 | 0 | |
 | stateful/db/keyless/standard.rs | 5 | 5 | 0 | 0 | |
 | stateful/db/immutable/standard.rs | 2 | 2 | 0 | 0 | |
-| stateful/db/compact.rs | 39 | 39 | 0 | 0 | |
+| stateful/db/compact.rs | 37 | 37 | 0 | 0 | |
 | stateful/db/p2p/actor.rs | 24 | 24 | 0 | 0 | |
 | stateful/db/p2p/handler.rs, limits.rs | 3 | 3 | 0 | 0 | |
 | stateful/db/p2p/mailbox.rs | 4 | 4 | 0 | 0 | |
@@ -388,7 +388,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/core/processing.rs, 3451-5885 | 39 | 35 | 2 | 2 | s |
 | stateful/actor/processor/mod.rs | 44 | 40 | 0 | 4 | |
 | stateful/tests/mod.rs, floor.rs | 28 | 21 | 7 | 0 | j |
-| **total** | **475** | **431** | **33** | **11** | |
+| **total** | **473** | **429** | **33** | **11** | |
 
 - db/mod.rs's barrier tests are ported since async start_sync step 6 (`Barrier` holds each
   member's `runtime.storage.Completion`): `barrier_waits_for_every_handle` (8),
@@ -576,14 +576,16 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   barrier pending drops it, canceling the acks it held. Marshal keeps its own completions
   (`store.Durable = runtime.storage.Completion`, eced10a); glue only gets `Update.block`'s ack,
   which it signals once the covering barrier completes.
-- [ ] db drift (8bf364011), open:
-  - `sync::Target` is `{ root, range }` for compact too (storage lane). Until storage's
-    `CompactTarget` goes, `sync_compact_db` keeps its update and reached forwarders, so the
-    forwarder-stops test stays, although upstream removed it.
-  - `StateSyncDb::sync_db`'s new contract fails the sync on an unreachable target, whether
-    initial or on `tip_updates`. zigware fails on an invalid initial compact target but skips
-    an invalid one on `tip_updates` (the forwarder's `to_target() catch continue`). It goes
-    with the target unification.
+- [x] db drift (8bf364011), glue's half of the target unification (storage's is 07dbeb5):
+  compact's `SyncTarget` is `qmdb.sync.Target` over its last commit, `[size - 1, size)`;
+  `prune` goes through `prune_to_target`, and `sync_db` through `sync_standard_db` like every
+  qmdb adapter, so `sync_compact_db` and its update and reached forwarders are gone, and with
+  them the forwarder-stops test (upstream removed it too). The engine runs
+  `validate_target` on the initial target and every adopted update, so an unreachable target
+  fails the sync either way (`StateSyncDb::sync_db`'s new contract): state_sync_test's "a
+  compact target wider than one commit fails the sync" and compact_sync_test's "an
+  unreachable target on tip_updates fails the sync" check both. `matches_sync_target` checks
+  the root and range itself until storage's merkleized-batch `target()` lands.
 - [ ] tests: single_db_app.rs's engine on `glue.simulate` (simplex, marshal, buffered broadcast,
   marshal and qmdb resolvers, probe, `Stateful`), then tests/mod.rs's scenarios (finalize,
   crash/restart, pruning, state sync, lossy, partitions), multi_db_app, floor, properties.

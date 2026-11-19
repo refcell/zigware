@@ -1,8 +1,8 @@
 //! commonware `glue/src/stateful/db/compact.rs`'s state-sync tests, each for keyless and
-//! immutable: the update forwarder stops with the sync, a queued target is adopted before the
-//! initial one is reached, progress gauges from compact and full sources, and superseding an
-//! in-flight stale target from compact and full sources. They run on the deterministic
-//! runtime, so a sync that never finishes fails instead of hanging.
+//! immutable: a queued target is adopted before the initial one is reached, an unreachable
+//! target on `tip_updates` fails the sync, progress gauges from compact and full sources, and
+//! superseding an in-flight stale target from compact and full sources. They run on the
+//! deterministic runtime, so a sync that never finishes fails instead of hanging.
 
 const std = @import("std");
 const testing = std.testing;
@@ -181,7 +181,7 @@ fn Populated(comptime C: type, comptime DB: type) type {
                 target.* = if (DB == C.Compact)
                     committed
                 else
-                    .{ .root = committed.root, .size = committed.end };
+                    .init(committed.root, committed.end - 1, committed.end);
             }
             self.source = .{ .shared = self.shared };
         }
@@ -268,33 +268,6 @@ fn expect_synced(
     try testing.expectEqual(C.metadata(seed), (try synced.inner.get_metadata()).?);
 }
 
-fn forwarder_stops(comptime C: type) fn (Io) anyerror!void {
-    return struct {
-        fn body(io: Io) anyerror!void {
-            const A = C.Compact;
-            var source: Populated(C, A) = undefined;
-            try source.init(io, .{ 7, 8 });
-            defer source.deinit();
-            var node: Node = undefined;
-            try node.init(io);
-            defer node.deinit();
-            var tips = try ring.channel(A.SyncTarget, gpa, io, 1);
-            defer tips.sender.deinit();
-            defer tips.receiver.deinit();
-            const config = node.compact_config(A);
-            var synced = try A.sync_db(node.env(), config, &source.source, source.targets[0], .{
-                .tip_updates = &tips.receiver,
-            }, engine_config);
-            defer synced.deinit();
-            // The forwarder ended with the sync: a later tip stays queued for its owner.
-            try testing.expect(tips.sender.send_lossy(source.targets[1]));
-            try io.sleep(.fromMilliseconds(10), .awake);
-            const queued = try tips.receiver.try_recv();
-            try testing.expect(queued.eql(source.targets[1]));
-        }
-    }.body;
-}
-
 fn adopts_queued_target(comptime C: type) fn (Io) anyerror!void {
     return struct {
         fn body(io: Io) anyerror!void {
@@ -326,6 +299,34 @@ fn adopts_queued_target(comptime C: type) fn (Io) anyerror!void {
     }.body;
 }
 
+// commonware `StateSyncDb::sync_db` (8bf364011): an unreachable target fails the sync also
+// when it arrives on `tip_updates`; here an advancing update covering more than its last commit.
+fn fails_on_unreachable_update(comptime C: type) fn (Io) anyerror!void {
+    return struct {
+        fn body(io: Io) anyerror!void {
+            const A = C.Compact;
+            var source: Populated(C, C.Full) = undefined;
+            try source.init(io, .{ 7, 8 });
+            defer source.deinit();
+            var node: Node = undefined;
+            try node.init(io);
+            defer node.deinit();
+            var tips = try ring.channel(A.SyncTarget, gpa, io, 1);
+            defer tips.sender.deinit();
+            defer tips.receiver.deinit();
+            const latest = source.targets[1];
+            const wide: A.SyncTarget = .init(latest.root, latest.end - 2, latest.end);
+            try testing.expect(wide.advances(source.targets[0]));
+            try testing.expect(tips.sender.send_lossy(wide));
+            const config = node.compact_config(A);
+            const result = A.sync_db(node.env(), config, &source.source, source.targets[0], .{
+                .tip_updates = &tips.receiver,
+            }, engine_config);
+            try testing.expectError(error.InvalidTarget, result);
+        }
+    }.body;
+}
+
 fn reports_progress(comptime C: type, comptime DB: type) fn (Io) anyerror!void {
     return struct {
         fn body(io: Io) anyerror!void {
@@ -336,16 +337,17 @@ fn reports_progress(comptime C: type, comptime DB: type) fn (Io) anyerror!void {
             defer populated.deinit();
             const target = populated.targets[0];
             // A larger target the source never serves, so the gauges can be read diverging.
-            const unservable: A.SyncTarget = .{
-                .root = Sha256.hash(&.{&.{0xFF}}),
-                .size = target.size + 1,
-            };
+            const unservable: A.SyncTarget = .init(
+                Sha256.hash(&.{&.{0xFF}}),
+                target.end,
+                target.end + 1,
+            );
             var stale = try mpsc.channel(void, gpa, io, 1);
             defer stale.receiver.deinit();
             var source: Source = .{
                 .io = io,
                 .inner = &populated.source,
-                .stale_size = unservable.size,
+                .stale_size = unservable.end,
                 .stale_requests = stale.sender,
             };
             defer source.stale_requests.deinit();
@@ -378,14 +380,14 @@ fn reports_progress(comptime C: type, comptime DB: type) fn (Io) anyerror!void {
             defer future.cancel(io) catch {};
 
             try testing.expect((try reached.receiver.recv()).?.eql(target));
-            try testing.expect(try node.has_metric("sync_target_size", target.size));
-            try testing.expect(try node.has_metric("sync_size", target.size));
+            try testing.expect(try node.has_metric("sync_target_size", target.end));
+            try testing.expect(try node.has_metric("sync_size", target.end));
             // The target gauge advances to the superseding target while the synced gauge
             // still reports the reached one.
             try testing.expect(tips.sender.send_lossy(unservable));
             _ = try stale.receiver.recv();
-            try testing.expect(try node.has_metric("sync_target_size", unservable.size));
-            try testing.expect(try node.has_metric("sync_size", target.size));
+            try testing.expect(try node.has_metric("sync_target_size", unservable.end));
+            try testing.expect(try node.has_metric("sync_size", target.end));
         }
     }.body;
 }
@@ -403,7 +405,7 @@ fn supersedes_stale_target(comptime C: type, comptime DB: type) fn (Io) anyerror
             var source: Source = .{
                 .io = io,
                 .inner = &populated.source,
-                .stale_size = populated.targets[0].size,
+                .stale_size = populated.targets[0].end,
                 .stale_requests = stale.sender,
             };
             defer source.stale_requests.deinit();
@@ -437,12 +439,12 @@ fn supersedes_stale_target(comptime C: type, comptime DB: type) fn (Io) anyerror
     }.body;
 }
 
-test "stateful compact sync: the update forwarder stops after completion" {
-    inline for (cases) |C| try run(forwarder_stops(C));
-}
-
 test "stateful compact sync: a queued target is adopted before reaching the initial one" {
     inline for (cases) |C| try run(adopts_queued_target(C));
+}
+
+test "stateful compact sync: an unreachable target on tip_updates fails the sync" {
+    inline for (cases) |C| try run(fails_on_unreachable_update(C));
 }
 
 test "stateful compact sync: progress gauges from a compact source" {

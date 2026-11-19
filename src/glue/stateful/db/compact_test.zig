@@ -192,7 +192,8 @@ fn bounded_initialization(comptime C: type) !void {
         defer seed_db.deinit();
         try commit_inner(C, &seed_db.inner, &.{ 1, 2, 3 }, 11, null);
         first = seed_db.sync_target();
-        try testing.expectEqual(@as(u64, 5), first.size);
+        try testing.expectEqual(@as(u64, 5), first.end);
+        try testing.expectEqual(@as(u64, 4), first.start);
         try commit_inner(C, &seed_db.inner, &.{4}, 22, 1);
         latest = seed_db.sync_target();
     }
@@ -208,7 +209,8 @@ fn bounded_initialization(comptime C: type) !void {
     }
     // A cap inside a batch selects the preceding commit, but is not an exact sync target.
     var between = first;
-    between.size += 1;
+    between.start += 1;
+    between.end += 1;
     try testing.expectError(error.TargetMismatch, A.init(harness.env(), config, between));
 
     try expect_exact_restore(C, &harness, config, first);
@@ -217,7 +219,7 @@ fn bounded_initialization(comptime C: type) !void {
         defer reopened.deinit();
         // The exact restore durably discarded the later witness.
         try testing.expect(reopened.sync_target().eql(first));
-        try commit_inner(C, &reopened.inner, &.{5}, 33, first.size - 1);
+        try commit_inner(C, &reopened.inner, &.{5}, 33, first.end - 1);
         latest = reopened.sync_target();
         try reopened.prune(&latest);
     }
@@ -240,8 +242,8 @@ fn expect_exact_restore(
     defer exact.deinit();
     try C.expect_value(11, try exact.inner.get_metadata());
     try testing.expectEqual(@as(u64, 0), exact.inner.inactivity_floor());
-    const start = first.size - 1;
-    var response = try exact.inner.serve(.{ .boundary = .{ .size = first.size, .start = start } });
+    const start = first.end - 1;
+    var response = try exact.inner.serve(.{ .boundary = .{ .size = first.end, .start = start } });
     defer response.deinit(gpa);
     const served = response.boundary;
     const ops = [_]A.Operation{served.op};
@@ -364,7 +366,7 @@ test "stateful compact: apply and finalize persist batches" {
             try C.expect_value(1007, try guard.get().inner.get_metadata());
             target = guard.get().sync_target();
             try testing.expect(target.root.eql(expected_root));
-            try testing.expectEqual(@as(u64, 3), target.size);
+            try testing.expectEqual(@as(u64, 3), target.end);
         }
         var reopened = try C.Adapter.init(harness.env(), config, null);
         defer reopened.deinit();
@@ -385,7 +387,8 @@ test "stateful compact: apply retains each bounded initialization target" {
             defer shared.deinit();
             var first = try merkleize_one(C, shared, null, 1, 1001, null);
             defer first.deinit();
-            first_target = .{ .root = first.root(), .size = first.bounds().tip.size };
+            const size = first.bounds().tip.size;
+            first_target = .init(first.root(), size - 1, size);
             try shared.apply(&first);
             var second = try merkleize_one(C, shared, null, 2, 1002, null);
             defer second.deinit();
@@ -410,13 +413,10 @@ test "stateful compact: matches_sync_target rejects a wrong size" {
         defer shared.deinit();
         var merkleized = try merkleize_one(C, shared, null, 7, 1007, 1);
         defer merkleized.deinit();
-        const valid: C.Adapter.SyncTarget = .{
-            .root = merkleized.root(),
-            .size = merkleized.bounds().tip.size,
-        };
+        const size = merkleized.bounds().tip.size;
+        const valid: C.Adapter.SyncTarget = .init(merkleized.root(), size - 1, size);
         try testing.expect(C.Adapter.matches_sync_target(&merkleized, &valid));
-        var wrong_size = valid;
-        wrong_size.size -= 1;
+        const wrong_size: C.Adapter.SyncTarget = .init(merkleized.root(), size - 2, size - 1);
         try testing.expect(!C.Adapter.matches_sync_target(&merkleized, &wrong_size));
         var wrong_root = valid;
         wrong_root.root = hash_be(1);

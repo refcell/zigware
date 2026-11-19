@@ -763,16 +763,18 @@ test "stateful state sync: compact databases fetch compact state" {
     try expect_compact_sync(ImmutableCompact, mutate_immutable_compact);
 }
 
-test "stateful state sync: an unconvertible compact target fails the sync" {
+// commonware `StateSyncDb::sync_db`: an unreachable target, here a compact one covering more
+// than its last commit, fails the sync before any request.
+test "stateful state sync: a compact target wider than one commit fails the sync" {
     var node: Node = undefined;
     try node.init();
     defer node.deinit();
     var unused: KeylessCompact.Database = undefined;
     var compact_source: KeylessCompact.SyncSource = .{ .database = &unused };
-    const zero: KeylessCompact.SyncTarget = .{ .root = .{ .bytes = @splat(0) }, .size = 0 };
+    const wide: KeylessCompact.SyncTarget = .init(.{ .bytes = @splat(0) }, 0, 2);
     const config = node.compact_config(KeylessCompact);
     const source = &compact_source;
-    const result = sync_closed(KeylessCompact, node.env(), config, source, zero, engine_config);
+    const result = sync_closed(KeylessCompact, node.env(), config, source, wide, engine_config);
     try testing.expectError(error.InvalidTarget, result);
 }
 

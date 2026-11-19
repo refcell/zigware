@@ -1,6 +1,6 @@
 //! Building databases by state sync (commonware `glue/src/stateful/db/mod.rs`:
-//! `SyncEngineConfig`, `StateSyncDb`, `StateSyncSet` for `Shared`, `sync_standard_db`, and
-//! `sync_compact_db`).
+//! `SyncEngineConfig`, `StateSyncDb`, `StateSyncSet` for `Shared`, and `sync_standard_db`,
+//! which every qmdb adapter uses, compact included, as commonware's unified `Qmdb` adapter).
 //!
 //! # The StateSyncDb contract
 //!
@@ -94,8 +94,9 @@ fn SourceOf(comptime source: type) type {
     return info.pointer.child;
 }
 
-/// Syncs a standard database `DB` (a `qmdb.sync` Database whose operation log is retained)
-/// from `source` (commonware's `sync_standard_db`).
+/// Syncs a `qmdb.sync` Database `DB` from `source` (commonware's `Qmdb::sync_db`). The engine
+/// validates the initial target and every adopted update (`DB.validate_target`), so an
+/// unreachable one fails the sync either way.
 pub fn sync_standard_db(
     comptime DB: type,
     env: anytype,
@@ -120,124 +121,6 @@ pub fn sync_standard_db(
         .finish_rx = channels.finish,
         .reached_target_tx = channels.reached_target,
     });
-}
-
-/// Syncs a compact database `DB`, which keeps no operation log (commonware's
-/// `sync_compact_db`). Compact targets convert to engine targets: one that does not fails the
-/// sync as `target` and is ignored on `tip_updates`. Reached engine targets convert back.
-pub fn sync_compact_db(
-    comptime DB: type,
-    env: anytype,
-    config: DB.Config,
-    source: anytype,
-    target: qmdb.sync.CompactTarget(DB.Family, DB.Digest),
-    channels: Channels(qmdb.sync.CompactTarget(DB.Family, DB.Digest)),
-    sync_config: SyncEngineConfig,
-) !DB {
-    const Compact = qmdb.sync.CompactTarget(DB.Family, DB.Digest);
-    const Target = qmdb.sync.Target(DB.Family, DB.Digest);
-    const gpa = env.gpa;
-    const io = env.io;
-    var outer = channels;
-    errdefer outer.release();
-    var initial = try target.to_target();
-    // Start at the newest target already queued.
-    while (outer.tip_updates.try_recv()) |update| {
-        const converted = update.to_target() catch continue;
-        if (converted.advances(initial)) initial = converted;
-    } else |_| {}
-
-    var updates = try ring.channel(Target, gpa, io, 1);
-    defer updates.receiver.deinit();
-    const forward = Updates(Compact, Target).forward;
-    const forward_args = .{ outer.tip_updates, updates.sender };
-    var update_forwarder = io.concurrent(forward, forward_args) catch |err| {
-        updates.sender.deinit();
-        return err;
-    };
-    defer update_forwarder.cancel(io);
-
-    var reached = try Reached(Compact, Target).start(io, gpa, &outer);
-    defer reached.join(io);
-    return qmdb.sync.sync(DB, SourceOf(@TypeOf(source)), gpa, io, .{
-        .storage = env.storage,
-        .scope = env.scope,
-        .source = source,
-        .target = initial,
-        .max_outstanding_requests = sync_config.max_outstanding_requests,
-        .fetch_batch_size = sync_config.fetch_batch_size,
-        .apply_batch_size = sync_config.apply_batch_size,
-        .db_config = config,
-        .update_rx = &updates.receiver,
-        .finish_rx = outer.finish,
-        .reached_target_tx = reached.engine_sender(),
-    });
-}
-
-/// Forwards the compact targets on `tips` as engine targets until canceled or `out` closes.
-fn Updates(comptime Compact: type, comptime Target: type) type {
-    return struct {
-        /// Owns `out`.
-        fn forward(tips: *ring.Receiver(Compact), out: ring.Sender(Target)) void {
-            var sender = out;
-            defer sender.deinit();
-            while (true) {
-                const update = (tips.recv() catch return) orelse return;
-                const converted = update.to_target() catch continue;
-                assert(converted.end == update.size);
-                if (!sender.send_lossy(converted)) return;
-            }
-        }
-    };
-}
-
-/// The compact reporter's adapter: reached engine targets become compact targets.
-fn Reached(comptime Compact: type, comptime Target: type) type {
-    return struct {
-        const Self = @This();
-
-        engine: ?ring.Sender(Target) = null,
-        forwarder: ?Io.Future(void) = null,
-
-        /// Takes `channels.reached_target`, if any, and starts its forwarder.
-        fn start(io: Io, gpa: Allocator, channels: *Channels(Compact)) !Self {
-            const outer = channels.reached_target orelse return .{};
-            const pair = try ring.channel(Target, gpa, io, 1);
-            var self: Self = .{ .engine = pair.sender };
-            self.forwarder = io.concurrent(forward, .{ pair.receiver, outer }) catch |err| {
-                var receiver = pair.receiver;
-                receiver.deinit();
-                self.engine.?.deinit();
-                return err;
-            };
-            channels.reached_target = null; // The forwarder owns it now.
-            return self;
-        }
-
-        /// The sender the engine takes (and releases).
-        fn engine_sender(self: *Self) ?ring.Sender(Target) {
-            const sender = self.engine;
-            self.engine = null;
-            return sender;
-        }
-
-        /// Waits for the forwarder, which ends once the engine releases its sender.
-        fn join(self: *Self, io: Io) void {
-            assert(self.engine == null);
-            if (self.forwarder) |*future| future.await(io);
-        }
-
-        fn forward(engine: ring.Receiver(Target), out: ring.Sender(Compact)) void {
-            var receiver = engine;
-            defer receiver.deinit();
-            var sender = out;
-            defer sender.deinit();
-            while (true) {
-                const reached = (receiver.recv() catch return) orelse return;
-                if (!sender.send_lossy(.{ .root = reached.root, .size = reached.end })) return;
-            }
-        }
-    };
 }
 
 /// A synced single-database set and the anchor whose targets it reached.

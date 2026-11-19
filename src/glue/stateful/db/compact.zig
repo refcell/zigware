@@ -27,14 +27,14 @@ pub fn Compact(comptime F: type, comptime O: type, comptime H: type) type {
         pub const Value = D.Value;
         pub const Digest = D.Digest;
         pub const Config = D.Cfg;
-        /// The database's root at its operation count.
-        pub const SyncTarget = qmdb.sync.CompactTarget(F, D.Digest);
+        /// The database's root over its last commit, `[size - 1, size)`.
+        pub const SyncTarget = qmdb.sync.Target(F, D.Digest);
         pub const Shared = db.Shared(Self);
 
         inner: D,
 
         pub fn init(env: anytype, config: Config, expected: ?SyncTarget) !Self {
-            const max_size: ?u64 = if (expected) |target| target.size else null;
+            const max_size: ?u64 = if (expected) |target| target.end else null;
             var self: Self = .{ .inner = try D.init(env.gpa, env.storage, config, max_size) };
             errdefer self.inner.deinit();
             try db.validate_initialization(Self, &self, expected);
@@ -47,7 +47,7 @@ pub fn Compact(comptime F: type, comptime O: type, comptime H: type) type {
         }
 
         pub fn initial_sync_target() SyncTarget {
-            return .{ .root = qmdb.compact.initial_root(F, O, H), .size = 1 };
+            return .init(qmdb.compact.initial_root(F, O, H), 0, 1);
         }
 
         pub fn new_batch(context: db.BatchContext(Self)) !Unmerkleized {
@@ -55,7 +55,11 @@ pub fn Compact(comptime F: type, comptime O: type, comptime H: type) type {
         }
 
         pub fn matches_sync_target(batch: *const Merkleized, target: *const SyncTarget) bool {
-            return batch.root().eql(target.root) and target.size == batch.inner.bounds.tip.size;
+            const size = batch.inner.bounds.tip.size;
+            assert(size > 0);
+            return batch.root().eql(target.root) and
+                target.start == size - 1 and
+                target.end == size;
         }
 
         /// Applies `batch` and its unapplied ancestors; durability starts with `finalize`.
@@ -69,13 +73,13 @@ pub fn Compact(comptime F: type, comptime O: type, comptime H: type) type {
         }
 
         pub fn prune(self: *Self, target: *const SyncTarget) !void {
-            try self.inner.prune(target.size);
+            try self.inner.prune_to_target(target.*);
         }
 
         pub fn sync_target(self: *const Self) SyncTarget {
             const reached = self.inner.target();
             assert(reached.end == self.inner.size());
-            return .{ .root = reached.root, .size = reached.end };
+            return reached;
         }
 
         /// Serves peers' sync requests from this database's current peaks (commonware's
@@ -117,7 +121,7 @@ pub fn Compact(comptime F: type, comptime O: type, comptime H: type) type {
             channels: state_sync.Channels(SyncTarget),
             sync_config: state_sync.SyncEngineConfig,
         ) !Self {
-            const synced = try state_sync.sync_compact_db(
+            const synced = try state_sync.sync_standard_db(
                 D,
                 env,
                 config,
