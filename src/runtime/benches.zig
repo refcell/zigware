@@ -6,6 +6,10 @@
 //! - `runtime::network::echo`: concurrent TCP connections over loopback, each sending
 //!   fixed-size messages that the server echoes back, one at a time.
 //! - `runtime::storage`: concurrent blobs, each written page by page, synced, and read back.
+//! - `runtime::storage::<workload>`: commonware's filesystem workload bench
+//!   (`runtime/src/storage/benches`, ported in `storage/benches/`): fixed-size sequential and
+//!   random reads and overwrites, appends, durable writes, and an append with concurrent
+//!   readers, each timed for a fixed duration with sampled latency percentiles.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -35,6 +39,7 @@ pub fn run(runner: *bench.Runner) !void {
             const ring_ptr: ?*Ring = if (backend == .io_uring) &ring else null;
             try run_echo(runner, backend, ring_ptr);
             try run_storage(runner, backend, ring_ptr);
+            try run_filesystem(runner, backend, ring_ptr);
         }
     }
 }
@@ -219,3 +224,142 @@ fn storage_blob(load: *StorageLoad, index: u32) anyerror!void {
         if (page[page_size - 1] != @as(u8, @truncate(number))) return error.ReadMismatch;
     }
 }
+
+const fs_config = @import("storage/benches/config.zig");
+const fs_workload = @import("storage/benches/workload.zig");
+const fs_report = @import("storage/benches/report.zig");
+
+/// commonware's filesystem workloads with the flags each needs: smoke inputs time 10 ms on a
+/// 64 KiB file, standard ones 50 ms on 4 MiB.
+fn run_filesystem(runner: *bench.Runner, backend: Backend, ring: ?*Ring) !void {
+    const duration_ms = runner.inputs.pick(u64, 10, 50, 1_000);
+    const file_size = runner.inputs.pick(u64, 64 << 10, 4 << 20, 64 << 20);
+    const io_size = 4096;
+    const names = comptime @typeInfo(fs_config.Workload).@"enum".field_names;
+    inline for (names) |name| {
+        const workload = comptime std.meta.stringToEnum(fs_config.Workload, name).?;
+        var cfg = try filesystem_config(workload, backend, file_size);
+        cfg.duration_ns = duration_ms * std.time.ns_per_ms;
+        if (cfg.validate()) |message| std.debug.panic("bench config: {s}", .{message});
+        const benchmark = bench.Benchmark.init("runtime::storage::" ++ name)
+            .with_param("backend", @tagName(backend))
+            .with_param("inflight", cfg.inflight)
+            .with_param("io_size", io_size);
+        if (runner.matches(benchmark.name())) {
+            var load: FilesystemLoad = .{
+                .gpa = runner.allocator,
+                .io = runner.io,
+                .ring = ring,
+                .cfg = &cfg,
+            };
+            try runner.run(benchmark, &load);
+        }
+    }
+}
+
+/// The configuration commonware's CLI flags give `workload`, through `fs_config.parse`.
+fn filesystem_config(
+    comptime workload: fs_config.Workload,
+    backend: Backend,
+    file_size: u64,
+) !fs_config.Config {
+    var size_text: [24]u8 = undefined;
+    const size = try std.fmt.bufPrint(&size_text, "{d}", .{file_size});
+    const backend_name = if (backend == .io_uring) "iouring" else "tokio";
+    const common = [_][]const u8{
+        "--bench",    "--backend", backend_name, "--workload", @tagName(workload),
+        "--duration", "1",         "--io-size",  "4K",
+    };
+    const extra: []const []const u8 = switch (workload) {
+        .write_append => &.{ "--sync-every", "8", "--write-shape", "vectored" },
+        .write_seq => &.{ "--inflight", "4", "--file-size", size, "--sync-every", "8" },
+        .write_rand => &.{ "--inflight", "4", "--file-size", size, "--write-shape", "vectored" },
+        .write_sync => &.{
+            "--inflight",    "4",              "--file-size", size,
+            "--sync-method", "write_and_sync",
+        },
+        .read_seq, .read_rand, .read_write_append => &.{
+            "--inflight", "4",    "--file-size", size,
+            "--cache",    "warm", "--output",    "json",
+        },
+    };
+    var args: [common.len + 8][]const u8 = undefined;
+    @memcpy(args[0..common.len], &common);
+    @memcpy(args[common.len..][0..extra.len], extra);
+    return switch (fs_config.parse(args[0 .. common.len + extra.len])) {
+        .config => |config| config,
+        .invalid => |message| std.debug.panic("bench config: {s}", .{message}),
+    };
+}
+
+/// One iteration runs one timed workload (commonware's `run_benchmark`) on a fresh root and
+/// keeps its report for the metrics.
+const FilesystemLoad = struct {
+    gpa: Allocator,
+    io: Io,
+    ring: ?*Ring,
+    cfg: *fs_config.Config,
+    root_path: []u8 = &.{},
+    report: ?fs_report.Report = null,
+
+    pub fn setup(load: *FilesystemLoad) !void {
+        try Io.Dir.cwd().createDirPath(load.io, ".zig-cache/tmp");
+        load.root_path = try @import("storage/benches/filesystem.zig").prepare_root(
+            load.gpa,
+            load.io,
+            ".zig-cache/tmp",
+        );
+        load.cfg.root = load.root_path;
+    }
+
+    pub fn iter(load: *FilesystemLoad) !void {
+        const root = try Io.Dir.cwd().openDir(load.io, load.root_path, .{});
+        var storage: Storage = try .init(load.io, load.gpa, root, .{ .ring = load.ring });
+        defer storage.deinit();
+        const reopened = try Io.Dir.cwd().openDir(load.io, load.root_path, .{});
+        defer reopened.close(load.io);
+        const env: fs_workload.Env = .{
+            .gpa = load.gpa,
+            .io = load.io,
+            .storage = storage.storage(),
+            .root = reopened,
+        };
+        const report = try fs_workload.run_benchmark(&env, load.cfg);
+        assert(report.read != null or report.write != null);
+        if (report.write) |write| assert(write.ops > 0);
+        if (report.read) |read| assert(read.ops > 0);
+        if (load.cfg.workload == .write_append) {
+            assert(report.final_file_size == report.write.?.bytes);
+        }
+        // Both report formats render (commonware's `print_human` and `print_json`).
+        var text: [4096]u8 = undefined;
+        var writer: Io.Writer = .fixed(&text);
+        try report.print_human(&writer, load.cfg);
+        try report.print_json(&writer, load.cfg);
+        assert(std.mem.indexOf(u8, writer.buffered(), "final_file_size") != null);
+        load.report = report;
+    }
+
+    pub fn teardown(load: *FilesystemLoad) void {
+        @import("storage/benches/filesystem.zig").cleanup_root(load.io, load.root_path) catch |err|
+            std.log.warn("runtime benches: could not remove {s}: {t}", .{ load.root_path, err });
+        load.gpa.free(load.root_path);
+    }
+
+    pub fn metrics(load: *const FilesystemLoad, buffer: []bench.Metric) []const bench.Metric {
+        const report = load.report orelse return buffer[0..0];
+        var count: usize = 0;
+        if (report.read) |read| {
+            buffer[count] = .init("read_ops", read.ops);
+            buffer[count + 1] = .init("read_p99_latency_ns", read.p99_latency_ns);
+            count += 2;
+        }
+        if (report.write) |write| {
+            buffer[count] = .init("write_ops", write.ops);
+            buffer[count + 1] = .init("write_p99_latency_ns", write.p99_latency_ns);
+            count += 2;
+        }
+        buffer[count] = .init("final_file_size", report.final_file_size);
+        return buffer[0 .. count + 1];
+    }
+};
