@@ -997,3 +997,141 @@ test "partitioned ordered exhaustive traversal" {
         try expect_neighbor(index.prev_translated_key(key), i == 0, &.{prev_value});
     }
 }
+
+/// commonware's `run_index_cursor_insert_with_next`: inserting while on the last value leaves
+/// `next` at the end.
+fn run_cursor_insert_on_last(comptime I: type) !void {
+    var index = new(I);
+    defer index.deinit();
+    try insert_all(&index, "key", &.{ 123, 456 });
+    const expected = try values(&index, "key");
+    defer gpa.free(expected);
+    {
+        var cursor = index.get_mut("key").?;
+        defer cursor.finish();
+        try testing.expectEqual(expected[0], cursor.next().?.*);
+        try testing.expectEqual(expected[1], cursor.next().?.*);
+        try cursor.insert(789);
+        try testing.expect(cursor.next() == null);
+        try cursor.insert(999);
+    }
+    try expect_values(&index, "key", &.{ 123, 456, 789, 999 });
+}
+
+test "index cursor insert on the last value" {
+    inline for (indices) |I| try run_cursor_insert_on_last(I);
+}
+
+fn run_delete_in_middle_then_continue(comptime I: type) !void {
+    var index = new(I);
+    defer index.deinit();
+    try insert_all(&index, "key", &.{ 1, 2, 3 });
+    const expected = try values(&index, "key");
+    defer gpa.free(expected);
+    var cursor = index.get_mut("key").?;
+    defer cursor.finish();
+    try testing.expectEqual(expected[0], cursor.next().?.*);
+    try testing.expectEqual(expected[1], cursor.next().?.*);
+    cursor.delete();
+    try testing.expectEqual(expected[2], cursor.next().?.*);
+    try testing.expect(cursor.next() == null);
+    try testing.expect(cursor.next() == null);
+}
+
+test "index delete in middle then continue" {
+    inline for (indices) |I| try run_delete_in_middle_then_continue(I);
+}
+
+test "partitioned ordered keeps insertion order through cursor, retain, and get_many" {
+    // commonware's `test_soa_basic` and `test_soa_get_many_and_partitions`.
+    var index = new(PartitionedOrdered);
+    defer index.deinit();
+    const key = "duplicate";
+    try insert_all(&index, key, &.{ 1, 2, 3 });
+    try expect_counters(&index, 1, 3, null);
+    try expect_values_ordered(&index, key, &.{ 1, 2, 3 });
+    {
+        var cursor = index.get_mut(key).?;
+        defer cursor.finish();
+        for ([_]u64{ 1, 2, 3 }) |value| try testing.expectEqual(value, cursor.next().?.*);
+        try testing.expect(cursor.next() == null);
+    }
+    try insert_all(&index, key, &.{ 3, 4 });
+    index.retain(key, @as(u64, 3), not_equal);
+    try expect_values_ordered(&index, key, &.{ 1, 2, 4 });
+    var other = new(PartitionedOrdered);
+    defer other.deinit();
+    try insert_all(&other, "ab", &.{ 1, 2 });
+    try other.insert("abX", 3);
+    try other.insert("zz", 4);
+    var visits: Visits = .{};
+    defer visits.deinit();
+    other.get_many(&.{ "zz", "missing", "ab", "zz" }, &visits, Visits.visit);
+    try testing.expectEqualSlices(u64, &.{ 1, 2, 3 }, visits.lists[2].items);
+}
+
+test "partitioned ordered get_mut_or_insert" {
+    // commonware's `test_spill_get_mut_or_insert`, without the spill (one tree here).
+    var index = new(PartitionedOrdered);
+    defer index.deinit();
+    try index.insert(&.{ 0x10, 0x01 }, 1);
+    try index.insert(&.{ 0x10, 0x02 }, 2);
+    {
+        // An existing key returns a cursor over its values; the passed value is not inserted.
+        var cursor = (try index.get_mut_or_insert(&.{ 0x10, 0x01 }, 99)).?;
+        defer cursor.finish();
+        try testing.expectEqual(@as(u64, 1), cursor.next().?.*);
+        try testing.expect(cursor.next() == null);
+    }
+    try expect_counters(&index, 2, 2, null);
+    try expect_values_ordered(&index, &.{ 0x10, 0x01 }, &.{1});
+    // An absent key is inserted and returns null.
+    try testing.expect(try index.get_mut_or_insert(&.{ 0x10, 0x03 }, 3) == null);
+    try expect_counters(&index, 3, 3, null);
+    try expect_values_ordered(&index, &.{ 0x10, 0x03 }, &.{3});
+}
+
+const ProbeVisits = struct {
+    lists: []std.ArrayList(u64),
+
+    fn visit(self: *ProbeVisits, probe: usize, value: *const u64) void {
+        self.lists[probe].append(gpa, value.*) catch @panic("out of memory");
+    }
+};
+
+test "partitioned ordered get_many matches get" {
+    // commonware's `test_soa_get_many_matches_get` (its inline case; nothing spills here).
+    var index = new(PartitionedOrdered);
+    defer index.deinit();
+    // Partitions 0..128 hold 32 down to 1 keys; translated keys repeat every 24 entries.
+    var value: u64 = 0;
+    for (0..128) |partition| {
+        for (0..32 - partition % 32) |j| {
+            try index.insert(&.{ @intCast(partition), @intCast(j * 7 % 24) }, value);
+            value += 1;
+        }
+    }
+    var probes: [1550][2]u8 = undefined;
+    for (probes[0..1500], 0..) |*probe, i| {
+        const hash = std.mem.toBytes(std.mem.nativeToBig(u64, i *% 0x9e37_79b9_7f4a_7c15));
+        probe.* = .{ hash[0], hash[1] % 32 };
+    }
+    @memcpy(probes[1500..], probes[0..50]);
+    var keys: [probes.len][]const u8 = undefined;
+    for (&keys, &probes) |*key, *probe| key.* = probe;
+    const lists = try gpa.alloc(std.ArrayList(u64), probes.len);
+    defer gpa.free(lists);
+    @memset(lists, .empty);
+    defer for (lists) |*list| list.deinit(gpa);
+    var visits: ProbeVisits = .{ .lists = lists };
+    index.get_many(&keys, &visits, ProbeVisits.visit);
+    var misses: usize = 0;
+    var collisions: usize = 0;
+    for (&keys, lists) |key, list| {
+        try expect_values_ordered(&index, key, list.items);
+        misses += @intFromBool(list.items.len == 0);
+        collisions += @intFromBool(list.items.len > 1);
+    }
+    try testing.expect(misses > 0);
+    try testing.expect(collisions > 0);
+}

@@ -404,6 +404,14 @@ test "identity hasher integer writes differ" {
     var zero: UintIdentity = .{};
     zero.write_u8(0);
     try testing.expect(zero.finish() != h8.finish());
+    // 0 and 1 hash apart at every write width.
+    inline for (.{ u8, u16, u32, u64 }) |Int| {
+        var h0: UintIdentity = .{};
+        var h1: UintIdentity = .{};
+        @field(UintIdentity, "write_" ++ @typeName(Int))(&h0, 0);
+        @field(UintIdentity, "write_" ++ @typeName(Int))(&h1, 1);
+        try testing.expect(h0.finish() != h1.finish());
+    }
 }
 
 test "hashed consistency and seed determinism" {
@@ -429,6 +437,8 @@ test "hashed all cap sizes" {
     try testing.expectEqual(t1.transform("test"), t1.transform("test"));
     const t4 = Hashed(FourCap).from_seed(7, .{});
     try testing.expectEqual(t4.transform("test"), t4.transform("test"));
+    const t8 = Hashed(EightCap).from_seed(7, .{});
+    try testing.expectEqual(t8.transform("test"), t8.transform("test"));
     const tc = Hashed(Cap(3)).from_seed(7, .{});
     try testing.expect(Cap(3).eql(tc.transform("test"), tc.transform("test")));
 }
