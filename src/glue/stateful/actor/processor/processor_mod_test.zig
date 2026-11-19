@@ -136,6 +136,7 @@ test "stateful processor: rebuild_pending is incomplete once a parent fetch clos
 
 const runtime = @import("runtime");
 const db = @import("../../db/mod.zig");
+const test_io = @import("../../test_io.zig");
 const Any = harness_mod.Any;
 
 fn counter(harness: *Harness) !?u64 {
@@ -188,7 +189,7 @@ test "stateful processor: finalization persists state across a reopen" {
     }
     const env: db.Env = .{
         .gpa = gpa,
-        .io = testing.io,
+        .io = test_io.io,
         .storage = harness.storage.interface(),
         .scope = runtime.telemetry.metrics.Scope.init(&harness.registry).child("reopen"),
     };
@@ -279,6 +280,10 @@ fn finalize_task(harness: *Harness, block: TestBlock) anyerror!void {
 // commonware `execution_forks_from_finalizing_winner_before_database_apply`: while a
 // finalization waits to apply (a reader holds the database), its block stays forkable.
 test "stateful processor: a finalizing winner stays forkable before the apply" {
+    try test_io.run_on_deterministic(finalizing_winner_stays_forkable);
+}
+
+fn finalizing_winner_stays_forkable() anyerror!void {
     var harness: Harness = undefined;
     try harness.init();
     defer harness.deinit();
@@ -288,32 +293,32 @@ test "stateful processor: a finalizing winner stays forkable before the apply" {
     var guard = try harness.databases.readers().read();
     var guard_held = true;
     errdefer if (guard_held) guard.deinit();
-    var finalizing = try testing.io.concurrent(finalize_task, .{ &harness, winner });
+    var finalizing = try test_io.io.concurrent(finalize_task, .{ &harness, winner });
     // On failure, release the reader before stopping the finalization that waits on it.
     var finalizing_live = true;
     errdefer if (finalizing_live) {
         if (guard_held) guard.deinit();
         guard_held = false;
-        _ = finalizing.cancel(testing.io) catch {};
+        _ = finalizing.cancel(test_io.io) catch {};
     };
-    try testing.io.sleep(.fromMilliseconds(20), .awake); // The apply waits for the reader.
+    try test_io.io.sleep(.fromMilliseconds(20), .awake); // The apply waits for the reader.
     // Not applied yet (read through the held guard: a new read would queue behind the apply).
     try testing.expectEqual(null, try guard.get().inner.get(&harness_mod.counter_key()));
     // commonware polls the fork once: it must answer without waiting for the apply.
-    var fork = try testing.io.concurrent(fork_task, .{ &harness, winner.digest() });
+    var fork = try test_io.io.concurrent(fork_task, .{ &harness, winner.digest() });
     var answered = false;
     for (0..200) |_| {
         if (fork_done.load(.acquire)) {
             answered = true;
             break;
         }
-        try testing.io.sleep(.fromMilliseconds(1), .awake);
+        try test_io.io.sleep(.fromMilliseconds(1), .awake);
     }
     guard_held = false;
     guard.deinit(); // Unblocks a fork waiting behind the apply, so the test ends either way.
-    const forked = fork.await(testing.io);
+    const forked = fork.await(test_io.io);
     finalizing_live = false;
-    try finalizing.await(testing.io);
+    try finalizing.await(test_io.io);
     try testing.expect(answered);
     try forked;
     try testing.expectEqual(1, try counter(&harness));
@@ -415,7 +420,7 @@ test "stateful processor: a request leaving a shared flight leaves it running" {
     const genesis = TestBlock.genesis();
     const app: TestApp = .{ .probe = &probe };
     const execution = harness.execution;
-    const io = testing.io;
+    const io = test_io.io;
 
     const first = (try execution.join_flight(app, try harness.ancestry(&.{ block, genesis }))).?;
     try gate.started.recv();
@@ -454,10 +459,10 @@ test "stateful processor: a request leaving after completion hands the flight on
     const first = (try execution.join_flight(app, try harness.ancestry(&.{ block, genesis }))).?;
     try gate.started.recv();
     const second = (try execution.join_flight(app, try harness.ancestry(&.{ block, genesis }))).?;
-    var second_wait = try testing.io.concurrent(wait_and_release, .{ execution, second });
+    var second_wait = try test_io.io.concurrent(wait_and_release, .{ execution, second });
     try gate.open();
     execution.release(first); // Leaves without waiting for the result.
-    try second_wait.await(testing.io);
+    try second_wait.await(test_io.io);
     try testing.expect(execution.pending_contains(block.digest()));
     try testing.expect(execution.flights_idle());
 }
@@ -469,12 +474,12 @@ fn rebuild_task(harness: *Harness, target: TestBlock) anyerror!void {
 /// Waits until `count` requests hold the flight processing `digest` (bounded).
 fn await_joiners(execution: *harness_mod.Execution, digest: TestBlock.Digest, count: u32) !void {
     for (0..10_000) |_| {
-        execution.mutex.lockUncancelable(testing.io);
+        execution.mutex.lockUncancelable(test_io.io);
         const flight = execution.flights.get(digest);
         const joiners = if (flight) |value| value.joiners else 0;
-        execution.mutex.unlock(testing.io);
+        execution.mutex.unlock(test_io.io);
         if (joiners >= count) return;
-        try testing.io.sleep(.fromMilliseconds(1), .awake);
+        try test_io.io.sleep(.fromMilliseconds(1), .awake);
     }
     return error.TestTimedOut;
 }
@@ -498,7 +503,7 @@ test "stateful processor: overlapping rebuilds share processing across cancellat
     var gate: HeldGate = .{ .started = handles.started, .release = handles.release };
     defer gate.deinit();
     harness.app.probe = &probe;
-    const io = testing.io;
+    const io = test_io.io;
 
     var first = try io.concurrent(rebuild_task, .{ &harness, block2 });
     try gate.started.recv();
@@ -539,11 +544,11 @@ test "stateful processor: finalization prunes before the finalized hook complete
     defer gate.deinit();
     harness.processor.app.finalized_probe = &probe;
 
-    var finalizing = try testing.io.concurrent(finalize_task, .{ &harness, winner });
+    var finalizing = try test_io.io.concurrent(finalize_task, .{ &harness, winner });
     var live = true;
     errdefer if (live) {
         if (!gate.released) gate.open() catch {};
-        finalizing.await(testing.io) catch {};
+        finalizing.await(test_io.io) catch {};
     };
     try gate.started.recv();
     const execution = harness.execution;
@@ -552,5 +557,5 @@ test "stateful processor: finalization prunes before the finalized hook complete
     try testing.expect(!execution.pending_contains(loser.digest()));
     try gate.open();
     live = false;
-    try finalizing.await(testing.io);
+    try finalizing.await(test_io.io);
 }

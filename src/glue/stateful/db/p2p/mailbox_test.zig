@@ -10,10 +10,10 @@ const db = @import("../mod.zig");
 const mailbox_mod = @import("mailbox.zig");
 
 const gpa = testing.allocator;
-const io = testing.io;
 const oneshot = utils.channel.oneshot;
 const Family = storage.mmr.Family;
 const Digest = @import("cryptography").Sha256.Digest;
+const test_io = @import("../../test_io.zig");
 
 /// A database that is only a value.
 const TestDb = struct {
@@ -35,7 +35,7 @@ comptime {
 const request: Request = .{ .operations = .{ .size = 10, .start = 3, .max_ops = 2 } };
 
 fn shared(value: u64) !db.Shared(TestDb) {
-    return db.Shared(TestDb).init(gpa, io, "overflow", .{ .value = value });
+    return db.Shared(TestDb).init(gpa, test_io.io, "overflow", .{ .value = value });
 }
 
 /// Collects messages, refusing those `accept` rejects (a full ready queue).
@@ -65,13 +65,13 @@ test "stateful p2p mailbox: overflow keeps the latest database and orders live r
     try Message.handle(gpa, &overflow, .{ .attach_database = old });
 
     // A closed reply channel lets the overflow drop a fetch whose caller left.
-    const canceled = try utils.channel.mpsc.channel(Candidate, gpa, io, 1);
+    const canceled = try utils.channel.mpsc.channel(Candidate, gpa, test_io.io, 1);
     try Message.handle(gpa, &overflow, .{
         .get_operations = .{ .request = request, .response = canceled.sender },
     });
     var canceled_receiver = canceled.receiver;
     canceled_receiver.deinit();
-    const waiting = try utils.channel.mpsc.channel(Candidate, gpa, io, 1);
+    const waiting = try utils.channel.mpsc.channel(Candidate, gpa, test_io.io, 1);
     var waiting_receiver = waiting.receiver;
     defer waiting_receiver.deinit();
     try Message.handle(gpa, &overflow, .{
@@ -101,8 +101,8 @@ test "stateful p2p mailbox: overflow keeps the latest database and orders live r
 }
 
 fn new_mailbox() !struct { Mailbox, actor.mailbox.Receiver(Message) } {
-    const pair = try actor.mailbox.new(Message, gpa, io, 4);
-    return .{ Mailbox.init(io, pair.sender), pair.receiver };
+    const pair = try actor.mailbox.new(Message, gpa, test_io.io, 4);
+    return .{ Mailbox.init(test_io.io, pair.sender), pair.receiver };
 }
 
 fn candidate(value: u64) !Response {
@@ -120,15 +120,19 @@ const Fetching = struct {
 };
 
 test "stateful p2p mailbox: dropping a fetch closes its queued reply" {
+    try test_io.run_on_deterministic(dropping_fetch_closes_reply);
+}
+
+fn dropping_fetch_closes_reply() anyerror!void {
     // commonware `dropping_get_operations_closes_queued_reply`.
     var mailbox, var receiver = try new_mailbox();
     defer mailbox.deinit();
     defer receiver.deinit();
     var fetching: Fetching = .{ .mailbox = &mailbox };
-    var future = try io.concurrent(Fetching.run, .{&fetching});
+    var future = try test_io.io.concurrent(Fetching.run, .{&fetching});
     // Let the request be enqueued, then abandon the fetch.
-    try io.sleep(.fromMilliseconds(20), .awake);
-    try testing.expectError(error.Canceled, future.cancel(io));
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expectError(error.Canceled, future.cancel(test_io.io));
     var message = try receiver.try_recv();
     defer message.get_operations.response.deinit();
     try testing.expect(message.get_operations.request.eql(request));
@@ -141,17 +145,17 @@ test "stateful p2p mailbox: a closed response ends the fetch" {
     defer mailbox.deinit();
     defer receiver.deinit();
     var fetching: Fetching = .{ .mailbox = &mailbox };
-    var future = try io.concurrent(Fetching.run, .{&fetching});
+    var future = try test_io.io.concurrent(Fetching.run, .{&fetching});
     var message = (try receiver.recv()).?;
     try testing.expect(message.get_operations.request.eql(request));
     message.get_operations.response.deinit();
-    try testing.expectError(error.ResponseDropped, future.await(io));
+    try testing.expectError(error.ResponseDropped, future.await(test_io.io));
     try testing.expectError(error.Empty, receiver.try_recv());
 }
 
 /// Sends candidate `value` through `reply` and returns the receiver of its verdict.
 fn offer(reply: mailbox_mod.Reply(Response), value: u64) !oneshot.Receiver(bool) {
-    const verdict = try oneshot.channel(bool, gpa, io);
+    const verdict = try oneshot.channel(bool, gpa, test_io.io);
     const response = try candidate(value);
     try reply.try_send(.{ .gpa = gpa, .response = response, .verdict = verdict.sender });
     return verdict.receiver;
@@ -162,14 +166,14 @@ fn check_rejected_candidate(cancel: bool) !void {
     defer mailbox.deinit();
     defer receiver.deinit();
     var fetching: Fetching = .{ .mailbox = &mailbox };
-    var future = try io.concurrent(Fetching.run, .{&fetching});
+    var future = try test_io.io.concurrent(Fetching.run, .{&fetching});
     var message = (try receiver.recv()).?;
     const reply = message.get_operations.response;
     defer message.get_operations.response.deinit();
 
     var rejected = try offer(reply, 1);
     defer rejected.deinit();
-    var served = try future.await(io);
+    var served = try future.await(test_io.io);
     defer served.response.deinit(gpa);
     try testing.expectEqualSlices(u64, &.{1}, served.response.operations.operations);
     var feedback = served.feedback.?;

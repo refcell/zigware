@@ -14,9 +14,9 @@ const parallel = @import("parallel");
 const utils = @import("utils");
 const wire = @import("wire.zig");
 const actor_mod = @import("actor.zig");
+const test_io = @import("../test_io.zig");
 
 const gpa = testing.allocator;
-const io = testing.io;
 const mpsc = utils.channel.mpsc;
 const Digest = cryptography.Sha256.Digest;
 const ed25519 = consensus.simplex.scheme.ed25519;
@@ -51,21 +51,21 @@ const Sender = struct {
         const bytes = try std.mem.concat(gpa, u8, parts);
         errdefer gpa.free(bytes);
         const to: ?K = if (recipients == .one) recipients.one else null;
-        self.log.mutex.lockUncancelable(io);
-        defer self.log.mutex.unlock(io);
+        self.log.mutex.lockUncancelable(test_io.io);
+        defer self.log.mutex.unlock(test_io.io);
         try self.log.sent.append(gpa, .{ .to = to, .bytes = bytes });
         return gpa.alloc(K, 0);
     }
 
     fn count(self: Sender) usize {
-        self.log.mutex.lockUncancelable(io);
-        defer self.log.mutex.unlock(io);
+        self.log.mutex.lockUncancelable(test_io.io);
+        defer self.log.mutex.unlock(test_io.io);
         return self.log.sent.items.len;
     }
 
     fn at(self: Sender, index: usize) Sent {
-        self.log.mutex.lockUncancelable(io);
-        defer self.log.mutex.unlock(io);
+        self.log.mutex.lockUncancelable(test_io.io);
+        defer self.log.mutex.unlock(test_io.io);
         return self.log.sent.items[index];
     }
 
@@ -95,15 +95,15 @@ pub const Blocker = struct {
     log: *Log,
 
     pub fn block(self: Blocker, peer: K) p2p.Feedback {
-        self.log.mutex.lockUncancelable(io);
-        defer self.log.mutex.unlock(io);
+        self.log.mutex.lockUncancelable(test_io.io);
+        defer self.log.mutex.unlock(test_io.io);
         self.log.blocked.append(gpa, peer) catch return .closed;
         return .ok;
     }
 
     pub fn count(self: Blocker) usize {
-        self.log.mutex.lockUncancelable(io);
-        defer self.log.mutex.unlock(io);
+        self.log.mutex.lockUncancelable(test_io.io);
+        defer self.log.mutex.unlock(test_io.io);
         return self.log.blocked.items.len;
     }
 };
@@ -153,7 +153,7 @@ pub fn wait_for(context: anytype, comptime done: fn (@TypeOf(context)) bool) !vo
     var waited: u32 = 0;
     while (!done(context)) : (waited += 1) {
         if (waited > 2_000) return error.TestTimedOut;
-        try io.sleep(.fromMilliseconds(5), .awake);
+        try test_io.io.sleep(.fromMilliseconds(5), .awake);
     }
 }
 
@@ -184,11 +184,11 @@ test "stateful probe actor: discovers a floor, then serves peers" {
     defer block_log.blocked.deinit(gpa);
     const sender: Sender = .{ .log = &sent_log };
     const blocker: Blocker = .{ .log = &block_log };
-    var network = try mpsc.channel(NetMessage, gpa, io, 16);
+    var network = try mpsc.channel(NetMessage, gpa, test_io.io, 16);
     var network_open = true;
     defer if (network_open) network.sender.deinit();
 
-    const created = try Probe.init(gpa, io, .{
+    const created = try Probe.init(gpa, test_io.io, .{
         .provider = .init(&fixture.verifier),
         .blocker = blocker,
         .mailbox_size = 4,
@@ -199,10 +199,10 @@ test "stateful probe actor: discovers a floor, then serves peers" {
     var mailbox = created.mailbox;
     defer mailbox.deinit();
     var verify_rng = utils.rng.test_rng();
-    var task = try io.concurrent(Runner.run, .{ created.probe, &verify_rng });
+    var task = try test_io.io.concurrent(Runner.run, .{ created.probe, &verify_rng });
     var joined = false;
     defer if (!joined) {
-        task.cancel(io) catch {};
+        task.cancel(test_io.io) catch {};
     };
 
     // No subscriber, no request. A subscription solicits the committee, and the retry
@@ -237,7 +237,7 @@ test "stateful probe actor: discovers a floor, then serves peers" {
     while (sender.count() == before) : (attempts += 1) {
         if (attempts > 2_000) return error.TestTimedOut;
         try deliver(network.sender, fixture.participants[2], &.{0});
-        try io.sleep(.fromMilliseconds(5), .awake);
+        try test_io.io.sleep(.fromMilliseconds(5), .awake);
     }
     const served = sender.at(before);
     try testing.expect(served.to.?.eql(fixture.participants[2]));
@@ -265,11 +265,15 @@ test "stateful probe actor: discovers a floor, then serves peers" {
     // Closing the network stops the probe.
     network.sender.deinit();
     network_open = false;
-    try task.await(io);
+    try task.await(test_io.io);
     joined = true;
 }
 
 test "stateful probe actor: a canceled probe returns error.Canceled" {
+    try test_io.run_on_deterministic(canceled_probe_returns_canceled);
+}
+
+fn canceled_probe_returns_canceled() anyerror!void {
     // Swallowing the cancel would leave the caller's next wait unwakeable (AGENTS.md).
     var rng = utils.rng.test_rng();
     var fixture = try ed25519.fixture(Digest, gpa, &rng, "_COMMONWARE_GLUE_PROBE_TEST", 4);
@@ -278,9 +282,9 @@ test "stateful probe actor: a canceled probe returns error.Canceled" {
     defer Sender.free(&sent_log);
     var block_log: Blocker.Log = .{};
     defer block_log.blocked.deinit(gpa);
-    var network = try mpsc.channel(NetMessage, gpa, io, 16);
+    var network = try mpsc.channel(NetMessage, gpa, test_io.io, 16);
     defer network.sender.deinit();
-    const created = try Probe.init(gpa, io, .{
+    const created = try Probe.init(gpa, test_io.io, .{
         .provider = .init(&fixture.verifier),
         .blocker = .{ .log = &block_log },
         .mailbox_size = 4,
@@ -291,8 +295,8 @@ test "stateful probe actor: a canceled probe returns error.Canceled" {
     var mailbox = created.mailbox;
     defer mailbox.deinit();
     var verify_rng = utils.rng.test_rng();
-    var task = try io.concurrent(Runner.run, .{ created.probe, &verify_rng });
+    var task = try test_io.io.concurrent(Runner.run, .{ created.probe, &verify_rng });
     // Discovery waits for a subscriber; cancel it there.
-    try io.sleep(.fromMilliseconds(20), .awake);
-    try testing.expectError(error.Canceled, task.cancel(io));
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expectError(error.Canceled, task.cancel(test_io.io));
 }

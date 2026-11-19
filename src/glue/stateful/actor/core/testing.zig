@@ -11,9 +11,9 @@ const runtime = @import("runtime");
 const utils = @import("utils");
 pub const harness = @import("../processor/testing.zig");
 const processing_mod = @import("processing.zig");
+const test_io = @import("../../test_io.zig");
 
 const gpa = testing.allocator;
-const io = testing.io;
 const oneshot = utils.channel.oneshot;
 const Exact = utils.acknowledgement.Exact;
 const Harness = harness.Harness;
@@ -68,14 +68,15 @@ pub const Fixture = struct {
 
     fn start(fixture: *Fixture) !void {
         fixture.prunes = .empty;
-        const pair = try actor.mailbox.new(Message, gpa, io, 8);
+        const pair = try actor.mailbox.new(Message, gpa, test_io.io, 8);
         fixture.receiver = pair.receiver;
-        fixture.mailbox = Mailbox.init(gpa, io, pair.sender);
+        fixture.mailbox = Mailbox.init(gpa, test_io.io, pair.sender);
         const marshal: TestMarshal = .{ .prunes = &fixture.prunes };
         const processor = &fixture.harness.processor;
         const provider = fixture.harness.provider();
+        const io = test_io.io;
         fixture.processing = .init(gpa, io, &fixture.receiver, provider, marshal, processor);
-        fixture.future = try io.concurrent(run, .{&fixture.processing});
+        fixture.future = try test_io.io.concurrent(run, .{&fixture.processing});
     }
 
     fn run(processing: *Processing) anyerror!void {
@@ -86,7 +87,7 @@ pub const Fixture = struct {
     pub fn deinit(fixture: *Fixture) !void {
         if (fixture.mailbox) |*mailbox| mailbox.deinit();
         fixture.mailbox = null;
-        const outcome = if (fixture.future) |*future| future.await(io) else {};
+        const outcome = if (fixture.future) |*future| future.await(test_io.io) else {};
         fixture.processing.deinit();
         fixture.receiver.deinit();
         fixture.prunes.deinit(gpa);
@@ -102,7 +103,7 @@ pub const Fixture = struct {
 
     /// Sends a verification of `blocks` (newest first) and returns its verdict's receiver.
     pub fn verify(fixture: *Fixture, blocks: []const TestBlock) !oneshot.Receiver(bool) {
-        const pair = try oneshot.channel(bool, gpa, io);
+        const pair = try oneshot.channel(bool, gpa, test_io.io);
         try fixture.send(.{ .verify = .{
             .ancestry = try fixture.harness.ancestry(blocks),
             .verification = pair.sender,
@@ -125,7 +126,7 @@ pub const Fixture = struct {
         blocks: []const TestBlock,
         view: u64,
     ) !oneshot.Receiver(Mailbox.Digested) {
-        const pair = try oneshot.channel(Mailbox.Digested, gpa, io);
+        const pair = try oneshot.channel(Mailbox.Digested, gpa, test_io.io);
         try fixture.send(.{ .propose = .{
             .context = .{ .round = harness.round(view) },
             .ancestry = try fixture.harness.ancestry(blocks),
@@ -146,19 +147,19 @@ pub const Fixture = struct {
         const execution = fixture.harness.execution;
         // Each pass sleeps 1 ms; the bound is a hang guard.
         for (0..10_000) |_| {
-            execution.mutex.lockUncancelable(io);
+            execution.mutex.lockUncancelable(test_io.io);
             const flight = execution.flights.get(digest);
             const joiners = if (flight) |value| value.joiners else 0;
-            execution.mutex.unlock(io);
+            execution.mutex.unlock(test_io.io);
             if (joiners >= count) return;
-            try io.sleep(.fromMilliseconds(1), .awake);
+            try test_io.io.sleep(.fromMilliseconds(1), .awake);
         }
         return error.TestTimedOut;
     }
 
     /// Reports `block` finalized and returns its acknowledgement's waiter.
     pub fn finalize(fixture: *Fixture, block: TestBlock) !Exact.Waiter {
-        const handle = try Exact.handle(gpa, io);
+        const handle = try Exact.handle(gpa, test_io.io);
         const update: Mailbox.Update = .{ .block = .{
             .block = try harness.digested(block),
             .ack = handle.acknowledgement,

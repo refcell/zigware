@@ -17,9 +17,9 @@ const db = @import("../../db/mod.zig");
 const any_mod = @import("../../db/any.zig");
 const execution_mod = @import("execution.zig");
 const processor_mod = @import("processor.zig");
+const test_io = @import("../../test_io.zig");
 
 const gpa = testing.allocator;
-const io = testing.io;
 const oneshot = utils.channel.oneshot;
 const qmdb = storage.qmdb;
 const Sha256 = cryptography.Sha256;
@@ -140,17 +140,17 @@ pub const TestProvider = struct {
         child: *const Digested,
         bound: ?consensus.types.Round,
     ) !oneshot.Receiver(Digested) {
-        const pair = try oneshot.channel(Digested, gpa, io);
+        const pair = try oneshot.channel(Digested, gpa, test_io.io);
         var sender = pair.sender;
-        self.state.mutex.lockUncancelable(io);
+        self.state.mutex.lockUncancelable(test_io.io);
         self.state.fetches += 1;
         self.state.bounds.append(gpa, bound) catch {
-            self.state.mutex.unlock(io);
+            self.state.mutex.unlock(test_io.io);
             sender.deinit();
             return error.OutOfMemory;
         };
         const found = self.state.blocks.get(child.inner().parent());
-        self.state.mutex.unlock(io);
+        self.state.mutex.unlock(test_io.io);
         const block = found orelse {
             sender.deinit();
             return pair.receiver;
@@ -161,8 +161,8 @@ pub const TestProvider = struct {
     }
 
     pub fn canonical_digest(self: *TestProvider, at: Height) !?Sha256.Digest {
-        self.state.mutex.lockUncancelable(io);
-        defer self.state.mutex.unlock(io);
+        self.state.mutex.lockUncancelable(test_io.io);
+        defer self.state.mutex.unlock(test_io.io);
         return self.state.canonical.get(at.get());
     }
 };
@@ -190,18 +190,18 @@ pub const Probe = struct {
     }
 
     pub fn add_gate(probe: *Probe) !GateHandles {
-        const started = try oneshot.channel(void, gpa, io);
-        const release = try oneshot.channel(void, gpa, io);
+        const started = try oneshot.channel(void, gpa, test_io.io);
+        const release = try oneshot.channel(void, gpa, test_io.io);
         try probe.gates.append(gpa, .{ .started = started.sender, .release = release.receiver });
         return .{ .started = started.receiver, .release = release.sender };
     }
 
     pub fn call(probe: *Probe, digest: Sha256.Digest) !void {
         if (probe.target) |target| if (!digest.eql(target)) return;
-        probe.mutex.lockUncancelable(io);
+        probe.mutex.lockUncancelable(test_io.io);
         probe.calls += 1;
         const next: ?Gate = if (probe.gates.items.len > 0) probe.gates.orderedRemove(0) else null;
-        probe.mutex.unlock(io);
+        probe.mutex.unlock(test_io.io);
         var gate = next orelse return;
         defer gate.release.deinit();
         gate.started.send({}) catch unreachable; // The test awaits each start.
@@ -466,25 +466,25 @@ pub const FlushControl = struct {
     /// Finishes every held barrier successfully and holds no more: a held barrier would never
     /// complete, so tests defer this ahead of stopping the processing loop.
     pub fn release_all(control: *FlushControl) void {
-        control.mutex.lockUncancelable(io);
+        control.mutex.lockUncancelable(test_io.io);
         control.armed = false;
-        control.mutex.unlock(io);
+        control.mutex.unlock(test_io.io);
         while (control.pending() > 0) control.release_next({});
     }
 
     pub fn arm(control: *FlushControl) void {
-        control.mutex.lockUncancelable(io);
-        defer control.mutex.unlock(io);
+        control.mutex.lockUncancelable(test_io.io);
+        defer control.mutex.unlock(test_io.io);
         control.armed = true;
     }
 
     /// A new held completion when armed, else null.
     fn hold(control: *FlushControl) !?runtime.storage.Completion {
-        control.mutex.lockUncancelable(io);
-        defer control.mutex.unlock(io);
+        control.mutex.lockUncancelable(test_io.io);
+        defer control.mutex.unlock(test_io.io);
         if (!control.armed) return null;
         assert(control.count < capacity);
-        const completion = try runtime.storage.Completion.init_pending(gpa, io);
+        const completion = try runtime.storage.Completion.init_pending(gpa, test_io.io);
         control.held[control.count] = completion;
         control.count += 1;
         control.flushes += 1;
@@ -492,8 +492,8 @@ pub const FlushControl = struct {
     }
 
     pub fn pending(control: *FlushControl) usize {
-        control.mutex.lockUncancelable(io);
-        defer control.mutex.unlock(io);
+        control.mutex.lockUncancelable(test_io.io);
+        defer control.mutex.unlock(test_io.io);
         return control.count;
     }
 
@@ -502,14 +502,14 @@ pub const FlushControl = struct {
         // Each pass sleeps 1 ms; the bound is a hang guard.
         for (0..10_000) |_| {
             if (control.pending() > 0) return;
-            try io.sleep(.fromMilliseconds(1), .awake);
+            try test_io.io.sleep(.fromMilliseconds(1), .awake);
         }
         return error.TestTimedOut;
     }
 
     /// Completes the oldest held barrier with `result` (commonware's `release.send`).
     pub fn release_next(control: *FlushControl, result: runtime.storage.Error!void) void {
-        control.mutex.lockUncancelable(io);
+        control.mutex.lockUncancelable(test_io.io);
         assert(control.count > 0);
         const completion = control.held[0];
         std.mem.copyForwards(
@@ -518,7 +518,7 @@ pub const FlushControl = struct {
             control.held[1..control.count],
         );
         control.count -= 1;
-        control.mutex.unlock(io);
+        control.mutex.unlock(test_io.io);
         completion.finish(result);
         completion.release();
     }
@@ -634,7 +634,7 @@ pub const Harness = struct {
         errdefer harness.registry.deinit();
         const env: db.Env = .{
             .gpa = gpa,
-            .io = io,
+            .io = test_io.io,
             .storage = over,
             .scope = metrics.Scope.init(&harness.registry).child("db"),
         };
@@ -648,7 +648,7 @@ pub const Harness = struct {
             .digest = genesis.digest(),
         };
         errdefer harness.databases.deinit();
-        harness.processor = try .init(gpa, io, .{}, harness.databases, anchor, null);
+        harness.processor = try .init(gpa, test_io.io, .{}, harness.databases, anchor, null);
         harness.execution = harness.processor.execution;
         harness.provider_state = .{};
         errdefer harness.provider_state.deinit();

@@ -14,9 +14,9 @@ const state_sync = @import("../../db/state_sync.zig");
 const harness_mod = @import("../processor/testing.zig");
 const syncing_mod = @import("syncing.zig");
 const syncer_actor = @import("../syncer/actor.zig");
+const test_io = @import("../../test_io.zig");
 
 const gpa = testing.allocator;
-const io = testing.io;
 const oneshot = utils.channel.oneshot;
 const Exact = utils.acknowledgement.Exact;
 const metrics = runtime.telemetry.metrics;
@@ -60,7 +60,7 @@ const Retained = struct {
     fn init(blocks: []const Block) !Retained {
         var retained: Retained = .{};
         for (blocks) |block| {
-            const handle = try Exact.handle(gpa, io);
+            const handle = try Exact.handle(gpa, test_io.io);
             const pending: Pending = .{ .block = block, .acknowledgement = handle.acknowledgement };
             retained.pending[retained.len] = pending;
             retained.waiters[retained.len] = handle.waiter;
@@ -177,7 +177,7 @@ const MockMarshal = struct {
         _: TestBlock.Digest,
         _: core.CommitmentFallback,
     ) !oneshot.Receiver(Digested) {
-        var pair = try oneshot.channel(Digested, gpa, io);
+        var pair = try oneshot.channel(Digested, gpa, test_io.io);
         pair.sender.send(try harness_mod.digested(self.floor_block)) catch unreachable;
         return pair.receiver;
     }
@@ -252,7 +252,7 @@ const Node = struct {
     fn env(node: *Node) db.Env {
         return .{
             .gpa = gpa,
-            .io = io,
+            .io = test_io.io,
             .storage = node.storage.interface(),
             .scope = metrics.Scope.init(&node.registry).child("db"),
         };
@@ -297,7 +297,7 @@ fn run_syncing(syncing: *Syncing) anyerror!?Syncing.Ready {
 }
 
 fn report(mailbox: *Mailbox, block: TestBlock) !Exact.Waiter {
-    const handle = try Exact.handle(gpa, io);
+    const handle = try Exact.handle(gpa, test_io.io);
     const update: Mailbox.Update = .{ .block = .{
         .block = try harness_mod.digested(block),
         .ack = handle.acknowledgement,
@@ -326,14 +326,14 @@ test "stateful syncing: state sync hands off the finalizations retained above it
         .view = floor.round.view.get(),
         .proposal = .{ .payload = floor.digest() },
     } };
-    var gate = try oneshot.channel(void, gpa, io);
+    var gate = try oneshot.channel(void, gpa, test_io.io);
     var resolvers: Resolvers = .{
         .source = .{ .shared = source.databases.inner },
         .gate = gate.receiver,
     };
-    var pair = try actor.mailbox.new(Syncing.Message, gpa, io, 16);
+    var pair = try actor.mailbox.new(Syncing.Message, gpa, test_io.io, 16);
     defer pair.receiver.deinit();
-    var mailbox = Mailbox.init(gpa, io, pair.sender);
+    var mailbox = Mailbox.init(gpa, test_io.io, pair.sender);
     defer mailbox.deinit();
 
     var syncing = try Syncing.init(.{
@@ -354,7 +354,7 @@ test "stateful syncing: state sync hands off the finalizations retained above it
         .max_pending_acks = 8,
     });
     defer syncing.deinit();
-    var task = try io.concurrent(run_syncing, .{&syncing});
+    var task = try test_io.io.concurrent(run_syncing, .{&syncing});
 
     // While the sync waits on the gate: a covered, a reflected, and an applied block, a
     // database subscriber, and a verification, then a proposal the actor declines.
@@ -364,10 +364,10 @@ test "stateful syncing: state sync hands off the finalizations retained above it
     defer reflected.deinit();
     var applied = try report(&mailbox, blocks[2]);
     defer applied.deinit();
-    var subscriber = try oneshot.channel(Any.Shared, gpa, io);
+    var subscriber = try oneshot.channel(Any.Shared, gpa, test_io.io);
     defer subscriber.receiver.deinit();
     _ = try mailbox.sender.enqueue(.{ .subscribe_databases = subscriber.sender });
-    var verdict = try oneshot.channel(bool, gpa, io);
+    var verdict = try oneshot.channel(bool, gpa, test_io.io);
     defer verdict.receiver.deinit();
     _ = try mailbox.sender.enqueue(.{ .verify = .{
         .ancestry = try source.ancestry(&.{blocks[2]}),
@@ -379,7 +379,7 @@ test "stateful syncing: state sync hands off the finalizations retained above it
     try testing.expectError(error.Empty, subscriber.receiver.try_recv());
     try gate.sender.send({});
 
-    var ready = (try task.await(io)).?;
+    var ready = (try task.await(test_io.io)).?;
     defer ready.databases.deinit();
     defer ready.processor.deinit();
     defer ready.deferred.deinit(gpa);
@@ -444,8 +444,8 @@ const TestHarness = struct {
         if (pending) |parked| {
             h.source.init_storage();
             h.delayed = .init(gpa, h.source.storage.interface(), parked);
-            var releaser = try io.concurrent(release_loop, .{parked});
-            defer releaser.cancel(io) catch {};
+            var releaser = try test_io.io.concurrent(release_loop, .{parked});
+            defer releaser.cancel(test_io.io) catch {};
             try h.source.init_with(h.delayed.storage());
             for (h.blocks) |block| try h.source.provider_state.insert(block);
             try h.source.finalize(&h.blocks[0]);
@@ -463,14 +463,14 @@ const TestHarness = struct {
             .proposal = .{ .payload = h.blocks[0].digest() },
         } };
         h.resolvers = .{ .source = .{ .shared = h.source.databases.inner }, .gate = null };
-        const pair = try actor.mailbox.new(Syncing.Message, gpa, io, 16);
+        const pair = try actor.mailbox.new(Syncing.Message, gpa, test_io.io, 16);
         h.receiver = pair.receiver;
-        h.mailbox = Mailbox.init(gpa, io, pair.sender);
-        const syncer_pair = try actor.mailbox.new(SyncerMessage, gpa, io, 1);
+        h.mailbox = Mailbox.init(gpa, test_io.io, pair.sender);
+        const syncer_pair = try actor.mailbox.new(SyncerMessage, gpa, test_io.io, 1);
         h.syncer_receiver = syncer_pair.receiver;
-        const completion = try oneshot.channel(Syncing.Artifact, gpa, io);
+        const completion = try oneshot.channel(Syncing.Artifact, gpa, test_io.io);
         h.completion = completion.sender;
-        const syncer: Syncing.Syncer.Mailbox = .init(gpa, io, syncer_pair.sender);
+        const syncer: Syncing.Syncer.Mailbox = .init(gpa, test_io.io, syncer_pair.sender);
         h.syncing = Syncing.assemble(h.config(window), syncer, completion.receiver);
         h.syncing_alive = true;
     }
@@ -523,7 +523,7 @@ const TestHarness = struct {
 
     /// Retains block `index` with a fresh acknowledgement; its waiter is the caller's.
     fn retain(h: *TestHarness, index: usize, handoff: syncing_mod.Handoff) !Exact.Waiter {
-        const handle = try Exact.handle(gpa, io);
+        const handle = try Exact.handle(gpa, test_io.io);
         try h.syncing.pending.append(gpa, .{
             .block = try harness_mod.digested(h.blocks[index]),
             .acknowledgement = handle.acknowledgement,
@@ -540,7 +540,7 @@ fn release_loop(pending: *DelayedSync) Io.Cancelable!void {
     // Each pass sleeps 1 ms; only cancellation ends the loop.
     while (true) {
         if (pending.parked() > 0) pending.release_all();
-        try io.sleep(.fromMilliseconds(1), .awake);
+        try test_io.io.sleep(.fromMilliseconds(1), .awake);
     }
 }
 
@@ -609,7 +609,7 @@ test "stateful syncing: a retarget returning the artifact hands off the pending 
     var h: TestHarness = undefined;
     try h.init(1);
     defer h.deinit();
-    const handle = try Exact.handle(gpa, io);
+    const handle = try Exact.handle(gpa, test_io.io);
     var waiter = handle.waiter;
     defer waiter.deinit();
     var task: FinalizedTask = .{
@@ -617,12 +617,12 @@ test "stateful syncing: a retarget returning the artifact hands off the pending 
         .block = try harness_mod.digested(h.blocks[1]),
         .acknowledgement = handle.acknowledgement,
     };
-    var future = try io.concurrent(FinalizedTask.run, .{&task});
+    var future = try test_io.io.concurrent(FinalizedTask.run, .{&task});
     var retarget = try next_retarget(&h.syncer_receiver);
     try testing.expect(waiter.poll() == null);
     try retarget.response.send(try h.artifact(0));
     retarget.update.discard();
-    future.await(io);
+    future.await(test_io.io);
     const artifact = (try task.result).?;
     try testing.expectEqual(@as(u64, 1), artifact.anchor.height.get());
     // The block above the artifact is applied during handoff, not acknowledged yet.
@@ -658,11 +658,11 @@ test "stateful syncing: a partial ack window keeps the actor responsive until sy
     var h: TestHarness = undefined;
     try h.init(3);
     defer h.deinit();
-    var task = try io.concurrent(run_harness, .{&h});
+    var task = try test_io.io.concurrent(run_harness, .{&h});
     var waiters = try report_partial_window(&h);
     defer for (&waiters) |*waiter| waiter.deinit();
     try h.send_artifact(try h.artifact(0));
-    var ready = (try task.await(io)).?;
+    var ready = (try task.await(test_io.io)).?;
     defer release_ready(&ready);
     for (&waiters) |*waiter| try waiter.wait();
     try testing.expectEqual(@as(u64, 3), h.plan.completed.?.get());
@@ -673,13 +673,13 @@ test "stateful syncing: a partial window acknowledges before completion is recor
     var h: TestHarness = undefined;
     try h.init(3);
     defer h.deinit();
-    var task = try io.concurrent(run_harness, .{&h});
+    var task = try test_io.io.concurrent(run_harness, .{&h});
     var waiters = try report_partial_window(&h);
     defer for (&waiters) |*waiter| waiter.deinit();
     // The plan fails completion unless both receipts were acknowledged first.
     h.plan.acked_before = &waiters;
     try h.send_artifact(try h.artifact(0));
-    var ready = (try task.await(io)).?;
+    var ready = (try task.await(test_io.io)).?;
     defer release_ready(&ready);
     try testing.expectEqual(@as(u64, 3), h.plan.completed.?.get());
 }
@@ -690,7 +690,7 @@ test "stateful syncing: a partial window acknowledges before completion is recor
 fn advance_full_ack_window(h: *TestHarness) !void {
     var waiters: [3]Exact.Waiter = undefined;
     for (waiters[0..2], 1..) |*waiter, index| {
-        const handle = try Exact.handle(gpa, io);
+        const handle = try Exact.handle(gpa, test_io.io);
         waiter.* = handle.waiter;
         const block = try harness_mod.digested(h.blocks[index]);
         try testing.expect(try h.syncing.finalized(block, handle.acknowledgement) == null);
@@ -698,14 +698,14 @@ fn advance_full_ack_window(h: *TestHarness) !void {
         try testing.expectError(error.Empty, h.syncer_receiver.try_recv());
     }
     defer for (&waiters) |*waiter| waiter.deinit();
-    const handle = try Exact.handle(gpa, io);
+    const handle = try Exact.handle(gpa, test_io.io);
     waiters[2] = handle.waiter;
     var task: FinalizedTask = .{
         .syncing = &h.syncing,
         .block = try harness_mod.digested(h.blocks[3]),
         .acknowledgement = handle.acknowledgement,
     };
-    var future = try io.concurrent(FinalizedTask.run, .{&task});
+    var future = try test_io.io.concurrent(FinalizedTask.run, .{&task});
     var retarget = try next_retarget(&h.syncer_receiver);
     for (&waiters) |*waiter| try testing.expect(waiter.poll() == null);
     try retarget.response.send(null);
@@ -714,7 +714,7 @@ fn advance_full_ack_window(h: *TestHarness) !void {
     var recorder: Recorder = .{ .expected = newest.anchor };
     retarget.update.record(&recorder);
     try testing.expect(recorder.recorded);
-    future.await(io);
+    future.await(test_io.io);
     try testing.expect(try task.result == null);
     for (&waiters) |*waiter| try waiter.wait();
     try testing.expectEqual(@as(usize, 0), h.syncing.pending.items.len);
@@ -725,9 +725,9 @@ test "stateful syncing: a retarget waits for the ack window and releases it once
     try h.init(3);
     defer h.deinit();
     try advance_full_ack_window(&h);
-    var task = try io.concurrent(run_harness, .{&h});
+    var task = try test_io.io.concurrent(run_harness, .{&h});
     try h.send_artifact(try h.artifact(3));
-    var ready = (try task.await(io)).?;
+    var ready = (try task.await(test_io.io)).?;
     defer release_ready(&ready);
     try testing.expectEqual(@as(u64, 4), h.plan.completed.?.get());
 }
@@ -749,7 +749,7 @@ test "stateful syncing: shutdown during target observation keeps the floor and c
     try h.init(1);
     defer h.deinit();
     const initial = h.plan.selected;
-    const handle = try Exact.handle(gpa, io);
+    const handle = try Exact.handle(gpa, test_io.io);
     var waiter = handle.waiter;
     defer waiter.deinit();
     var task: FinalizedTask = .{
@@ -757,10 +757,10 @@ test "stateful syncing: shutdown during target observation keeps the floor and c
         .block = try harness_mod.digested(h.blocks[1]),
         .acknowledgement = handle.acknowledgement,
     };
-    var future = try io.concurrent(FinalizedTask.run, .{&task});
+    var future = try test_io.io.concurrent(FinalizedTask.run, .{&task});
     var retarget = try next_retarget(&h.syncer_receiver);
     try testing.expect(waiter.poll() == null); // Observation precedes acknowledgement.
-    future.cancel(io);
+    future.cancel(test_io.io);
     try testing.expectError(error.Canceled, task.result);
     try testing.expect(std.meta.eql(h.plan.floor().?.*, initial));
     // Dropping the actor and the pending update cancels the retained acknowledgement.
@@ -807,7 +807,7 @@ test "stateful syncing: an aborted handoff flush cancels the ack and keeps sync 
 
 /// Finalizes block `index` with a fresh acknowledgement while the window has room.
 fn finalize_retained(h: *TestHarness, index: usize) !Exact.Waiter {
-    const handle = try Exact.handle(gpa, io);
+    const handle = try Exact.handle(gpa, test_io.io);
     const block = try harness_mod.digested(h.blocks[index]);
     try testing.expect(try h.syncing.finalized(block, handle.acknowledgement) == null);
     try testing.expect(handle.waiter.poll() == null);
@@ -836,7 +836,7 @@ fn live_floor_redelivery(budget: ?u64) !bool {
         made += 1;
     }
     // The redelivered block 3 is the fourth receipt: it fills the window and retargets.
-    const handle = try Exact.handle(gpa, io);
+    const handle = try Exact.handle(gpa, test_io.io);
     waiters[made] = handle.waiter;
     made += 1;
     var task: FinalizedTask = .{
@@ -844,11 +844,11 @@ fn live_floor_redelivery(budget: ?u64) !bool {
         .block = try harness_mod.digested(h.blocks[2]),
         .acknowledgement = handle.acknowledgement,
     };
-    var future = try io.concurrent(FinalizedTask.run, .{&task});
+    var future = try test_io.io.concurrent(FinalizedTask.run, .{&task});
     var retarget = try next_retarget(&h.syncer_receiver);
     try retarget.response.send(try h.artifact(0));
     retarget.update.discard();
-    future.await(io);
+    future.await(test_io.io);
     const artifact = (try task.result).?;
     try testing.expectEqual(@as(usize, 4), h.syncing.pending.items.len);
 
@@ -900,7 +900,11 @@ fn transition_task(h: *TestHarness) anyerror!Syncing.Ready {
 // source database's real syncs parked in `DelayedSync` (commonware gates a mock database's
 // flush), so one barrier shows as both blocks applied while the first sync is held.
 test "stateful syncing: a transition coalesces handoff durability before completion" {
-    var pending: DelayedSync = .init(gpa, io);
+    try test_io.run_on_deterministic(transition_coalesces_durability);
+}
+
+fn transition_coalesces_durability() anyerror!void {
+    var pending: DelayedSync = .init(gpa, test_io.io);
     defer pending.deinit();
     var h: TestHarness = undefined;
     try h.init_over(1, &pending);
@@ -915,18 +919,18 @@ test "stateful syncing: a transition coalesces handoff durability before complet
     defer first.deinit();
     var second = try h.retain(2, .apply);
     defer second.deinit();
-    var task = try io.concurrent(transition_task, .{&h});
+    var task = try test_io.io.concurrent(transition_task, .{&h});
     var running = true;
-    defer if (running) if (task.cancel(io)) |ready| {
+    defer if (running) if (task.cancel(test_io.io)) |ready| {
         var owned = ready;
         release_ready(&owned);
     } else |_| {};
     // Each pass sleeps 1 ms; the handoff's flush parks once both blocks applied.
     for (0..2_000) |_| {
         if (pending.parked() > 0) break;
-        try io.sleep(.fromMilliseconds(1), .awake);
+        try test_io.io.sleep(.fromMilliseconds(1), .awake);
     } else return error.TestFlushNeverParked;
-    try io.sleep(.fromMilliseconds(20), .awake);
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
     // Both blocks applied before the one held flush, and only the reflected block is
     // acknowledged.
     try testing.expectEqual(@as(u32, 2), captures.calls);
@@ -934,12 +938,12 @@ test "stateful syncing: a transition coalesces handoff durability before complet
     try testing.expect(first.poll() == null and second.poll() == null);
     try testing.expectEqual(@as(?Height, null), h.plan.completed);
 
-    var releaser = try io.concurrent(release_loop, .{&pending});
-    defer releaser.cancel(io) catch {};
+    var releaser = try test_io.io.concurrent(release_loop, .{&pending});
+    defer releaser.cancel(test_io.io) catch {};
     try first.wait();
     try second.wait();
     running = false;
-    var ready = try task.await(io);
+    var ready = try task.await(test_io.io);
     defer release_ready(&ready);
     try testing.expectEqual(@as(u64, 3), h.plan.completed.?.get());
 }

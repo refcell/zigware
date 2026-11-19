@@ -11,7 +11,6 @@ const utils = @import("utils");
 const fixture_mod = @import("testing.zig");
 
 const gpa = testing.allocator;
-const io = testing.io;
 const harness = fixture_mod.harness;
 const Fixture = fixture_mod.Fixture;
 const Mailbox = fixture_mod.Mailbox;
@@ -51,7 +50,7 @@ const Held = struct {
         // Each pass sleeps 1 ms; the bound is a hang guard.
         for (0..10_000) |_| {
             if (held.started.is_ready()) return held.started.recv();
-            try io.sleep(.fromMilliseconds(1), .awake);
+            try test_io.io.sleep(.fromMilliseconds(1), .awake);
         }
         return error.TestTimedOut;
     }
@@ -73,7 +72,7 @@ fn await_ready(comptime T: type, receiver: *oneshot.Receiver(T)) !T {
     // Each pass sleeps 1 ms; the bound is a hang guard.
     for (0..10_000) |_| {
         if (receiver.is_ready()) return receiver.recv();
-        try io.sleep(.fromMilliseconds(1), .awake);
+        try test_io.io.sleep(.fromMilliseconds(1), .awake);
     }
     return error.TestTimedOut;
 }
@@ -83,7 +82,7 @@ fn await_acknowledged(waiter: *const utils.acknowledgement.Exact.Waiter) !void {
     // Each pass sleeps 1 ms; the bound is a hang guard.
     for (0..10_000) |_| {
         if (waiter.poll()) |outcome| return outcome;
-        try io.sleep(.fromMilliseconds(1), .awake);
+        try test_io.io.sleep(.fromMilliseconds(1), .awake);
     }
     return error.TestTimedOut;
 }
@@ -91,7 +90,7 @@ fn await_acknowledged(waiter: *const utils.acknowledgement.Exact.Waiter) !void {
 /// Sends a prepare on `blocks` (the parent first) at view `0xff` without waiting, and returns
 /// its answer's receiver.
 fn prepare_async(fixture: *Fixture, blocks: []const TestBlock) !oneshot.Receiver(Mailbox.Built) {
-    const pair = try oneshot.channel(Mailbox.Built, gpa, io);
+    const pair = try oneshot.channel(Mailbox.Built, gpa, test_io.io);
     try fixture.send(.{ .propose = .{
         .context = .{ .round = harness.round(0xff) },
         .ancestry = try fixture.harness.ancestry(blocks),
@@ -113,14 +112,14 @@ const AncestryGate = struct {
     live: u32 = 0,
 
     fn read(gate: *AncestryGate, comptime field: []const u8) @FieldType(AncestryGate, field) {
-        gate.mutex.lockUncancelable(io);
-        defer gate.mutex.unlock(io);
+        gate.mutex.lockUncancelable(test_io.io);
+        defer gate.mutex.unlock(test_io.io);
         return @field(gate, field);
     }
 
     fn release(gate: *AncestryGate) void {
-        gate.mutex.lockUncancelable(io);
-        defer gate.mutex.unlock(io);
+        gate.mutex.lockUncancelable(test_io.io);
+        defer gate.mutex.unlock(test_io.io);
         gate.open = true;
     }
 
@@ -128,7 +127,7 @@ const AncestryGate = struct {
     fn await_parked(gate: *AncestryGate) !void {
         for (0..10_000) |_| {
             if (gate.read("parked")) return;
-            try io.sleep(.fromMilliseconds(1), .awake);
+            try test_io.io.sleep(.fromMilliseconds(1), .awake);
         }
         return error.TestTimedOut;
     }
@@ -153,9 +152,9 @@ const GatedAncestry = struct {
     ) !harness.Execution.Ancestry {
         std.debug.assert(blocks.len <= 3 and always <= blocks.len);
         var ancestry: GatedAncestry = .{ .gate = gate, .always = always };
-        gate.mutex.lockUncancelable(io);
+        gate.mutex.lockUncancelable(test_io.io);
         gate.live += 1;
-        gate.mutex.unlock(io);
+        gate.mutex.unlock(test_io.io);
         for (blocks, 0..) |block, index| ancestry.blocks[index] = try harness.digested(block);
         return harness.Execution.Ancestry.init(gpa, ancestry);
     }
@@ -171,7 +170,7 @@ const GatedAncestry = struct {
 
     pub fn next(self: *GatedAncestry) !?harness.Digested {
         // Waits for the gate (cancelable): a gate that never opens never ends the stream.
-        while (!self.available()) try io.sleep(.fromMilliseconds(1), .awake);
+        while (!self.available()) try test_io.io.sleep(.fromMilliseconds(1), .awake);
         if (self.index >= self.blocks.len) return null;
         const block = self.blocks[self.index] orelse return null;
         self.blocks[self.index] = null;
@@ -180,10 +179,10 @@ const GatedAncestry = struct {
     }
 
     pub fn clone(self: *const GatedAncestry) !GatedAncestry {
-        self.gate.mutex.lockUncancelable(io);
+        self.gate.mutex.lockUncancelable(test_io.io);
         self.gate.clones += 1;
         self.gate.live += 1;
-        self.gate.mutex.unlock(io);
+        self.gate.mutex.unlock(test_io.io);
         var copy = self.*;
         copy.acquisition = true;
         for (&copy.blocks) |*slot| {
@@ -194,8 +193,8 @@ const GatedAncestry = struct {
 
     pub fn deinit(self: *GatedAncestry) void {
         for (&self.blocks) |*slot| if (slot.*) |*block| block.deinit();
-        self.gate.mutex.lockUncancelable(io);
-        defer self.gate.mutex.unlock(io);
+        self.gate.mutex.lockUncancelable(test_io.io);
+        defer self.gate.mutex.unlock(test_io.io);
         std.debug.assert(self.gate.live > 0);
         self.gate.live -= 1;
         if (self.acquisition) self.gate.parked = true;
@@ -207,7 +206,7 @@ fn verify_with(
     fixture: *Fixture,
     ancestry: harness.Execution.Ancestry,
 ) !oneshot.Receiver(bool) {
-    const pair = try oneshot.channel(bool, gpa, io);
+    const pair = try oneshot.channel(bool, gpa, test_io.io);
     try fixture.send(.{ .verify = .{ .ancestry = ancestry, .verification = pair.sender } });
     return pair.receiver;
 }
@@ -568,10 +567,11 @@ test "stateful processing: finalization completes a proposal a verification join
 }
 
 const Handler = @import("verifications.zig").Verifications(harness.TestP);
+const test_io = @import("../../test_io.zig");
 
 /// Schedules a verification over `ancestry` (taken) and returns its verdict's receiver.
 fn schedule(state: *Handler, ancestry: harness.Execution.Ancestry) !oneshot.Receiver(bool) {
-    const pair = try oneshot.channel(bool, gpa, io);
+    const pair = try oneshot.channel(bool, gpa, test_io.io);
     state.schedule(.{ .verify = .{ .ancestry = ancestry, .verification = pair.sender } });
     return pair.receiver;
 }
@@ -582,7 +582,7 @@ fn drive_until_started(state: *Handler, held: *Held) !void {
     for (0..10_000) |_| {
         state.complete_ready();
         if (held.started.is_ready()) return held.started.recv();
-        try io.sleep(.fromMilliseconds(1), .awake);
+        try test_io.io.sleep(.fromMilliseconds(1), .awake);
     }
     return error.TestTimedOut;
 }
@@ -593,7 +593,7 @@ fn drive_verdict(state: *Handler, verdict: *oneshot.Receiver(bool)) !bool {
     for (0..10_000) |_| {
         state.complete_ready();
         if (verdict.is_ready()) return verdict.recv();
-        try io.sleep(.fromMilliseconds(1), .awake);
+        try test_io.io.sleep(.fromMilliseconds(1), .awake);
     }
     return error.TestTimedOut;
 }
@@ -604,7 +604,7 @@ fn drive_closed(state: *Handler, sender: *const oneshot.Sender(void)) !void {
     for (0..10_000) |_| {
         state.complete_ready();
         if (sender.is_closed()) return;
-        try io.sleep(.fromMilliseconds(1), .awake);
+        try test_io.io.sleep(.fromMilliseconds(1), .awake);
     }
     return error.TestTimedOut;
 }
@@ -615,7 +615,7 @@ fn drive_until_len(state: *Handler, len: usize) !void {
     for (0..10_000) |_| {
         state.complete_ready();
         if (state.len() == len) return;
-        try io.sleep(.fromMilliseconds(1), .awake);
+        try test_io.io.sleep(.fromMilliseconds(1), .awake);
     }
     return error.TestTimedOut;
 }
@@ -662,7 +662,7 @@ fn maintenance(ready_loser: bool) !void {
     var sibling_gate = try Held.add(&probe);
     defer sibling_gate.deinit();
     var pending_gate: AncestryGate = .{};
-    var state: Handler = .init(gpa, io, h.processor.verifier(), h.provider());
+    var state: Handler = .init(gpa, test_io.io, h.processor.verifier(), h.provider());
     defer state.deinit();
     state.verifier.app.probe = &probe;
 
@@ -720,19 +720,19 @@ fn pause_rejecting_loser(
     if (ready_loser) {
         try losing_gate.open();
         // Let the losing execution finish before the pause starts.
-        try io.sleep(.fromMilliseconds(20), .awake);
+        try test_io.io.sleep(.fromMilliseconds(20), .awake);
     }
     var finalized = try harness.digested(parent);
     defer finalized.deinit();
     const boundary = try h.processor.boundary(&finalized);
-    var pausing = try io.concurrent(pause_on, .{ state, boundary });
+    var pausing = try test_io.io.concurrent(pause_on, .{ state, boundary });
     if (!ready_loser) {
         // The pause waits for the running loser.
-        try io.sleep(.fromMilliseconds(20), .awake);
+        try test_io.io.sleep(.fromMilliseconds(20), .awake);
         try testing.expect(!losing_gate.release.?.is_closed());
         try losing_gate.open();
     }
-    try pausing.await(io);
+    try pausing.await(test_io.io);
 }
 
 // commonware `maintenance_preserves_owned_requests_and_retained_work` (ready_loser case):
@@ -741,11 +741,19 @@ fn pause_rejecting_loser(
 // callers cancel. Adapted: it drives the `Verifications` handler directly, as commonware
 // drives its `Handler`; the pause runs on its own task.
 test "stateful processing: maintenance rejects a ready loser and keeps retained work" {
+    try test_io.run_on_deterministic(maintenance_ready_loser);
+}
+
+fn maintenance_ready_loser() anyerror!void {
     try maintenance(true);
 }
 
 // commonware `maintenance_preserves_owned_requests_and_retained_work` (running_loser case):
 // the same with the loser still executing when the pause starts.
 test "stateful processing: maintenance rejects a running loser and keeps retained work" {
+    try test_io.run_on_deterministic(maintenance_running_loser);
+}
+
+fn maintenance_running_loser() anyerror!void {
     try maintenance(false);
 }
