@@ -46,7 +46,8 @@ pub fn Tests(comptime h: type) type {
                 const round: h.Round = .new(epoch, .new(view));
                 var buffer: [128]u8 = undefined;
                 const contents = h.mock_contents(&buffer, round, parent, view);
-                const proposal: h.Proposal = .init(round, .new(view - 1), h.Sha256.hash(&.{contents}));
+                const payload = h.Sha256.hash(&.{contents});
+                const proposal: h.Proposal = .init(round, .new(view - 1), payload);
                 net.relay.broadcast(net.keys()[outgoing], .all, proposal.payload, contents);
                 try stack.mailbox.proposal(proposal);
                 // Bounded by the 5 s wait per message.
