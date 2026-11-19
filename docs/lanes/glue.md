@@ -369,7 +369,8 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/core/mailbox.rs | 2 | 2 | 0 | 0 | |
 | stateful/actor/core/mod.rs | 4 | 4 | 0 | 0 | |
 | stateful/actor/core/syncing.rs | 16 | 15 | 0 | 1 | |
-| stateful/actor/core/processing.rs | 86 | 0 | 86 | 0 | u |
+| stateful/actor/core/processing.rs, 1070-3396 | 47 | see backlog | see backlog | | u |
+| stateful/actor/core/processing.rs, 3451-5885 | 39 | 33 | 0 | 6 | |
 | stateful/actor/processor/mod.rs | 44 | 22 | 22 | 0 | u |
 | stateful/tests/mod.rs, floor.rs | 28 | 17 | 11 | 0 | j |
 | **total** | **469** | **326** | **119** | **24** | |
@@ -411,9 +412,18 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
     zigware's barrier is synchronous, and the partial-window test checks the
     ack-before-completion order it also covers.
 - Open, u (utils):
-  - core/processing.rs: all 86 scenarios. zigware's 16 core unit tests (processing,
-    verifications, durability, stateful) cover the same mechanisms, but none is a one-to-one
-    port.
+  - core/processing.rs, first half (1070-3396): see the backlog line.
+  - core/processing.rs, second half (3451-5885), done in core/processing_late_test.zig: 32
+    zigware tests for 39 cases (24 `#[test]`, 7 rstests with 15 cases). 5325
+    `ready_aborted_flush_stops_processing` is covered by 5285's test, since no barrier is ever
+    left pending. Not portable: the should_panic tests 4754 and 5474, and four that need a
+    barrier that is still pending: 4822
+    `stable_leader_finalizations_coalesce_while_barrier_pending`, 5181
+    `shutdown_preempts_successor_barrier_waiting_for_verification_reader`, 5448
+    `shutdown_cancels_pending_flush_ack`, and 4504 `duplicate_reports_wait_for_durability`'s
+    failure case. Portable once storage-merkle's async start_sync rollout (step 6, glue's
+    barriers) lands; the adapted tests that skip held-flush checks (4055, 4184, 4327, 4405,
+    4548, 5238, 5285, 5365) can then gain them. Each test's doc comment records its adaptation.
   - processor/mod.rs: the `rebuild_pending` rejections (7), the finalize panics and duplicates
     (6), the in-flight winner and late losing fork, forking before apply, ancestry across
     recovery, the dropped-flight and woken-request hand-offs, overlapping rebuilds, and the
