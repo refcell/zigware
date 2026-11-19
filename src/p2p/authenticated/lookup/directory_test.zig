@@ -394,3 +394,273 @@ test "blocking ourselves records nothing" {
     try testing.expectEqual(@as(?i64, null), value);
     try testing.expect(!dir.unblock_expired(at_ms(101_000)));
 }
+
+fn public(a: u8, b: u8, c: u8, d: u8, port: u16) types.Address {
+    return .{ .symmetric = socket(a, b, c, d, port) };
+}
+
+/// Tracks `peer` alone as primary at index 0, which tears nothing down.
+fn track_alone(dir: *Dir, peer: Key, address: types.Address) !void {
+    try expect_kills(try track(dir, 0, &.{.{ .key = peer, .value = address }}, &.{}), &.{});
+}
+
+fn expect_ingress(dir: *const Dir, peer: Key, expected: types.Address) !void {
+    const ingress = dir.peers.get(peer).?.ingress().?;
+    try testing.expect(ingress.eql(expected.ingress()));
+}
+
+fn ip_listed(ips: []const codec.IpAddr, wanted: codec.IpAddr) bool {
+    for (ips) |listed| if (listed.order(wanted) == .eq) return true;
+    return false;
+}
+
+fn expect_listenable(dir: *const Dir, now: SystemTime, wanted: codec.IpAddr, listed: bool) !void {
+    const ips = try dir.listenable(gpa, now);
+    defer gpa.free(ips);
+    try testing.expectEqual(listed, ip_listed(ips, wanted));
+}
+
+/// Whether `peer` is dialable at `now`, and that `next_query_at` matches `next`.
+fn expect_dialable(dir: *const Dir, now: SystemTime, peer: Key, next: ?SystemTime) !bool {
+    const dialable = try dir.dialable(gpa, now);
+    defer gpa.free(dialable.peers);
+    try testing.expectEqual(next, dialable.next_query_at);
+    for (dialable.peers) |listed| if (Key.order(listed, peer) == .eq) return true;
+    return false;
+}
+
+test "track overwrites addresses and ignores our own" {
+    // commonware `test_track_overwrite`.
+    var three_sets = config;
+    three_sets.max_sets = 3;
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, three_sets);
+    defer dir.deinit();
+    const pk1 = key(1);
+    const pk2 = key(2);
+    const updates = "directory_updates_total";
+    const first: Entry = .{ .key = pk1, .value = local(1235) };
+    const second: Entry = .{ .key = pk2, .value = local(1236) };
+    try expect_kills(try track(&dir, 0, &.{ first, second }, &.{}), &.{});
+    try testing.expect(dir.peers.get(key(0)).?.ingress() == null);
+    try expect_ingress(&dir, pk1, local(1235));
+    try expect_ingress(&dir, pk2, local(1236));
+    try testing.expect(!dir.peers.contains(key(3)));
+    try testing.expectEqual(@as(?i64, null), try metric_value(&registry, updates, pk1));
+    try expect_kills(try track(&dir, 1, &.{.{ .key = pk1, .value = local(1238) }}, &.{}), &.{});
+    try testing.expect(dir.peers.get(key(0)).?.ingress() == null);
+    try expect_ingress(&dir, pk1, local(1238));
+    try expect_ingress(&dir, pk2, local(1236));
+    try testing.expectEqual(@as(?i64, 1), try metric_value(&registry, updates, pk1));
+    // Our own address in a set never gives us an ingress.
+    try expect_kills(try track(&dir, 2, &.{.{ .key = key(0), .value = local(1237) }}, &.{}), &.{});
+    try testing.expect(dir.peers.get(key(0)).?.ingress() == null);
+    try expect_ingress(&dir, pk1, local(1238));
+    try expect_ingress(&dir, pk2, local(1236));
+    try testing.expect(!dir.peers.contains(key(3)));
+    try expect_kills(try track(&dir, 3, &.{.{ .key = key(0), .value = local(1234) }}, &.{}), &.{});
+    try expect_kills(try track(&dir, 4, &.{.{ .key = key(0), .value = local(1237) }}, &.{}), &.{});
+    try testing.expect(try track(&dir, 0, &.{ first, second }, &.{}) == null);
+}
+
+test "an address update with a conflicting secondary overlap keeps the primary" {
+    // commonware `test_track_primary_wins_conflicting_overlap_when_updating_existing_address`.
+    var rng = TestRng.init(0);
+    var no_cooldown = config;
+    no_cooldown.max_sets = 3;
+    no_cooldown.peer_connection_cooldown = .zero;
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, no_cooldown);
+    defer dir.deinit();
+    const pk1 = key(1);
+    const old = public(8, 8, 8, 8, 1235);
+    const new = public(9, 9, 9, 9, 2235);
+    try expect_kills(try track(&dir, 0, &.{.{ .key = pk1, .value = old }}, &.{}), &.{});
+    const reservation = dir.listen(&rng, epoch, pk1, ip(8, 8, 8, 8)).?;
+    try testing.expect(dir.connect(epoch, pk1));
+    const kills = try track(&dir, 1, &.{.{ .key = pk1, .value = new }}, &.{.{
+        .key = pk1,
+        .value = old,
+    }});
+    try expect_kills(kills, &.{pk1});
+    try testing.expectEqual(@as(?u64, 1), dir.latest_set_index());
+    const set = (try dir.peer_set(gpa, 1)).?;
+    defer set.free(gpa);
+    try testing.expectEqual(@as(usize, 1), set.primary.len);
+    try testing.expect(Key.order(set.primary[0], pk1) == .eq);
+    try expect_ingress(&dir, pk1, new);
+    const everyone = try dir.all(gpa);
+    defer everyone.free(gpa);
+    try testing.expectEqual(@as(usize, 1), everyone.primary.len);
+    try testing.expectEqual(@as(usize, 0), everyone.secondary.len);
+    dir.release(reservation);
+    try testing.expect(try expect_dialable(&dir, epoch, pk1, null));
+    const dialed = dir.dial(&rng, epoch, pk1).?;
+    try testing.expect(dialed.ingress.eql(new.ingress()));
+    try expect_listenable(&dir, epoch, ip(9, 9, 9, 9), true);
+    try expect_listenable(&dir, epoch, ip(8, 8, 8, 8), false);
+    dir.release(dialed.metadata);
+}
+
+test "a blocked peer stays blocked across an address update" {
+    // commonware `test_blocked_peer_remains_blocked_on_update`.
+    var three_sets = config;
+    three_sets.max_sets = 3;
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, three_sets);
+    defer dir.deinit();
+    const pk1 = key(1);
+    try expect_kills(try track(&dir, 0, &.{.{ .key = pk1, .value = local(1235) }}, &.{}), &.{});
+    try testing.expect(try dir.block(epoch, pk1));
+    try testing.expect(dir.blocked.contains(pk1));
+    // Blocking lives in the directory, so the record keeps its address.
+    try expect_ingress(&dir, pk1, local(1235));
+    try expect_kills(try track(&dir, 1, &.{.{ .key = pk1, .value = local(2235) }}, &.{}), &.{});
+    try testing.expect(dir.blocked.contains(pk1));
+    try expect_ingress(&dir, pk1, local(2235));
+    try testing.expect(dir.unblock_expired(at_ms(101_000)));
+    try testing.expect(!dir.blocked.contains(pk1));
+    try expect_ingress(&dir, pk1, local(2235));
+}
+
+test "asymmetric addresses dial the ingress and listen for the egress" {
+    // commonware `test_asymmetric_addresses`.
+    var three_sets = config;
+    three_sets.max_sets = 3;
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, three_sets);
+    defer dir.deinit();
+    const pk1 = key(1);
+    const pk2 = key(2);
+    const asymmetric: types.Address = .{ .asymmetric = .{
+        .ingress = .{ .socket = socket(10, 0, 0, 1, 8080) },
+        .egress = socket(192, 168, 1, 1, 9090),
+    } };
+    const host = utils.Hostname.literal("node.example.com");
+    const dns: types.Address = .{ .asymmetric = .{
+        .ingress = .{ .dns = .{ .host = host, .port = 8080 } },
+        .egress = socket(192, 168, 1, 2, 9090),
+    } };
+    const entries = [_]Entry{ .{ .key = pk1, .value = asymmetric }, .{ .key = pk2, .value = dns } };
+    try expect_kills(try track(&dir, 0, &entries, &.{}), &.{});
+    try expect_ingress(&dir, pk1, asymmetric);
+    try testing.expect(dir.peers.get(pk1).?.egress_ip().?.order(ip(192, 168, 1, 1)) == .eq);
+    try expect_ingress(&dir, pk2, dns);
+    try testing.expect(dir.peers.get(pk2).?.egress_ip().?.order(ip(192, 168, 1, 2)) == .eq);
+    try expect_listenable(&dir, epoch, ip(192, 168, 1, 1), true);
+    try expect_listenable(&dir, epoch, ip(192, 168, 1, 2), true);
+    try expect_listenable(&dir, epoch, ip(10, 0, 0, 1), false);
+}
+
+test "a shared listenable IP stays while any of its peers is eligible" {
+    // commonware `test_listenable_ip_collision_eligible_wins`.
+    var three_sets = config;
+    three_sets.max_sets = 3;
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, three_sets);
+    defer dir.deinit();
+    const shared = ip(203, 0, 113, 1);
+    const entries = [_]Entry{
+        .{ .key = key(1), .value = public(203, 0, 113, 1, 8080) },
+        .{ .key = key(2), .value = public(203, 0, 113, 1, 8081) },
+    };
+    try expect_kills(try track(&dir, 0, &entries, &.{}), &.{});
+    try expect_listenable(&dir, epoch, shared, true);
+    try testing.expect(try dir.block(epoch, key(1)));
+    try expect_listenable(&dir, epoch, shared, true);
+    try testing.expect(try dir.block(epoch, key(2)));
+    try expect_listenable(&dir, epoch, shared, false);
+}
+
+test "an empty directory has nothing to dial and no query deadline" {
+    // commonware `test_dialable_empty`.
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, config);
+    defer dir.deinit();
+    const dialable = try dir.dialable(gpa, epoch);
+    defer gpa.free(dialable.peers);
+    try testing.expectEqual(@as(usize, 0), dialable.peers.len);
+    try testing.expectEqual(@as(?SystemTime, null), dialable.next_query_at);
+}
+
+test "an expired block no longer stops a dial before it is unblocked" {
+    // commonware `test_dialable_expired_block_without_unblock`.
+    var rng = TestRng.init(0);
+    var short = config;
+    short.max_sets = 3;
+    short.peer_connection_cooldown = .from_millis(200);
+    short.block_duration = .from_secs(1);
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, short);
+    defer dir.deinit();
+    const pk1 = key(1);
+    try track_alone(&dir, pk1, public(8, 8, 8, 8, 1234));
+    try testing.expect(try dir.block(epoch, pk1));
+    try testing.expect(!try expect_dialable(&dir, epoch, pk1, at_ms(1_000)));
+    // The block expired, but `unblock_expired` has not run: no stale hint either.
+    try testing.expect(try expect_dialable(&dir, at_ms(2_000), pk1, null));
+    const dialed = dir.dial(&rng, at_ms(2_000), pk1).?;
+    dir.release(dialed.metadata);
+}
+
+test "overwrite ignores a peer evicted from every set" {
+    // commonware `test_overwrite_peer_not_in_set`.
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, config);
+    defer dir.deinit();
+    const one: Entry = .{ .key = key(1), .value = public(8, 8, 8, 8, 1235) };
+    const two: Entry = .{ .key = key(2), .value = public(9, 9, 9, 9, 1236) };
+    try expect_kills(try track(&dir, 0, &.{one}, &.{}), &.{});
+    try expect_kills(try track(&dir, 1, &.{two}, &.{}), &.{});
+    try testing.expect(!dir.overwrite(key(1), public(10, 10, 10, 10, 1237)));
+}
+
+test "overwrite updates a blocked peer, which dials the new address once unblocked" {
+    // commonware `test_overwrite_blocked_peer`.
+    var three_sets = config;
+    three_sets.max_sets = 3;
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, three_sets);
+    defer dir.deinit();
+    const pk1 = key(1);
+    try track_alone(&dir, pk1, public(8, 8, 8, 8, 1235));
+    try testing.expect(try dir.block(epoch, pk1));
+    try testing.expect(dir.overwrite(pk1, public(9, 9, 9, 9, 1236)));
+    try expect_ingress(&dir, pk1, public(9, 9, 9, 9, 1236));
+    const later = at_ms(101_000);
+    try testing.expect(dir.unblock_expired(later));
+    try expect_ingress(&dir, pk1, public(9, 9, 9, 9, 1236));
+    try testing.expect(try expect_dialable(&dir, later, pk1, null));
+}
+
+test "dial rejects a DNS ingress set by overwrite while DNS is disabled" {
+    // commonware `test_dial_rejects_dns_ingress_when_disabled_after_address_change`.
+    var rng = TestRng.init(0);
+    var no_dns = config;
+    no_dns.max_sets = 3;
+    no_dns.allow_dns = false;
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, no_dns);
+    defer dir.deinit();
+    const pk1 = key(1);
+    try track_alone(&dir, pk1, public(8, 8, 8, 8, 8080));
+    try testing.expect(try expect_dialable(&dir, epoch, pk1, null));
+    const host = utils.Hostname.literal("node.example.com");
+    const dns: types.Address = .{ .asymmetric = .{
+        .ingress = .{ .dns = .{ .host = host, .port = 8080 } },
+        .egress = socket(8, 8, 8, 8, 8080),
+    } };
+    try testing.expect(dir.overwrite(pk1, dns));
+    try testing.expect(!try expect_dialable(&dir, epoch, pk1, null));
+    try testing.expect(dir.dial(&rng, epoch, pk1) == null);
+}
