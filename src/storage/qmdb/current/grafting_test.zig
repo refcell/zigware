@@ -7,6 +7,7 @@ const cryptography = @import("cryptography");
 const merkle = @import("../../merkle/mod.zig");
 const qmdb = @import("../mod.zig");
 const grafting = @import("grafting.zig");
+const death = @import("utils").death;
 
 const Sha256 = cryptography.Sha256;
 const D = Sha256.Digest;
@@ -58,6 +59,15 @@ test "graftable chunks match chunk peaks (mmr)" {
 
 test "graftable chunks match chunk peaks (mmb)" {
     try check_graftable_chunks(Mmb);
+}
+
+// commonware `test_graftable_chunks_rejects_height_zero` (`#[should_panic]`).
+test "graftable chunks rejects height zero" {
+    try death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            _ = grafting.graftable_chunks(Mmr, 100, 0);
+        }
+    }.body);
 }
 
 test "grafting height" {

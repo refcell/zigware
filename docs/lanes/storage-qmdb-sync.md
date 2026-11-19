@@ -26,6 +26,9 @@ it comes first once `any` lands.
   storage view with `build_range_proof`, and range and operation proof verification, with
   commonware's grafting, partial-chunk, and combine-roots golden tests plus build-then-verify
   and tamper tests over MMR and MMB at N = 1 and 32.
+- [x] `#[should_panic]` (2026-11-19): the lane's only one, grafting's
+  `test_graftable_chunks_rejects_height_zero`, is a `utils.death.expect_panic` test (the
+  `grafting_height >= 1` assert); removing the assert fails it. Not portable: 1 before, 0 now.
 - [x] current unordered fixed: `Db` (init with grafted metadata, proofs, prune, sync,
   commit, destroy, apply), batches with activity layers and regrafting, `KeyValueProof.verify`,
   `CurrentMmr/MmbUnorderedFixedConf`, and commonware's small-db, proof, prune-boundary, and

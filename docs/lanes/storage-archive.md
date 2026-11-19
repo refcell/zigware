@@ -137,6 +137,10 @@ entries, matched to zigware tests by what they check (zigware folds many into on
 | cache | 14 | 14 | 0 | 0 | 0 |
 | storage `utils.rs` (`bits_for_indices`, in ordinal) | 1 | 1 | 0 | 0 | 0 |
 
+`#[should_panic]`: the lanes' only one, ordinal's `test_init_none_option_missing_record_panics`,
+is in the ordinal row as ported: zigware's `init` returns `error.MissingRecord` where Rust
+panics on it, so tests.zig checks the error; no death test applies. Not portable stays 0.
+
 The 15 pipelined `start_sync`, in-flight sync, and marker-pipeline tests are in
 `archive/prunable/start_sync_test.zig` (2026-11-19), with one more that a deferred marker
 generation is neither waited on nor duplicated.
