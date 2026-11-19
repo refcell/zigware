@@ -128,7 +128,7 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
         }
 
         /// The value at `location` (the metadata, for a commit). The caller owns it.
-        pub fn get(self: *Self, location: u64) !?Value {
+        pub fn get(self: *const Self, location: u64) !?Value {
             self.metrics.get_calls.metric().inc();
             self.metrics.lookups_requested.metric().inc();
             if (location >= self.journal.size()) return error.LocationOutOfBounds;
@@ -137,7 +137,7 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
         }
 
         /// The values at strictly increasing `locations` into `out`. The caller owns them.
-        pub fn get_many(self: *Self, locations: []const u64, out: []?Value) !void {
+        pub fn get_many(self: *const Self, locations: []const u64, out: []?Value) !void {
             assert(locations.len == out.len);
             if (locations.len == 0) return;
             self.metrics.get_many_calls.metric().inc();
@@ -171,7 +171,7 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
         }
 
         /// The metadata of the last commit. The caller owns it.
-        pub fn get_metadata(self: *Self) !?Value {
+        pub fn get_metadata(self: *const Self) !?Value {
             const op = try self.journal.read(self.journal.size() - 1);
             assert(op == .commit); // The log always ends with a commit.
             return op.commit.metadata;
@@ -326,7 +326,7 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
         /// Reads `locations` (strictly increasing, already bounds-checked) through a batch
         /// chain: `local` answers the locations a batch holds, the database the rest.
         fn get_many_layered(
-            self: *Self,
+            self: *const Self,
             locations: []const u64,
             out: []?Value,
             local: anytype,
@@ -416,7 +416,7 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
             }
 
             /// The value at `location`, from this batch, its chain, or `db`. Caller owns it.
-            pub fn get(self: *const UnmerkleizedBatch, location: u64, db: *Self) !?Value {
+            pub fn get(self: *const UnmerkleizedBatch, location: u64, db: *const Self) !?Value {
                 try self.compatible(db);
                 if (location >= self.size()) return error.LocationOutOfBounds;
                 if (location >= self.base.size) {
@@ -450,7 +450,7 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
             pub fn get_many(
                 self: *const UnmerkleizedBatch,
                 locations: []const u64,
-                db: *Self,
+                db: *const Self,
                 out: []?Value,
             ) !void {
                 assert(locations.len == out.len);
@@ -624,7 +624,7 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
             }
 
             /// The value at `location` from this batch's chain or `db`. Caller owns it.
-            pub fn get(self: *const MerkleizedBatch, location: u64, db: *Self) !?Value {
+            pub fn get(self: *const MerkleizedBatch, location: u64, db: *const Self) !?Value {
                 try self.bounds.compatible(db.commitment());
                 if (location >= self.bounds.tip.size) return error.LocationOutOfBounds;
                 try check_floor(location, self.bounds.inactivity_floor);
@@ -647,7 +647,7 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
             pub fn get_many(
                 self: *const MerkleizedBatch,
                 locations: []const u64,
-                db: *Self,
+                db: *const Self,
                 out: []?Value,
             ) !void {
                 assert(locations.len == out.len);

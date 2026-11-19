@@ -227,14 +227,14 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
 
         /// The value of `key`, or null if it was never set (or its set was pruned). The caller
         /// owns it.
-        pub fn get(self: *Self, key: *const K) !?Value {
+        pub fn get(self: *const Self, key: *const K) !?Value {
             self.metrics.get_calls.metric().inc();
             self.metrics.lookups_requested.metric().inc();
             return self.get_from(key, 0);
         }
 
         /// The value of `key` if a set at or above `floor` holds it.
-        pub fn get_from(self: *Self, key: *const K, floor: u64) !?Value {
+        pub fn get_from(self: *const Self, key: *const K, floor: u64) !?Value {
             var positions = self.snapshot.get(value_mod.bytes(K, key));
             while (positions.next()) |loc| {
                 if (loc < floor) continue;
@@ -244,13 +244,13 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
         }
 
         /// The values of `keys` into `out`.
-        pub fn get_many(self: *Self, keys: []const K, out: []?Value) !void {
+        pub fn get_many(self: *const Self, keys: []const K, out: []?Value) !void {
             return self.get_many_from(keys, 0, out);
         }
 
         /// The values of `keys` held by sets at or above `floor` into `out`. The caller owns
         /// them.
-        pub fn get_many_from(self: *Self, keys: []const K, floor: u64, out: []?Value) !void {
+        pub fn get_many_from(self: *const Self, keys: []const K, floor: u64, out: []?Value) !void {
             assert(keys.len == out.len);
             if (keys.len == 0) return;
             self.metrics.get_many_calls.metric().inc();
@@ -264,7 +264,7 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
         }
 
         /// The value at `loc` if the set there is of `key`.
-        fn value_at(self: *Self, key: *const K, loc: u64) !?Value {
+        fn value_at(self: *const Self, key: *const K, loc: u64) !?Value {
             if (loc < self.journal.get_bounds().start) return error.OperationPruned;
             var op = try self.journal.read(loc);
             assert(op == .set); // The index holds only the locations of sets.
@@ -276,7 +276,7 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
         }
 
         /// The metadata of the last commit. The caller owns it.
-        pub fn get_metadata(self: *Self) !?Value {
+        pub fn get_metadata(self: *const Self) !?Value {
             const op = try self.journal.read(self.journal.size() - 1);
             assert(op == .commit); // The log always ends with a commit.
             return op.commit.metadata;
@@ -498,7 +498,7 @@ fn Unmerkleized(comptime D: type) type {
         }
 
         /// The value of `key` after this batch, its chain, and `db`. The caller owns it.
-        pub fn get(self: *const Self, key: *const K, db: *D) !?V {
+        pub fn get(self: *const Self, key: *const K, db: *const D) !?V {
             try self.compatible(db);
             var at = self.sets.items.len;
             while (at > 0) {
@@ -518,7 +518,7 @@ fn Unmerkleized(comptime D: type) type {
 
         /// The values of `keys` into `out`. The caller owns them. A stale batch refuses even
         /// an empty read.
-        pub fn get_many(self: *const Self, keys: []const K, db: *D, out: []?V) !void {
+        pub fn get_many(self: *const Self, keys: []const K, db: *const D, out: []?V) !void {
             try self.compatible(db);
             return get_each(self, keys, db, out);
         }
@@ -796,7 +796,7 @@ fn Merkleized(comptime D: type) type {
         }
 
         /// The value of `key` after this batch's chain and `db`. The caller owns it.
-        pub fn get(self: *const Self, key: *const K, db: *D) !?V {
+        pub fn get(self: *const Self, key: *const K, db: *const D) !?V {
             try self.bounds.compatible(db.commitment());
             const floor = self.bounds.inactivity_floor;
             if (self.lookup_chain(key, floor, db.journal.size())) |entry| {
@@ -807,7 +807,7 @@ fn Merkleized(comptime D: type) type {
 
         /// The values of `keys` into `out`. The caller owns them. A stale batch refuses even
         /// an empty read.
-        pub fn get_many(self: *const Self, keys: []const K, db: *D, out: []?V) !void {
+        pub fn get_many(self: *const Self, keys: []const K, db: *const D, out: []?V) !void {
             try self.bounds.compatible(db.commitment());
             return get_each(self, keys, db, out);
         }
