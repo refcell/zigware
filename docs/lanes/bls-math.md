@@ -229,6 +229,11 @@ src/cryptography/bls12381/certificate/threshold_tests.zig. That makes 285 ported
 portable. Planting a missing panic at each of the four preconditions (or a different message)
 fails all 12.
 
+The two open entries were already ported: `test_g2_msm` ("group: g2 msm on empty input and many
+points", 44045a40; 50,000 points outside Debug) and `test_rejects_malleability` ("ops:
+verify_same_signer rejects offsets that cancel in the aggregate", 09f7d33f; equal batch weights
+fail it). That makes 287 ported, 0 open, and 1 not portable.
+
 | commonware file | tests | ported | open | not portable |
 |---|---|---|---|---|
 | `bls12381/scheme.rs` | 8 | 8 | 0 | 0 |
@@ -239,11 +244,11 @@ fails all 12.
 | `bls12381/dkg/golden/mod.rs` | 32 | 32 | 0 | 0 |
 | `bls12381/dkg/golden/evrf/banderwagon.rs` | 8 | 7 | 0 | 1 |
 | `bls12381/dkg/golden/evrf/mod.rs` | 5 | 5 | 0 | 0 |
-| `bls12381/primitives/group.rs` | 34 | 33 | 1 | 0 |
+| `bls12381/primitives/group.rs` | 34 | 34 | 0 | 0 |
 | `bls12381/primitives/sharing.rs` | 5 | 5 | 0 | 0 |
 | `bls12381/primitives/variant.rs` | 4 | 4 | 0 | 0 |
 | `bls12381/primitives/ops/aggregate.rs` | 5 | 5 | 0 | 0 |
-| `bls12381/primitives/ops/batch.rs` | 6 | 5 | 1 | 0 |
+| `bls12381/primitives/ops/batch.rs` | 6 | 6 | 0 | 0 |
 | `bls12381/primitives/ops/mod.rs` | 47 | 47 | 0 | 0 |
 | `bls12381/primitives/ops/threshold.rs` | 19 | 19 | 0 | 0 |
 
