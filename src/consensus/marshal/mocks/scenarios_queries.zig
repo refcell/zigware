@@ -61,6 +61,13 @@ fn round_at(view: u64) Round {
     return .new(.zero(), .new(view));
 }
 
+/// The round of `height` at view = height, in the epoch the test epocher assigns it.
+fn round_of(height: u64) Round {
+    const epoch_length = utils.NonZero(u64).init(harness.blocks_per_epoch).?;
+    const bounds = types.FixedEpocher.new(epoch_length).containing(.new(height)).?;
+    return .new(bounds.epoch, .new(height));
+}
+
 /// Validators on a simulated network of every participant, started one at a time (validator
 /// 0 first) and unlinked unless a scenario links them.
 pub fn Single(comptime H: type) type {
@@ -868,6 +875,209 @@ pub fn CommitmentFetchHeightHintMismatch(comptime H: type) type {
             } else {
                 try testing.expectEqual(null, found);
             }
+        }
+    };
+}
+
+/// One validator over prunable finalized archives (commonware `setup_prunable_validator`),
+/// on a network of every participant.
+fn PrunableSingle(comptime H: type) type {
+    return struct {
+        const Self = @This();
+        pub const App = Application(H.ApplicationBlock);
+        pub const Validator = H.PrunableValidator(App);
+        pub const Proposal = simplex_types.Proposal(H.Commitment);
+
+        validators: H.Fixture,
+        network: harness.TestNetwork,
+        nodes: [2]*Validator,
+        started: usize,
+
+        fn start(self: *Self, ctx: Ctx) !void {
+            const gpa = ctx.gpa();
+            var rng = utils.rng.test_rng();
+            self.validators = try H.fixture(gpa, &rng);
+            errdefer self.validators.deinit(gpa);
+            const participants = self.validators.participants;
+            const max_size = harness.max_message_size(H.Variant);
+            self.network = try .start(gpa, ctx.io(), 1, participants, max_size);
+            self.started = 0;
+        }
+
+        /// Starts validator `index` under metrics label `label`.
+        fn add(self: *Self, ctx: Ctx, label: []const u8, index: usize) !*Validator {
+            assert(self.started < self.nodes.len);
+            const me = self.validators.participants[index];
+            const app: App = try .init(ctx.gpa(), ctx.io());
+            const node = try H.setup_prunable_validator(
+                ctx.child(label),
+                self.network.network,
+                me,
+                &self.validators,
+                label,
+                app,
+            );
+            self.nodes[self.started] = node;
+            self.started += 1;
+            return node;
+        }
+
+        /// Crashes validator slot `slot` and starts validator `index` there again.
+        fn restart(self: *Self, ctx: Ctx, slot: usize, index: usize) !*Validator {
+            assert(slot < self.started);
+            self.nodes[slot].crash();
+            const last = self.started - 1;
+            self.nodes[slot] = self.nodes[last];
+            self.started -= 1;
+            return self.add(ctx, "restart", index);
+        }
+
+        fn stop(self: *Self, gpa: Allocator) void {
+            for (self.nodes[0..self.started]) |node| node.crash();
+            self.network.stop();
+            self.validators.deinit(gpa);
+            self.* = undefined;
+        }
+
+        fn finalization(self: *Self, gpa: Allocator, block: *const H.TestBlock) !H.Finalization {
+            const view = H.height(block).get();
+            const proposal = Proposal.init(round_of(view), .new(view - 1), H.commitment(block));
+            return H.make_finalization(gpa, &self.validators, proposal, quorum);
+        }
+    };
+}
+
+/// Polls `get_processed` every 10 ms until it reaches `height`.
+fn wait_processed(ctx: Ctx, mailbox: anytype, height: u64) !void {
+    while (true) {
+        if (try mailbox.get_processed()) |processed| {
+            if (processed.height().get() == height) return;
+        }
+        try ctx.sleep(.fromMilliseconds(10));
+    }
+}
+
+/// Expects the block and finalization at each of `heights` to be present or absent.
+fn expect_stored(
+    comptime H: type,
+    gpa: Allocator,
+    mailbox: anytype,
+    from: u64,
+    to: u64,
+    present: bool,
+) !void {
+    assert(from <= to);
+    for (from..to + 1) |height| {
+        var block = try mailbox.get_block(.{ .height = .new(height) });
+        defer if (block) |*value| H.Variant.deinit_block(gpa, value);
+        var finalization = try mailbox.get_finalization(.new(height));
+        defer if (finalization) |*value| value.deinit(gpa);
+        if ((block != null) != present or (finalization != null) != present) {
+            std.log.err("height {d}: expected present={}", .{ height, present });
+            return error.TestStoredMismatch;
+        }
+    }
+}
+
+/// Verifies and finalizes heights 1 through `count` of `blocks` at `node`.
+fn verify_and_finalize(
+    comptime H: type,
+    ctx: Ctx,
+    single: *PrunableSingle(H),
+    node: anytype,
+    blocks: []const H.TestBlock,
+) !void {
+    const gpa = ctx.gpa();
+    for (blocks) |*block| {
+        try H.verify_for_prune(node, round_of(H.height(block).get()), block);
+        try ctx.sleep(.fromMilliseconds(link_latency_ms));
+        var finalization = try single.finalization(gpa, block);
+        defer finalization.deinit(gpa);
+        _ = node.mailbox.report(.{ .finalization = finalization });
+    }
+}
+
+/// commonware `prune_finalized_archives`.
+pub fn PruneFinalizedArchives(comptime H: type) type {
+    return struct {
+        pub fn run(gpa: Allocator) !void {
+            try run_timed(gpa, 0, 120, body, .{});
+        }
+
+        fn body(ctx: Ctx) anyerror!void {
+            const gpa = ctx.gpa();
+            var single: PrunableSingle(H) = undefined;
+            try single.start(ctx);
+            defer single.stop(gpa);
+            var node = try single.add(ctx, "init", 0);
+            var blocks: [20]H.TestBlock = undefined;
+            try make_chain(H, gpa, &blocks);
+            defer free_chain(&blocks);
+            try verify_and_finalize(H, ctx, &single, node, &blocks);
+            try wait_for_tip(ctx, node.application, .new(20));
+            try wait_processed(ctx, node.mailbox, 20);
+            try expect_stored(H, gpa, node.mailbox, 1, 20, true);
+            // Requests above the processed height are ignored.
+            try node.mailbox.prune(.new(25));
+            try ctx.sleep(.fromMilliseconds(50));
+            try expect_stored(H, gpa, node.mailbox, 1, 20, true);
+            // Pruning keeps the requested height and removes older sections.
+            try node.mailbox.prune(.new(10));
+            try ctx.sleep(.fromMilliseconds(100));
+            try expect_stored(H, gpa, node.mailbox, 1, 9, false);
+            try expect_stored(H, gpa, node.mailbox, 10, 20, true);
+            // Pruning at the processed height keeps the processed block.
+            try node.mailbox.prune(.new(20));
+            try ctx.sleep(.fromMilliseconds(100));
+            try expect_stored(H, gpa, node.mailbox, 10, 19, false);
+            try expect_stored(H, gpa, node.mailbox, 20, 20, true);
+            node = try single.restart(ctx, 0, 0);
+            // Startup classifies the stored processed block.
+            const processed = try node.mailbox.get_processed();
+            try testing.expectEqual(core.Processed{ .block = .new(20) }, processed);
+            try expect_stored(H, gpa, node.mailbox, 1, 19, false);
+            try expect_stored(H, gpa, node.mailbox, 20, 20, true);
+        }
+    };
+}
+
+/// commonware `floor_retains_processed_predecessor`: a floor at a section boundary keeps
+/// its processed predecessor.
+pub fn FloorRetainsProcessedPredecessor(comptime H: type) type {
+    return struct {
+        pub fn run(gpa: Allocator) !void {
+            try run_timed(gpa, 0, 120, body, .{});
+        }
+
+        fn body(ctx: Ctx) anyerror!void {
+            const gpa = ctx.gpa();
+            var single: PrunableSingle(H) = undefined;
+            try single.start(ctx);
+            defer single.stop(gpa);
+            // Prunable archives use ten-item sections, so a floor at 20 starts a new section.
+            const node = try single.add(ctx, "validator", 0);
+            var blocks: [20]H.TestBlock = undefined;
+            try make_chain(H, gpa, &blocks);
+            defer free_chain(&blocks);
+            // Finalize 1 through 19; block 20 is only verified, so its floor lands above the
+            // processed height.
+            try verify_and_finalize(H, ctx, &single, node, blocks[0..19]);
+            try H.verify_for_prune(node, round_of(20), &blocks[19]);
+            try ctx.sleep(.fromMilliseconds(link_latency_ms));
+            try wait_processed(ctx, node.mailbox, 19);
+            const processed = try node.mailbox.get_processed();
+            try testing.expectEqual(core.Processed{ .block = .new(19) }, processed);
+            var anchor = (try node.mailbox.get_anchor()) orelse return error.TestNoAnchor;
+            defer H.Variant.deinit_block(gpa, &anchor.block);
+            try testing.expectEqual(core.Processed{ .block = .new(19) }, anchor.processed);
+            try testing.expectEqual(Height.new(19), block_height(&anchor.block));
+            // Installing the floor prunes before it dispatches block 20, so processing 20
+            // means pruning finished.
+            try node.mailbox.set_floor(try single.finalization(gpa, &blocks[19]));
+            try wait_processed(ctx, node.mailbox, 20);
+            // The section holding block 19 survives; older sections are pruned.
+            try expect_stored(H, gpa, node.mailbox, 19, 19, true);
+            try expect_stored(H, gpa, node.mailbox, 9, 9, false);
         }
     };
 }

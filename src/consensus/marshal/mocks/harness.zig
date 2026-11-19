@@ -435,13 +435,129 @@ pub const StandardHarness = struct {
     pub fn Validator(comptime App: type) type {
         return StandardValidator(App);
     }
+
+    /// A validator whose finalized archives are prunable (commonware
+    /// `setup_prunable_validator`).
+    pub fn PrunableValidator(comptime App: type) type {
+        return StandardValidatorOver(App, PrunableArchives(B));
+    }
+
+    /// Starts validator `me` over prunable finalized archives, signing with validator 0's
+    /// scheme as commonware does. The standard harness derives its partition names from `me`,
+    /// so `prefix` only documents the scenario. Takes ownership of `application`.
+    pub fn setup_prunable_validator(
+        ctx: runtime.deterministic.Context,
+        network: *Network,
+        me: K,
+        validators: *const harness_fixture.Fixture,
+        prefix: []const u8,
+        application: anytype,
+    ) !*PrunableValidator(@TypeOf(application)) {
+        assert(prefix.len > 0);
+        const provider: harness_fixture.Provider = .init(&validators.schemes[0]);
+        return PrunableValidator(@TypeOf(application)).setup(
+            ctx,
+            network,
+            me,
+            provider,
+            1,
+            application,
+        );
+    }
+
+    /// Persists `block` (borrowed) as verified for the pruning scenarios.
+    pub const verify_for_prune = verify;
 };
 
 fn StandardValidator(comptime App: type) type {
+    return StandardValidatorOver(App, Archives(B));
+}
+
+/// The standard harness's prunable finalized archives (commonware
+/// `setup_prunable_validator`'s `<prefix>-finalizations-by-height-*` and
+/// `<prefix>-finalized-blocks-*`), ten items per section; the same shape as
+/// `standard/tests/common.zig`'s `PrunableStores`. Must not move once opened.
+pub fn PrunableArchives(comptime StoredBlock: type) type {
+    return struct {
+        const Self = @This();
+        const Translator = storage.translator.EightCap;
+        pub const FinalizationArchive = storage.archive.prunable.Archive(
+            Translator,
+            [32]u8,
+            Finalization,
+        );
+        pub const BlockArchive = storage.archive.prunable.Archive(Translator, [32]u8, StoredBlock);
+        const kinds = [_][]const u8{
+            "finalizations-by-height-metadata", "finalizations-by-height-key",
+            "finalizations-by-height-value",    "finalized-blocks-metadata",
+            "finalized-blocks-key",             "finalized-blocks-value",
+        };
+
+        gpa: Allocator,
+        cache_ref: runtime.buffer.paged.CacheRef,
+        names: [kinds.len][]u8,
+        finalizations: FinalizationArchive,
+        blocks: BlockArchive,
+
+        pub fn open(self: *Self, ctx: anytype, prefix: []const u8) !void {
+            const gpa = ctx.gpa();
+            self.gpa = gpa;
+            var made: usize = 0;
+            errdefer for (self.names[0..made]) |name| gpa.free(name);
+            for (kinds, &self.names) |kind, *name| {
+                name.* = try std.fmt.allocPrint(gpa, "{s}-{s}", .{ prefix, kind });
+                made += 1;
+            }
+            assert(made == kinds.len);
+            self.cache_ref = try .init(gpa, page_size, page_cache_size);
+            errdefer self.cache_ref.deinit();
+            const certificate_config = S.certificate_codec_config_unbounded();
+            const label = "finalizations_by_height";
+            const config = certificate_config;
+            self.finalizations = try self.open_prunable(Finalization, ctx, 0, label, config);
+            errdefer self.finalizations.deinit();
+            self.blocks = try self.open_prunable(StoredBlock, ctx, 3, "finalized_blocks", {});
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.blocks.deinit();
+            self.finalizations.deinit();
+            self.cache_ref.deinit();
+            for (self.names) |name| self.gpa.free(name);
+            self.* = undefined;
+        }
+
+        fn open_prunable(
+            self: *Self,
+            comptime Value: type,
+            ctx: anytype,
+            comptime first: usize,
+            comptime label: []const u8,
+            codec_config: anytype,
+        ) !storage.archive.prunable.Archive(Translator, [32]u8, Value) {
+            return .init(ctx.gpa(), ctx.storage, ctx.scope.child(label), .{
+                .translator = .{},
+                .metadata_partition = self.names[first],
+                .key_partition = self.names[first + 1],
+                .key_cache_ref = &self.cache_ref,
+                .value_partition = self.names[first + 2],
+                .codec_config = codec_config,
+                .items_per_section = 10,
+                .key_write_buffer = 1024,
+                .value_write_buffer = 1024,
+                .replay_buffer = 1024,
+            });
+        }
+    };
+}
+
+/// A standard validator with application `App` over finalized archives `StoredArchives`
+/// (`Archives(B)` or `PrunableArchives(B)`).
+fn StandardValidatorOver(comptime App: type, comptime StoredArchives: type) type {
     return struct {
         const Self = @This();
         const H = StandardHarness;
-        pub const Stored = Archives(B);
+        pub const Stored = StoredArchives;
         pub const Resolver = resolver_p2p.Resolver(
             D,
             K,

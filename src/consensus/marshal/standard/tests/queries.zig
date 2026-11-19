@@ -73,3 +73,11 @@ test "standard genesis emitted once" {
 test "standard commitment fetch height hint mismatch wakes subscriber" {
     try queries.CommitmentFetchHeightHintMismatch(H).run(gpa);
 }
+
+test "standard prune finalized archives" {
+    try queries.PruneFinalizedArchives(H).run(gpa);
+}
+
+test "standard floor retains processed predecessor" {
+    try queries.FloorRetainsProcessedPredecessor(H).run(gpa);
+}
