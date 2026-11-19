@@ -10,7 +10,7 @@ and started when what they build on had landed (or could be stubbed behind an in
 | 1 | crypto | cryptography (hashes, ed25519, secp256r1, certificate, handshake, zk, ...) | done except the simplex voter tests it shares with runtime |
 | 1 | bls-math | math, simd, cryptography/bls12381 (primitives, dkg, tle, certificate) | done |
 | 1 | runtime | runtime: interface, deterministic runtime, iobuf, storage, network | done |
-| 1 | storage-merkle | storage: merkle (mmr, mmb), bitmap, index, rmap, translator | done (the byte-exact zstd parent item stays open; its six pieces are ticked) |
+| 1 | storage-merkle | storage: merkle (mmr, mmb), bitmap, index, rmap, translator | done (byte-exact zstd level 3 included) |
 | 2 | parallel | parallel, allocator, bench, p2p/authenticated/lookup | done |
 | 2 | actor-stream | actor, stream | done |
 | 2 | storage-journal | storage: journal, metadata, queue; runtime/buffer | done |
