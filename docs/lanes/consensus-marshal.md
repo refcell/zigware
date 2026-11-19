@@ -156,11 +156,11 @@ commonware `standard/mod.rs` (14.9k lines) is split by line range of that file. 
 ports its range's tests and the helpers defined in it, into
 `src/consensus/marshal/standard/tests/<file>.zig`, wired with one
 `test { _ = @import("tests/<file>.zig"); }` line in `standard/root.zig`.
-- Shared helpers, `tests/common.zig`, owned by the deployer thread (T-01a1d5b9) and landed
-  first, on its own: `RecordingBuffer`, `RecordingResolver`, `NoopConsumer`,
-  `StaticProducer`, `wait_until`, `HoldingBlockReporter`, `ApplicationReporter`,
-  `start_standard_actor` (lines 6221-6739), and `PacedStore`, `prunable_finalized_stores`,
-  `test_config` (10362-10611).
+- Shared helpers, `tests/common.zig`, owned by the deployer thread
+  (T-01a1d5b9-c237-73f2-a935-c93580e28133) and landed first, on its own: `RecordingBuffer`,
+  `RecordingResolver`, `NoopConsumer`, `StaticProducer`, `wait_until`,
+  `HoldingBlockReporter`, `ApplicationReporter`, `start_standard_actor` (lines 6221-6739),
+  and `PacedStore`, `prunable_finalized_stores`, `test_config` (10362-10611).
 - consensus-marshal (this lane), `tests/scenarios.zig` and `tests/restart.zig`: lines
   169-2591 (provider/digest-once tests, every harness scenario wrapper: finalize, hailstorm,
   ack pipeline, genesis, recoverable/certify family, sync floor, prune, subscribe, get_info,
@@ -183,9 +183,10 @@ ports its range's tests and the helpers defined in it, into
   the actor loop, as commonware pools it. cache_writes_do_not_clone_block_payloads is not
   ported: it counts Rust `Clone` calls on the block's context, and Zig copies a value-type
   block implicitly with no hook to count (shared blocks are refcounted `Digested` handles).
-- deployer thread (T-01a1d5b9), `tests/floor.zig`: lines 6740-10611 (redelivery,
-  start/set floor, floor anchors and acks, delivery verification across scopes, processed
-  and round floors, unverifiable delivery, sync dispatch). Done 2026-11-18: 39 of 43 tests;
+- deployer thread (T-01a1d5b9-c237-73f2-a935-c93580e28133), `tests/floor.zig`: lines
+  6740-10611 (redelivery, start/set floor, floor anchors and acks, delivery verification
+  across scopes, processed and round floors, unverifiable delivery, sync dispatch). Done
+  2026-11-18: 39 of 43 tests;
   the 3 `should_panic` tests and the identity-job gate have no Zig counterpart (file header).
 - runtime thread (T-01a1d57b-1bfd), `tests/coverage.zig`: lines 12605-14905 (prune,
   pipelined handoff, reproposal coverage across restarts, closed-epoch floors, cache
@@ -347,7 +348,7 @@ ports its range's tests and the helpers defined in it, into
   `make_*_of`).
 - 2026-11-18: `mocks.scenarios` (`Cluster(H)`, generic `Finalize(H)`; harnesses export their
   signing setup). The finalize test is skipped until resolver.p2p keeps up with network
-  responses (resolver lane, T-01a1d5b9).
+  responses (resolver lane, T-01a1d5b9-c237-73f2-a935-c93580e28133).
 - 2026-11-18: actor drains resolved acks before mailbox/resolver events; bls-math takes
   harness.rs 3442-end (`mocks/scenarios_queries.zig`, `standard/tests/queries.zig`).
 - 2026-11-18: standard late-finalization tests (kept once for a repaired block, dropped
