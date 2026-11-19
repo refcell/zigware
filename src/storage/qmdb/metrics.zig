@@ -1,12 +1,14 @@
 //! Metrics for QMDB variants (qmdb/metrics.rs).
 //!
 //! Every variant registers the same set under its scope. Durations are histograms over
-//! `Buckets.local`; time them with `timer(io)` and `finish(io)` (commonware's drop-observing
-//! `ScopedTimer`), using the database's `std.Io` clock.
+//! `Buckets.local`; a database times a call with `start` and `Timing.finish` (commonware's
+//! drop-observing `ScopedTimer`) on the `std.Io` clock its config names. Without an `io` the
+//! histograms are registered but never observe, as the journals do.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 const runtime = @import("runtime");
 
 const telemetry = runtime.telemetry.metrics;
@@ -14,6 +16,24 @@ const Scope = telemetry.Scope;
 const Counter = telemetry.Counter;
 const Gauge = telemetry.Gauge;
 const Timed = telemetry.histogram.Timed;
+
+/// A call being timed, or nothing without a clock (commonware's `ScopedTimer`).
+pub const Timing = struct {
+    timer: ?telemetry.histogram.Timer,
+    io: Io,
+
+    /// Starts timing into `timed` on `io`'s clock; does nothing if `io` is null.
+    pub fn start(timed: *const Timed, io: ?Io) Timing {
+        const clock = io orelse return .{ .timer = null, .io = undefined };
+        return .{ .timer = timed.timer(clock), .io = clock };
+    }
+
+    /// Observes the time since `start`, if it was timed.
+    pub fn finish(timing: Timing) void {
+        const timer = timing.timer orelse return;
+        timer.observe(timing.io);
+    }
+};
 
 pub const Metrics = struct {
     /// Logical operation end.
@@ -45,6 +65,8 @@ pub const Metrics = struct {
     sync_duration: Timed,
     prune_calls: Counter,
     prune_duration: Timed,
+    /// The clock of the duration timers; null skips timing. The database sets it.
+    io: ?Io,
 
     const gauges = .{
         .{ "size", "Logical operation end" },
@@ -83,7 +105,8 @@ pub const Metrics = struct {
     pub fn init(scope: Scope) Allocator.Error!Metrics {
         var self: Metrics = undefined;
         const fields = @typeInfo(Metrics).@"struct".field_names.len;
-        comptime assert(gauges.len + counters.len + timers.len == fields);
+        comptime assert(gauges.len + counters.len + timers.len + 1 == fields);
+        self.io = null;
         var registered: usize = 0;
         errdefer inline for (gauges ++ counters ++ timers, 0..) |entry, index| {
             if (index < registered) @field(self, entry[0]).deinit();
@@ -106,6 +129,11 @@ pub const Metrics = struct {
     pub fn deinit(self: *Metrics) void {
         inline for (gauges ++ counters ++ timers) |entry| @field(self, entry[0]).deinit();
         self.* = undefined;
+    }
+
+    /// Starts timing a call into the duration histogram `name`, if the database has a clock.
+    pub fn start(self: *const Metrics, comptime name: []const u8) Timing {
+        return .start(&@field(self, name), self.io);
     }
 
     /// Updates the state gauges.
@@ -145,4 +173,19 @@ test "metrics register and update" {
     try testing.expect(telemetry.has_metric_value(text, "db_last_commit", "9"));
     try testing.expect(telemetry.has_metric_value(text, "db_get_calls_total", "1"));
     try testing.expect(std.mem.indexOf(u8, text, "db_prune_duration_bucket") != null);
+}
+
+test "metrics time calls only with a clock" {
+    const gpa = testing.allocator;
+    var registry = telemetry.Registry.init(gpa);
+    defer registry.deinit();
+    var metrics = try Metrics.init(Scope.init(&registry).child("db"));
+    defer metrics.deinit();
+    metrics.start("get_duration").finish(); // No clock: nothing observed.
+    metrics.io = testing.io;
+    metrics.start("prune_duration").finish();
+    const text = try registry.encode(gpa);
+    defer gpa.free(text);
+    try testing.expect(telemetry.has_metric_value(text, "db_get_duration_count", "0"));
+    try testing.expect(telemetry.has_metric_value(text, "db_prune_duration_count", "1"));
 }

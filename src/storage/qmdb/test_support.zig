@@ -81,3 +81,19 @@ fn leaf_config(comptime C: type) C {
     if (comptime is_slice_cfg(C)) return .{ .range = .inclusive(0, 10000) };
     return codec.unit_cfg(C);
 }
+
+/// Expects each `{name, value}` sample in `registry`'s encoding (commonware's
+/// `metrics.contains("name value")` checks), printing the encoding on a miss.
+pub fn expect_metric_values(
+    gpa: Allocator,
+    registry: *runtime.telemetry.metrics.Registry,
+    expected: []const [2][]const u8,
+) !void {
+    const text = try registry.encode(gpa);
+    defer gpa.free(text);
+    for (expected) |sample| {
+        if (runtime.telemetry.metrics.has_metric_value(text, sample[0], sample[1])) continue;
+        std.debug.print("missing {s} {s}\n{s}\n", .{ sample[0], sample[1], text });
+        return error.TestExpectedEqual;
+    }
+}
