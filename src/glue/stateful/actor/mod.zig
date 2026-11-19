@@ -65,4 +65,5 @@ test {
     _ = @import("core/processing_late_test.zig");
     _ = @import("core/syncing_test.zig");
     _ = @import("core/stateful_test.zig");
+    _ = @import("core/stateful_more_test.zig");
 }

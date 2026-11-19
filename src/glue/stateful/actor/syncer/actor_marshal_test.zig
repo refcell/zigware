@@ -492,3 +492,74 @@ fn restart_resumes_floor(ctx: Ctx) !void {
 test "stateful syncer marshal: a restart resumes a floor installed before stateful" {
     try run(restart_resumes_floor);
 }
+
+/// Proposes through `mailbox` on its own task (commonware races it against a sleep).
+const ProposeTask = struct {
+    mailbox: *WedgeStateful.Mailbox,
+    done: std.atomic.Value(bool) = .init(false),
+    declined: bool = false,
+
+    fn run(task: *ProposeTask) void {
+        const leader = @import("consensus").marshal.mocks.harness.default_leader();
+        const context: WedgeApp.Context = .{
+            .round = round(1),
+            .leader = leader,
+            .parent = .{ .zero(), .{ .bytes = @splat(0) } },
+        };
+        const empty: [0]Block = .{};
+        if (WedgeStateful.Mailbox.Ancestry.from_blocks(testing.allocator, &empty)) |ancestry| {
+            const proposed = task.mailbox.propose({}, context, ancestry, {}) catch null;
+            task.declined = proposed == null;
+        } else |_| {}
+        task.done.store(true, .release);
+    }
+
+    fn finished(task: *const ProposeTask) !bool {
+        return task.done.load(.acquire);
+    }
+};
+
+fn propose_while_floor_waits(ctx: Ctx) !void {
+    const gpa = ctx.gpa();
+    var validators = try fixture_mod.make_validators(gpa);
+    defer validators.deinit(gpa);
+    const prefix = "pending-floor";
+    var plan = try Plan.init(env_of(ctx), prefix);
+    defer plan.deinit();
+    var floor = try fixture_mod.finalization(gpa, &validators, 1, .{ .bytes = @splat(7) });
+    defer floor.deinit(gpa);
+    try plan.set_floor(&floor);
+    // An unstarted marshal never answers the floor block's subscription.
+    var marshal = try Prunable.init(ctx.child("marshal_fixture"), prefix, &validators, .{
+        .acknowledge = null,
+    });
+    defer marshal.abort();
+    const stateful, var mailbox = try WedgeStateful.init(gpa, ctx.io(), .{
+        .app = .{},
+        .env = env_of(ctx),
+        .db_config = 0,
+        .marshal = marshal.mailbox.clone(),
+        .mailbox_size = 8,
+        .plan = &plan,
+        .sync_config = .{
+            .fetch_batch_size = 1,
+            .apply_batch_size = 1,
+            .max_outstanding_requests = 1,
+        },
+        .resolvers = .{},
+        .floor = marshal.floor,
+    });
+    defer stateful.deinit();
+    defer mailbox.deinit();
+    var actor_task = try stateful.start();
+    defer _ = actor_task.cancel(ctx.io()) catch {};
+    var task: ProposeTask = .{ .mailbox = &mailbox };
+    var future = try ctx.io().concurrent(ProposeTask.run, .{&task});
+    defer future.cancel(ctx.io());
+    try fixture_mod.wait_until(ctx, 100, ProposeTask.finished, .{&task});
+    try testing.expect(task.declined);
+}
+
+test "stateful syncer marshal: the mailbox declines proposals while floor resolution waits" {
+    try run(propose_while_floor_waits);
+}

@@ -30,7 +30,7 @@ const Any = harness_mod.Any;
 
 /// What the fake marshal stores: blocks by digest, the finalized chain, and its processed
 /// height.
-const MarshalState = struct {
+pub const MarshalState = struct {
     mutex: Io.Mutex = .init,
     blocks: std.AutoHashMapUnmanaged(Digest, TestBlock) = .empty,
     finalized: std.AutoHashMapUnmanaged(u64, TestBlock) = .empty,
@@ -43,13 +43,13 @@ const MarshalState = struct {
         state.prunes.deinit(gpa);
     }
 
-    fn insert(state: *MarshalState, block: TestBlock) !void {
+    pub fn insert(state: *MarshalState, block: TestBlock) !void {
         state.mutex.lockUncancelable(io);
         defer state.mutex.unlock(io);
         try state.blocks.put(gpa, block.digest(), block);
     }
 
-    fn mark_finalized(state: *MarshalState, block: TestBlock) !void {
+    pub fn mark_finalized(state: *MarshalState, block: TestBlock) !void {
         try state.insert(block);
         state.mutex.lockUncancelable(io);
         defer state.mutex.unlock(io);
@@ -57,10 +57,10 @@ const MarshalState = struct {
     }
 };
 
-const Identifier = union(enum) { height: Height };
+pub const Identifier = union(enum) { height: Height };
 
 /// The parts of marshal's core mailbox the actor uses.
-const FakeMarshal = struct {
+pub const FakeMarshal = struct {
     pub const Block = TestBlock;
     pub const ParentReceiver = oneshot.Receiver(Digested);
     pub const Anchor = struct { processed: Processed, block: Digested };
@@ -118,7 +118,7 @@ const FakeMarshal = struct {
     }
 };
 
-const TestPlan = plan_mod.SyncPlan(
+pub const TestPlan = plan_mod.SyncPlan(
     consensus.simplex.scheme.ed25519.Scheme(Digest),
     struct {
         pub const Commitment = Digest;
@@ -136,7 +136,7 @@ const Stateful = stateful_mod.Stateful(P);
 const Mailbox = Stateful.Mailbox;
 
 /// Storage, the plan, and the fake marshal, which outlive actor restarts.
-const Node = struct {
+pub const Node = struct {
     storage: runtime.buffer.mocks.Storage,
     cache_ref: runtime.buffer.paged.CacheRef,
     registry: metrics.Registry,
@@ -144,7 +144,7 @@ const Node = struct {
     plan: TestPlan,
 
     /// `node` must not move afterwards.
-    fn init(node: *Node) !void {
+    pub fn init(node: *Node) !void {
         node.storage = .init(gpa);
         errdefer node.storage.deinit();
         node.cache_ref = try .init(gpa, 101, 11);
@@ -157,7 +157,7 @@ const Node = struct {
         node.plan = try TestPlan.init(node.env(), "stateful-test");
     }
 
-    fn deinit(node: *Node) void {
+    pub fn deinit(node: *Node) void {
         node.plan.deinit();
         node.marshal.deinit();
         node.registry.deinit();
@@ -165,7 +165,7 @@ const Node = struct {
         node.storage.deinit();
     }
 
-    fn env(node: *Node) db.Env {
+    pub fn env(node: *Node) db.Env {
         return .{
             .gpa = gpa,
             .io = io,
@@ -174,7 +174,7 @@ const Node = struct {
         };
     }
 
-    fn db_config(node: *Node) Any.Config {
+    pub fn db_config(node: *Node) Any.Config {
         return .{
             .merkle = .{
                 .journal_partition = "stateful-journal",
