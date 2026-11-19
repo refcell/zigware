@@ -160,6 +160,42 @@ test "futures: try_join_all keeps input order or fails" {
     try testing.expectError(error.Odd, failed);
 }
 
+const Role = enum { pending, ok, fail };
+const JoinError = error{ Failed, Canceled };
+
+/// The pending role sleeps until canceled and counts the cancellation.
+fn role_task(role: Role, task_io: Io, canceled: *std.atomic.Value(u32)) JoinError!u32 {
+    switch (role) {
+        .pending => {
+            task_io.sleep(.fromSeconds(3600), .awake) catch |err| {
+                _ = canceled.fetchAdd(1, .seq_cst);
+                return err;
+            };
+            return 0;
+        },
+        .ok => return 1,
+        .fail => return error.Failed,
+    }
+}
+
+// commonware `later_error_drops_futures_and_values`; its `known` parameter picks between Rust's
+// size-hinted collectors, which have no counterpart here.
+test "futures: try_join_all returns a later error and cancels a pending task" {
+    for ([_]usize{ 2, 30, 31, 64 }) |count| {
+        var canceled: std.atomic.Value(u32) = .init(0);
+        const Args = std.meta.ArgsTuple(@TypeOf(role_task));
+        const arguments = try gpa.alloc(Args, count);
+        defer gpa.free(arguments);
+        for (arguments, 0..) |*args, index| {
+            const role: Role = if (index == 0) .pending else if (index == count - 1) .fail else .ok;
+            args.* = .{ role, io, &canceled };
+        }
+        const joined = futures.try_join_all(u32, JoinError, gpa, io, role_task, arguments);
+        try testing.expectError(error.Failed, joined);
+        try testing.expectEqual(1, canceled.load(.seq_cst));
+    }
+}
+
 const Pending = struct { aborter: futures.AbortablePool(i32).Aborter, id: i32 };
 
 /// Model fuzz (commonware `utils/fuzz/fuzz_targets/futures.rs`), checking that every pushed

@@ -583,3 +583,115 @@ fn expect_codec_roundtrip(bitmap: *const BitMap(3), generator: *rng.FuzzRng) !vo
 test "fuzz bitmap" {
     try fuzz.run({}, fuzz_bitmap, 0x6269_746d_6170, 300);
 }
+
+/// `a op b` is 64 bits whose two chunks both equal `expected_chunk`.
+fn expect_chunk_op(
+    comptime op: enum { @"and", @"or", xor },
+    a: *const BitMap(4),
+    b: *const BitMap(4),
+    expected_chunk: [4]u8,
+) !void {
+    var result = try a.clone(gpa);
+    defer result.deinit(gpa);
+    switch (op) {
+        .@"and" => result.@"and"(b),
+        .@"or" => result.@"or"(b),
+        .xor => result.xor(b),
+    }
+    try testing.expectEqual(@as(u64, 64), result.len());
+    for (0..2) |index| try testing.expectEqual(expected_chunk, result.get_chunk(index));
+}
+
+test "bitmap: and/or/xor over two full chunks (test_multi_chunk_operations)" {
+    // commonware only bounds the counts; the exact bytes are checked here.
+    const left = [4]u8{ 0xAA, 0xBB, 0xCC, 0xDD };
+    const right = [4]u8{ 0x55, 0x66, 0x77, 0x88 };
+    var a: BitMap(4) = .empty;
+    defer a.deinit(gpa);
+    var b: BitMap(4) = .empty;
+    defer b.deinit(gpa);
+    for (0..2) |_| {
+        try a.push_chunk(gpa, &left);
+        try b.push_chunk(gpa, &right);
+    }
+    try expect_chunk_op(.@"and", &a, &b, .{ 0x00, 0x22, 0x44, 0x88 });
+    try expect_chunk_op(.@"or", &a, &b, .{ 0xFF, 0xFF, 0xFF, 0xDD });
+    try expect_chunk_op(.xor, &a, &b, .{ 0xFF, 0xDD, 0xBB, 0x55 });
+}
+
+test "bitmap: and/or/xor and flip_all keep a partial chunk's length" {
+    // commonware `test_partial_chunk_operations` (35 bits), with each bit checked.
+    var a = try pattern(4, 35, 2);
+    defer a.deinit(gpa);
+    var b = try pattern(4, 35, 3);
+    defer b.deinit(gpa);
+    inline for (.{ "and", "or", "xor" }) |name| {
+        var result = try a.clone(gpa);
+        defer result.deinit(gpa);
+        @field(BitMap(4), name)(&result, &b);
+        try testing.expectEqual(@as(u64, 35), result.len());
+        try expect_trailing_zero(4, &result);
+        for (0..35) |bit| {
+            const x = bit % 2 == 0;
+            const y = bit % 3 == 0;
+            const expected = if (comptime std.mem.eql(u8, name, "and"))
+                x and y
+            else if (comptime std.mem.eql(u8, name, "or")) x or y else x != y;
+            try testing.expectEqual(expected, result.get(bit));
+        }
+    }
+    var inverted = try a.clone(gpa);
+    defer inverted.deinit(gpa);
+    inverted.flip_all();
+    try testing.expectEqual(a.count_zeros(), inverted.count_ones());
+    try testing.expectEqual(a.count_ones(), inverted.count_zeros());
+    try expect_trailing_zero(4, &inverted);
+}
+
+test "bitmap: ones_iter of empty, zero, and one-bit maps" {
+    // commonware `test_ones_iter_empty`, `test_ones_iter_all_zeros`, `test_ones_iter_single_bit`.
+    var empty: BitMap(4) = .empty;
+    try expect_ones(empty.ones_iter(), &.{});
+    var zeroes = try BitMap(4).zeroes(gpa, 100);
+    defer zeroes.deinit(gpa);
+    try expect_ones(zeroes.ones_iter(), &.{});
+    for ([_]bool{ true, false }) |bit| {
+        var single: BitMap(4) = .empty;
+        defer single.deinit(gpa);
+        try single.push(gpa, bit);
+        try expect_ones(single.ones_iter(), if (bit) &.{0} else &.{});
+    }
+}
+
+test "bitmap: ones_iter yields count_ones bits (test_ones_iter_matches_count_ones)" {
+    var bitmap = try pattern(8, 200, 7);
+    defer bitmap.deinit(gpa);
+    var ones = bitmap.ones_iter();
+    var count: u64 = 0;
+    while (ones.next()) |bit| : (count += 1) try testing.expect(bit % 7 == 0);
+    try testing.expectEqual(@as(u64, 29), count);
+    try testing.expectEqual(bitmap.count_ones(), count);
+}
+
+fn check_from_bools(comptime N: usize) !void {
+    const bits = [_]bool{ true, false, true, true, false, false, true };
+    var bitmap = try from(N, &bits);
+    defer bitmap.deinit(gpa);
+    try testing.expectEqual(@as(u64, 7), bitmap.len());
+    try testing.expectEqual(@as(u64, 4), bitmap.count_ones());
+    try testing.expectEqual(@as(u64, 3), bitmap.count_zeros());
+    for (bits, 0..) |bit, index| try testing.expectEqual(bit, bitmap.get(index));
+}
+
+test "bitmap: from_bools at several chunk sizes (test_from_different_chunk_sizes)" {
+    inline for (.{ 4, 8, 16 }) |N| try check_from_bools(N);
+}
+
+test "bitmap: is_unset across one-byte chunks (is_unset_chunk_boundaries)" {
+    var bitmap = try BitMap(1).zeroes(gpa, 32);
+    defer bitmap.deinit(gpa);
+    bitmap.set(7, true);
+    try testing.expect(bitmap.is_unset(0, 7));
+    try testing.expect(!bitmap.is_unset(0, 8));
+    try testing.expect(bitmap.is_unset(8, 32));
+}

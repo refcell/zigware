@@ -1226,3 +1226,99 @@ fn fuzz_cache(_: void, generator: *rng.FuzzRng) !void {
 test "fuzz cache" {
     try fuzz.run({}, fuzz_cache, 0x6361_6368, 200);
 }
+
+/// A key that counts how often the cache hashes it.
+const CountingKey = struct {
+    id: u32,
+    hashes: *u32,
+
+    pub fn hash(key: CountingKey) u64 {
+        key.hashes.* += 1;
+        return std.hash.Wyhash.hash(0, std.mem.asBytes(&key.id));
+    }
+
+    pub fn eql(a: CountingKey, b: CountingKey) bool {
+        return a.id == b.id;
+    }
+};
+
+test "cache: each operation hashes a key exactly once (shared_hashes_without_rehash_steps)" {
+    var counts: [3]u32 = @splat(0);
+    const one: CountingKey = .{ .id = 1, .hashes = &counts[0] };
+    const two: CountingKey = .{ .id = 2, .hashes = &counts[1] };
+    const three: CountingKey = .{ .id = 3, .hashes = &counts[2] };
+    var cache = try Cache(CountingKey, usize).init(gpa, 2);
+    defer cache.deinit(gpa);
+    _ = cache.put(one, 1);
+    _ = cache.put(two, 2);
+    try expectEqual([3]u32{ 1, 1, 0 }, counts);
+    // Key 3 replaces Small's key 1: the incoming key and the victim moved to Ghost each hash
+    // once across their resident and Ghost operations.
+    _ = cache.put(three, 3);
+    try expectEqual([3]u32{ 2, 1, 1 }, counts);
+    // A nonresident removal shares the resident-miss hash with the Ghost discard.
+    try expect(!cache.remove(one));
+    try expectEqual(@as(u32, 3), counts[0]);
+    // Retain and clear work from slot ownership and hash nothing.
+    const not_three = struct {
+        pub fn keep(key: CountingKey, _: *const usize) bool {
+            return key.id != 3;
+        }
+    };
+    cache.retain(not_three);
+    cache.clear();
+    try expectEqual([3]u32{ 3, 1, 1 }, counts);
+}
+
+/// A key whose equality ignores `metadata` and whose hash is constant.
+const MetadataKey = struct {
+    id: u32,
+    metadata: u32,
+
+    pub fn hash(_: MetadataKey) u64 {
+        return 0;
+    }
+
+    pub fn eql(a: MetadataKey, b: MetadataKey) bool {
+        return a.id == b.id;
+    }
+};
+
+test "cache: a Ghost hit stores the incoming key (non_clone_keys_keep_incoming_metadata)" {
+    var cache = try Cache(MetadataKey, u32).init(gpa, 2);
+    defer cache.deinit(gpa);
+    const zero = Constant(u32){ .value = 0 };
+    const original = cache.get_or_insert_mut(.{ .id = 0, .metadata = 10 }, zero);
+    _ = cache.put(.{ .id = 1, .metadata = 11 }, 1);
+    _ = cache.put(.{ .id = 2, .metadata = 12 }, 2);
+    const probe: MetadataKey = .{ .id = 0, .metadata = 0 };
+    try expectEqual(@as(?*const u32, null), cache.get_at(original.slot, probe));
+    try check_invariants(&cache);
+
+    // The historical key is consumed and the caller's key becomes the resident one.
+    const hit = cache.get_or_insert_mut(.{ .id = 0, .metadata = 20 }, zero);
+    hit.value.* = 20;
+    try expectEqual(@as(?u32, 20), value_of(u32, cache.get_at(hit.slot, probe)));
+    const Check = struct {
+        pub fn keep(key: MetadataKey, value: *const u32) bool {
+            if (key.id == 0) {
+                std.debug.assert(key.metadata == 20);
+                std.debug.assert(value.* == 20);
+            }
+            return true;
+        }
+    };
+    cache.retain(Check);
+    const resident = cache.slots.items[hit.slot].key;
+    try expectEqual(@as(u32, 20), resident.metadata);
+    try check_invariants(&cache);
+
+    try expect(cache.remove(probe));
+    try expectEqual(@as(?*const u32, null), cache.get_at(hit.slot, probe));
+    const reused = cache.get_or_insert_mut(.{ .id = 3, .metadata = 30 }, zero);
+    try expectEqual(hit.slot, reused.slot);
+    try expectEqual(@as(u32, 20), reused.value.*);
+    try check_invariants(&cache);
+    cache.clear();
+    try check_invariants(&cache);
+}

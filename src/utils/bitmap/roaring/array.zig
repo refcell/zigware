@@ -382,3 +382,14 @@ test "roaring array: codec" {
         try testing.expectEqualStrings("Array", reader.diagnostic.context);
     }
 }
+
+test "roaring array: union copies a disjoint later tail (test_union_disjoint_unlimited)" {
+    const gpa = testing.allocator;
+    var a = try sample(&.{ 1, 2, 3 });
+    defer a.deinit(gpa);
+    var b = try sample(&.{ 10, 11, 12 });
+    defer b.deinit(gpa);
+    const max = std.math.maxInt(usize);
+    try expect_result(try a.@"union"(gpa, &b, max), &.{ 1, 2, 3, 10, 11, 12 });
+    try expect_result(try b.@"union"(gpa, &a, max), &.{ 1, 2, 3, 10, 11, 12 });
+}

@@ -462,3 +462,29 @@ test "roaring run: codec" {
         try testing.expectEqualStrings(case[1], reader.diagnostic.message);
     }
 }
+
+test "roaring run: a full bitmap is one run (test_from_full_bitmap)" {
+    const gpa = testing.allocator;
+    const full = Bitmap.from_words(@splat(~@as(u64, 0)));
+    var run = try Run.from_bitmap(gpa, &full);
+    defer run.deinit(gpa);
+    try testing.expectEqual(@as(usize, 1), run.run_count());
+    try testing.expectEqual(@as(u32, 65536), run.len());
+    try expect_spans(&run, &.{.{ 0, 65535 }});
+}
+
+test "roaring run: encode size is the count plus four bytes per run" {
+    // commonware `test_encode_size_empty` and `test_encode_size_grows_per_run`.
+    const gpa = testing.allocator;
+    var run: Run = .{};
+    defer run.deinit(gpa);
+    try testing.expectEqual(codec.encode_size(usize, 0), codec.encode_size(Run, run));
+    for (0..5) |i| {
+        const start: u16 = @intCast(i * 100);
+        try testing.expectEqual(@as(u32, 50), try run.insert_range(gpa, start, start + 50));
+    }
+    try testing.expectEqual(codec.encode_size(usize, 5) + 5 * 4, codec.encode_size(Run, run));
+    const encoded = try codec.encode(Run, gpa, run);
+    defer gpa.free(encoded);
+    try testing.expectEqual(codec.encode_size(Run, run), encoded.len);
+}

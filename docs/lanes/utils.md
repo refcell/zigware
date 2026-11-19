@@ -258,25 +258,28 @@ Counting notes:
   `#[should_panic]` test that is missing from the input TSV.
 
 Open:
-- [ ] `cache.rs:2601` `shared_hashes_without_rehash_steps`: each op hashes a key exactly once
+- [x] `cache.rs:2601` `shared_hashes_without_rehash_steps`: each op hashes a key exactly once
   (hash-call counts)
-- [ ] `cache.rs:2868` `non_clone_keys_keep_incoming_metadata_on_ghost_hits`: on a Ghost hit
-  the caller's key, not the historical one, is stored
-- [ ] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_1::known_1_false`:
+- [x] `cache.rs:2868` `non_clone_keys_keep_incoming_metadata_on_ghost_hits`: on a Ghost hit
+  the caller's key, not the historical one, is stored. `Entry` now stores its hash, so `retain`
+  no longer rehashes keys.
+- [x] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_1::known_1_false`:
+  (all 8 cases: `futures_test.zig` "try_join_all returns a later error and cancels a pending
+  task" over counts 2, 30, 31, 64; `known` picks Rust's size-hinted collector, no counterpart)
   later error returns while first task blocks, cancelling it
-- [ ] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_1::known_2_true`:
+- [x] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_1::known_2_true`:
   same, count 2
-- [ ] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_2::known_1_false`:
+- [x] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_2::known_1_false`:
   same, count 30
-- [ ] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_2::known_2_true`:
+- [x] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_2::known_2_true`:
   same, count 30
-- [ ] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_3::known_1_false`:
+- [x] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_3::known_1_false`:
   same, count 31
-- [ ] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_3::known_2_true`:
+- [x] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_3::known_2_true`:
   same, count 31
-- [ ] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_4::known_1_false`:
+- [x] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_4::known_1_false`:
   same, count 64
-- [ ] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_4::known_2_true`:
+- [x] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_4::known_2_true`:
   same, count 64
 
 Not portable:
@@ -367,58 +370,58 @@ Not portable:
 | **Total** | **360** | **292** | **32** | **36** |
 
 Open:
-- [ ] `bitmap/mod.rs:1800` `test_multi_chunk_operations`: and/or/xor over two full 4-byte chunks
-- [ ] `bitmap/mod.rs:1843` `test_partial_chunk_operations`: and/or/xor keep length on 35-bit maps
-- [ ] `bitmap/mod.rs:2128` `test_ones_iter_empty`: ones_iter of an empty bitmap yields nothing
-- [ ] `bitmap/mod.rs:2135` `test_ones_iter_all_zeros`: ones_iter of zeroes(100) yields nothing
-- [ ] `bitmap/mod.rs:2162` `test_ones_iter_single_bit`: one-bit bitmap, set and unset
-- [ ] `bitmap/mod.rs:2219` `test_ones_iter_matches_count_ones`: ones_iter count equals count_ones
-- [ ] `bitmap/mod.rs:2716` `test_from_different_chunk_sizes`: from_bools at N=8 and N=16
-- [ ] `bitmap/mod.rs:2960` `is_unset_chunk_boundaries`: is_unset with N=1 (8-bit chunks)
-- [ ] `bitmap/roaring/container/array.rs:796` `test_union_disjoint_unlimited`: union copies b's
+- [x] `bitmap/mod.rs:1800` `test_multi_chunk_operations`: and/or/xor over two full 4-byte chunks
+- [x] `bitmap/mod.rs:1843` `test_partial_chunk_operations`: and/or/xor keep length on 35-bit maps
+- [x] `bitmap/mod.rs:2128` `test_ones_iter_empty`: ones_iter of an empty bitmap yields nothing
+- [x] `bitmap/mod.rs:2135` `test_ones_iter_all_zeros`: ones_iter of zeroes(100) yields nothing
+- [x] `bitmap/mod.rs:2162` `test_ones_iter_single_bit`: one-bit bitmap, set and unset
+- [x] `bitmap/mod.rs:2219` `test_ones_iter_matches_count_ones`: ones_iter count equals count_ones
+- [x] `bitmap/mod.rs:2716` `test_from_different_chunk_sizes`: from_bools at N=8 and N=16
+- [x] `bitmap/mod.rs:2960` `is_unset_chunk_boundaries`: is_unset with N=1 (8-bit chunks)
+- [x] `bitmap/roaring/container/array.rs:796` `test_union_disjoint_unlimited`: union copies b's
   tail when b lies entirely after a
-- [ ] `bitmap/roaring/container/bitmap.rs:636` `test_iterator_size_hint_after_exhaustion_regression`:
+- [x] `bitmap/roaring/container/bitmap.rs:636` `test_iterator_size_hint_after_exhaustion_regression`:
   iter remaining() is 0 after exhaustion
-- [ ] `bitmap/roaring/container/bitmap.rs:849` `test_encode_size_independent_of_cardinality`: full
+- [x] `bitmap/roaring/container/bitmap.rs:849` `test_encode_size_independent_of_cardinality`: full
   bitmap encode_size equals empty
-- [ ] `bitmap/roaring/container/bitmap.rs:911` `test_run_count_idempotent_on_duplicate`: duplicate
+- [x] `bitmap/roaring/container/bitmap.rs:911` `test_run_count_idempotent_on_duplicate`: duplicate
   insert leaves run_count unchanged
-- [ ] `bitmap/roaring/container/bitmap.rs:920` `test_run_count_at_boundaries`: run_count at 0 and
+- [x] `bitmap/roaring/container/bitmap.rs:920` `test_run_count_at_boundaries`: run_count at 0 and
   u16 max, extending inward
-- [ ] `bitmap/roaring/container/bitmap.rs:964` `test_from_words_run_count_matches_scan`:
+- [x] `bitmap/roaring/container/bitmap.rs:964` `test_from_words_run_count_matches_scan`:
   from_words alternating word gives run_count 32
-- [ ] `bitmap/roaring/container/mod.rs:742` `test_new_container`: new container is empty, array kind
-- [ ] `bitmap/roaring/container/mod.rs:766` `test_equality_ignores_representation`: eql across
+- [x] `bitmap/roaring/container/mod.rs:742` `test_new_container`: new container is empty, array kind
+- [x] `bitmap/roaring/container/mod.rs:766` `test_equality_ignores_representation`: eql across
   array/bitmap/run kinds
-- [ ] `bitmap/roaring/container/mod.rs:786` `test_decode_rejects_noncanonical_sparse_bitmap_container`:
+- [x] `bitmap/roaring/container/mod.rs:786` `test_decode_rejects_noncanonical_sparse_bitmap_container`:
   sparse bitmap payload rejected (only array-as-run tested)
-- [ ] `bitmap/roaring/container/mod.rs:807` `test_decode_rejects_noncanonical_full_bitmap_container`:
+- [x] `bitmap/roaring/container/mod.rs:807` `test_decode_rejects_noncanonical_full_bitmap_container`:
   full bitmap payload rejected
-- [ ] `bitmap/roaring/container/mod.rs:825` `test_encode_canonicalizes_sparse_bitmap_container`:
+- [x] `bitmap/roaring/container/mod.rs:825` `test_encode_canonicalizes_sparse_bitmap_container`:
   sparse bitmap encodes and decodes as array
-- [ ] `bitmap/roaring/container/mod.rs:838` `test_encode_canonicalizes_full_bitmap_container`:
+- [x] `bitmap/roaring/container/mod.rs:838` `test_encode_canonicalizes_full_bitmap_container`:
   full bitmap encodes and decodes as run
-- [ ] `bitmap/roaring/container/mod.rs:848`
+- [x] `bitmap/roaring/container/mod.rs:848`
   `test_encode_sparse_bitmap_container_spanning_first_to_last_word`: values in first/last words
-- [ ] `bitmap/roaring/container/mod.rs:871` `test_encode_sparse_run_container_ending_at_max`:
+- [x] `bitmap/roaring/container/mod.rs:871` `test_encode_sparse_run_container_ending_at_max`:
   sparse run ending at u16 max encodes as array
-- [ ] `bitmap/roaring/container/mod.rs:891`
+- [x] `bitmap/roaring/container/mod.rs:891`
   `test_decode_normalization_is_idempotent_after_run_to_bitmap`: re-encode is stable
-- [ ] `bitmap/roaring/container/mod.rs:940` `test_max_cardinality_serializes_as_bitmap`: 4096-value
+- [x] `bitmap/roaring/container/mod.rs:940` `test_max_cardinality_serializes_as_bitmap`: 4096-value
   array decodes as bitmap
-- [ ] `bitmap/roaring/container/mod.rs:980`
+- [x] `bitmap/roaring/container/mod.rs:980`
   `test_insert_range_overlap_noop_does_not_force_bitmap_conversion`: no-op range keeps array
-- [ ] `bitmap/roaring/container/mod.rs:1089` `test_no_thrash_in_hysteresis_band`: bitmap stays
+- [x] `bitmap/roaring/container/mod.rs:1089` `test_no_thrash_in_hysteresis_band`: bitmap stays
   bitmap inside the threshold band
-- [ ] `bitmap/roaring/container/mod.rs:1120` `test_union_bitmap_fast_path_normalizes_to_run`:
+- [x] `bitmap/roaring/container/mod.rs:1120` `test_union_bitmap_fast_path_normalizes_to_run`:
   bitmap union result is run kind
-- [ ] `bitmap/roaring/container/mod.rs:1132`
+- [x] `bitmap/roaring/container/mod.rs:1132`
   `test_intersection_bitmap_fast_path_normalizes_to_array_when_sparse`: result kind array
-- [ ] `bitmap/roaring/container/mod.rs:1150`
+- [x] `bitmap/roaring/container/mod.rs:1150`
   `test_difference_bitmap_fast_path_normalizes_to_array_when_sparse`: result kind array
-- [ ] `bitmap/roaring/container/run.rs:771` `test_from_full_bitmap`: full bitmap converts to one run
-- [ ] `bitmap/roaring/container/run.rs:796` `test_encode_size_empty`: empty run encode size
-- [ ] `bitmap/roaring/container/run.rs:802` `test_encode_size_grows_per_run`: encode size for 5 runs
+- [x] `bitmap/roaring/container/run.rs:771` `test_from_full_bitmap`: full bitmap converts to one run
+- [x] `bitmap/roaring/container/run.rs:796` `test_encode_size_empty`: empty run encode size
+- [x] `bitmap/roaring/container/run.rs:802` `test_encode_size_grows_per_run`: encode size for 5 runs
 
 Not portable:
 - `bitmap/atomic.rs` `test_set_past_len_panics`, `test_set_past_len_in_tail_word_panics`,

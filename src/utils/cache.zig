@@ -450,6 +450,9 @@ pub fn Cache(comptime K: type, comptime V: type) type {
             live: bool,
             /// `key` holds a key (false for prefilled slots never used).
             keyed: bool,
+            /// The hash of `key` when it was inserted, so `retain` detaches without
+            /// rehashing (commonware's table retain works from slot ownership).
+            hash: u64 = 0,
         };
 
         /// What `get_or_insert_mut` returns: the slot and its value.
@@ -608,7 +611,7 @@ pub fn Cache(comptime K: type, comptime V: type) type {
         pub fn retain(self: *Self, predicate: anytype) void {
             for (self.slots.items, 0..) |*entry, slot| {
                 if (!entry.live or predicate.keep(entry.key, &entry.value)) continue;
-                self.detach(slot, key_hash(K, entry.key));
+                self.detach(slot, entry.hash);
             }
         }
 
@@ -716,6 +719,7 @@ pub fn Cache(comptime K: type, comptime V: type) type {
                     .state = .init(admission),
                     .live = true,
                     .keyed = true,
+                    .hash = hash,
                 });
             } else {
                 const entry = &self.slots.items[slot];
@@ -726,6 +730,7 @@ pub fn Cache(comptime K: type, comptime V: type) type {
                 entry.state = .init(admission);
                 entry.live = true;
                 entry.keyed = true;
+                entry.hash = hash;
             }
             switch (admission) {
                 .small => self.small.push(self.slots.items, self.topology, slot),

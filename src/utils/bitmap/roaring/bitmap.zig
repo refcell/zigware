@@ -378,3 +378,55 @@ test "roaring bitmap: codec" {
     const short = codec.decode(Bitmap, testing.allocator, encoded[1..]);
     try testing.expectError(error.EndOfBuffer, short);
 }
+
+test "roaring bitmap: iterator remaining stays 0 after exhaustion" {
+    // commonware `test_iterator_size_hint_after_exhaustion_regression`.
+    var bitmap: Bitmap = .{};
+    _ = bitmap.insert(5);
+    _ = bitmap.insert(100);
+    var it = bitmap.iter();
+    try testing.expectEqual(@as(usize, 2), it.remaining());
+    try testing.expectEqual(@as(?u16, 5), it.next());
+    try testing.expectEqual(@as(usize, 1), it.remaining());
+    try testing.expectEqual(@as(?u16, 100), it.next());
+    try testing.expectEqual(@as(usize, 0), it.remaining());
+    try testing.expectEqual(@as(?u16, null), it.next());
+    try testing.expectEqual(@as(usize, 0), it.remaining());
+    const empty: Bitmap = .{};
+    var none = empty.iter();
+    try testing.expectEqual(@as(usize, 0), none.remaining());
+    try testing.expectEqual(@as(?u16, null), none.next());
+    try testing.expectEqual(@as(usize, 0), none.remaining());
+}
+
+test "roaring bitmap: encode size is independent of cardinality" {
+    // commonware `test_encode_size_independent_of_cardinality`.
+    var full: Bitmap = .{};
+    try testing.expectEqual(@as(u32, 65535), full.insert_range(0, 65535));
+    try testing.expect(full.insert(65535));
+    try testing.expect(full.is_full());
+    try testing.expectEqual(codec.encode_size(Bitmap, .{}), codec.encode_size(Bitmap, full));
+}
+
+test "roaring bitmap: run_count on duplicates, at the boundaries, and from words" {
+    // commonware `test_run_count_idempotent_on_duplicate`, `test_run_count_at_boundaries`,
+    // and `test_from_words_run_count_matches_scan`.
+    var duplicate: Bitmap = .{};
+    _ = duplicate.insert(42);
+    try testing.expect(!duplicate.insert(42));
+    try testing.expectEqual(@as(u16, 1), duplicate.run_count());
+
+    var edges: Bitmap = .{};
+    const steps = [_]struct { u16, u16 }{ .{ 0, 1 }, .{ 65535, 2 }, .{ 65534, 2 }, .{ 1, 2 } };
+    for (steps) |step| {
+        _ = edges.insert(step[0]);
+        try testing.expectEqual(step[1], edges.run_count());
+    }
+    try testing.expectEqual(count_runs(&edges.words), edges.run_count());
+
+    var words: [WORDS]u64 = @splat(0);
+    words[0] = 0xAAAA_AAAA_AAAA_AAAA;
+    const alternating = Bitmap.from_words(words);
+    try testing.expectEqual(@as(u16, 32), alternating.run_count());
+    try testing.expectEqual(count_runs(&alternating.words), alternating.run_count());
+}
