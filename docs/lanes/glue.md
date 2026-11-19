@@ -338,6 +338,94 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   commonware's 64-byte bitmap chunks in tests. Staged `merkleize` consumes the staged batch
   also on error.
 
+### Test coverage (commonware `#[test]` audit, 2026-11-19)
+Every glue module outside dkg. Counts are commonware's `#[test]` functions per file, rstest
+cases and macro expansions (compact.rs's `adapter_tests!` twice, conformance macros) counted
+one each, matched by reading each test to a zigware counterpart. Owner is who ports the open
+ones: d = deployer (thread T-01a1d5b9-c237), u = utils.
+
+| commonware file | tests | ported | open | not portable | owner |
+| --- | --- | --- | --- | --- | --- |
+| simulate (action, plan, tracker) | 16 | 16 | 0 | 0 | |
+| transfers/tests.rs | 53 | 53 | 0 | 0 | |
+| stateful/probe/mod.rs (+2 conformance) | 22 | 18 | 4 | 0 | u |
+| stateful/probe/limits.rs | 1 | 1 | 0 | 0 | |
+| stateful/db/mod.rs | 83 | 32 | 29 | 22 | d |
+| stateful/db/any.rs | 3 | 3 | 0 | 0 | |
+| stateful/db/current.rs | 11 | 11 | 0 | 0 | |
+| stateful/db/keyless/standard.rs | 5 | 5 | 0 | 0 | |
+| stateful/db/immutable/standard.rs | 2 | 2 | 0 | 0 | |
+| stateful/db/compact.rs | 39 | 25 | 14 | 0 | d |
+| stateful/db/p2p/actor.rs | 24 | 16 | 8 | 0 | d |
+| stateful/db/p2p/handler.rs, limits.rs | 3 | 3 | 0 | 0 | |
+| stateful/db/p2p/mailbox.rs | 4 | 3 | 1 | 0 | d |
+| stateful/actor/syncer/actor.rs | 13 | 8 | 5 | 0 | d |
+| stateful/actor/syncer/mailbox.rs | 2 | 2 | 0 | 0 | |
+| stateful/actor/syncer/plan.rs | 7 | 6 | 1 | 0 | d |
+| stateful/actor/syncer/mod.rs (conformance) | 1 | 1 | 0 | 0 | |
+| stateful/actor/core/mailbox.rs | 2 | 2 | 0 | 0 | |
+| stateful/actor/core/mod.rs | 4 | 1 | 3 | 0 | u |
+| stateful/actor/core/syncing.rs | 16 | 5 | 11 | 0 | d |
+| stateful/actor/core/processing.rs | 86 | 0 | 86 | 0 | u |
+| stateful/actor/processor/mod.rs | 44 | 22 | 22 | 0 | u |
+| stateful/tests/mod.rs, floor.rs | 28 | 0 | 28 | 0 | u |
+| **total** | **469** | **235** | **212** | **22** | |
+
+- Not portable (db/mod.rs, 22): zigware's `Barrier` is synchronous (databases persist inside
+  `finalize`), so `barrier_waits_for_every_handle` (8), `barrier_cancellation_releases_handles`
+  (8), `barrier_reports_shutdown_as_not_durable`, and the shutdown half of
+  `barrier_panics_on_later_failure` (3) have no pending handle to wait on or cancel; tuple
+  members run one after another under their mutexes, so `tuple_new_batches_queues_reads_concurrently`
+  and `tuple_apply_runs_databases_in_parallel` have no concurrency to observe.
+- Open, d (deployer):
+  - db/mod.rs: the cross-adapter rstests `merkleize_stale_batch_returns_error` (6) and
+    `initial_sync_target_and_empty_apply_match_initialized_database` (14);
+    `tuple_apply_does_not_hold_ready_writer_while_waiting_for_reader`,
+    `tuple_apply_cancellation_leaves_completed_and_untouched_members`,
+    `heterogeneous_tuple_attach_compiles`; and the evicted-target and generation tests
+    `reached_events_keep_the_newest_event_per_database`,
+    `generation_drain_reports_only_the_newest_assignment`,
+    `single_state_sync_converges_with_late_reports_after_evicted_targets`,
+    `single_state_sync_adopts_queued_tip_before_finishing`,
+    `tuple_state_sync_converges_after_evicted_targets`,
+    `tuple_state_sync_ignores_stale_reached_after_forwarded_tip`.
+  - compact.rs, each for keyless and immutable: `state_sync_stops_compact_update_forwarder_after_completion`,
+    `state_sync_drains_queued_target_before_reporting_reached`,
+    `state_sync_reports_compact_progress_from_{compact,full}_source`,
+    `state_sync_supersedes_in_flight_stale_target_from_{compact,full}_source`,
+    `managed_db_initializes_multiple_commit_ranges`.
+  - db/p2p actor.rs: `completed_request_cleanup_preserves_new_subscriber`,
+    `cancellation_before_resolver_admission_preserves_replacement`,
+    `fanout_waits_for_slow_receipt_and_preserves_other_demand_on_cancel` (2),
+    `concurrent_serves_complete_after_database_is_available`,
+    `concurrent_serves_preserve_actor_progress`,
+    `pending_feedback_allows_fetches_serves_and_cancellation`,
+    `late_subscriber_receives_cached_response_after_verdict_or_cancellation`; mailbox.rs:
+    `dropping_get_operations_closes_queued_reply`.
+  - syncer: `resolve_follows_live_floor_after_startup` (2),
+    `restart_resumes_floor_installed_before_stateful`,
+    `resolve_skips_selected_block_pruned_by_newer_floor`,
+    `resolve_recovers_round_after_boundary_prune` (these run on a real prunable marshal:
+    marshal mocks' `PrunableArchives`); plan.rs `complete_height_cannot_move_backward`.
+  - core/syncing.rs: the transition, ack-window, retarget, and shutdown tests (11), which drive
+    `Syncing` through the stateful wiring.
+- Open, u (utils):
+  - probe: `requests_finalizations_only_from_current_participants`,
+    `invalid_duplicate_finalization_is_ignored`,
+    `resolves_rotated_committee_finalization_from_solicited_peers`,
+    `sample_size_uses_scoped_scheme_with_participantless_all_verifier`.
+  - core/mod.rs: `mailbox_prepare_attaches_decision`,
+    `mailbox_rejects_propose_while_floor_resolution_waits`,
+    `startup_recovery_releases_cancelled_verify_ancestries`.
+  - core/processing.rs: all 86 scenarios. zigware's 16 core unit tests (processing,
+    verifications, durability, stateful) cover the same mechanisms, but none is a one-to-one
+    port.
+  - processor/mod.rs: the `rebuild_pending` rejections (7), the finalize panics and duplicates
+    (6), the in-flight winner and late losing fork, forking before apply, ancestry across
+    recovery, the dropped-flight and woken-request hand-offs, overlapping rebuilds, and the
+    deferred-prune ordering.
+  - tests/: the app scenarios on marshal's harness.
+
 ### Backlog
 - [x] db: `Shared`, `Reader`, `Barrier`, single and tuple sets, with mod.rs's set tests.
 - [x] db/any: the ManagedDb adapter with any.rs's stale-read and apply-does-not-finalize tests.

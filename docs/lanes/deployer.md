@@ -166,6 +166,26 @@ test vectors. Tests never call AWS and never hold credentials.
   configurations (YAML round trip, name validation against the rules). Each target was checked
   by planting a bug it catches.
 
+## Test coverage (commonware `#[test]` audit, 2026-11-19)
+Counts are commonware's `#[test]`/`#[tokio::test]` functions per file, with rstest cases and
+macro expansions counted once each, matched by reading each test to a zigware counterpart.
+
+| commonware file | tests | ported | open | not portable |
+| --- | --- | --- | --- | --- |
+| aws/attach.rs | 4 | 4 | 0 | 0 |
+| aws/create.rs | 24 | 24 | 0 | 0 |
+| aws/ec2.rs | 12 | 12 | 0 | 0 |
+| aws/mod.rs | 1 | 1 | 0 | 0 |
+| aws/services.rs | 10 | 10 | 0 | 0 |
+| aws/utils.rs | 4 | 4 | 0 | 0 |
+| **total** | **55** | **55** | **0** | **0** |
+
+`request_construction_failure_is_not_retryable` is ec2_test's "an unscripted dispatch
+failure..." (zigware's transport has no SDK build step, so construction and credential
+failures are one non-transient dispatch failure). zigware adds 119 tests of its own for code
+that commonware leaves to the AWS SDK: SigV4 vectors, the S3 and EC2 Query calls, XML
+scanning, credentials, every command over scripted responses, the CLI, YAML, and fuzz targets.
+
 ## Log
 - 2026-11-16: lane started.
 - 2026-11-16: `deployer.yaml`, `deployer.IpAddr`, and the aws config types landed with
