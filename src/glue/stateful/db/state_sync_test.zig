@@ -870,6 +870,10 @@ fn open_gate() !GatePair {
 }
 
 test "stateful state sync: a tuple sync converges before finishing" {
+    try run_on_deterministic(tuple_converges_before_finishing);
+}
+
+fn tuple_converges_before_finishing() anyerror!void {
     const P = Pair(SlowSyncDb, SlowSyncDb);
     const tips = try P.channel(4);
     var sender = tips.sender;
@@ -894,6 +898,10 @@ test "stateful state sync: a tuple sync converges before finishing" {
 }
 
 test "stateful state sync: a tuple sync ignores backward tip updates" {
+    try run_on_deterministic(tuple_ignores_backward_tips);
+}
+
+fn tuple_ignores_backward_tips() anyerror!void {
     const P = Pair(SlowSyncDb, SlowSyncDb);
     const tips = try P.channel(8);
     var sender = tips.sender;
@@ -921,6 +929,10 @@ test "stateful state sync: a tuple sync ignores backward tip updates" {
 }
 
 test "stateful state sync: a tuple sync rejects a database target mismatch" {
+    try run_on_deterministic(tuple_rejects_target_mismatch);
+}
+
+fn tuple_rejects_target_mismatch() anyerror!void {
     const P = Pair(MismatchedTargetSyncDb, SlowSyncDb);
     var tips = try P.channel(1);
     defer tips.sender.deinit();
@@ -941,6 +953,10 @@ fn expect_second_failed(result: anytype, failure: ?state_sync_tuple.Failure) !vo
 }
 
 test "stateful state sync: a tuple sync returns a database's error when the anchor is missing" {
+    try run_on_deterministic(tuple_fails_without_anchor);
+}
+
+fn tuple_fails_without_anchor() anyerror!void {
     const P = Pair(ImmediateStateSyncDb, FailingStateSyncDb);
     var tips = try P.channel(1);
     defer tips.sender.deinit();
@@ -950,6 +966,10 @@ test "stateful state sync: a tuple sync returns a database's error when the anch
 }
 
 test "stateful state sync: a tuple sync returns a database's error while another waits" {
+    try run_on_deterministic(tuple_fails_while_another_waits);
+}
+
+fn tuple_fails_while_another_waits() anyerror!void {
     const P = Pair(SlowSyncDb, FailingStateSyncDb);
     var tips = try P.channel(1);
     defer tips.sender.deinit();
@@ -962,6 +982,10 @@ test "stateful state sync: a tuple sync returns a database's error while another
 }
 
 test "stateful state sync: a tuple sync keeps the original failure when a finish channel closes" {
+    try run_on_deterministic(tuple_keeps_original_failure);
+}
+
+fn tuple_keeps_original_failure() anyerror!void {
     const P = Pair(FinishClosedSyncDb, FailingStateSyncDb);
     var tips = try P.channel(1);
     defer tips.sender.deinit();
