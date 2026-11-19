@@ -151,3 +151,35 @@ test "empty set" {
     try testing.expect(!set.update(key(1), true));
     try testing.expect(!set.update_at(0, true));
 }
+
+test "copied knowledge stays as it was after later updates" {
+    var set = try test_set();
+    defer set.deinit(testing.allocator);
+    const gpa = testing.allocator;
+    var before = try set.copy_knowledge(gpa);
+    defer before.deinit(gpa);
+    try testing.expect(set.update(key(2), true));
+    var first = try set.copy_knowledge(gpa);
+    defer first.deinit(gpa);
+    try expect_bits(&set, &.{ false, true, false });
+    try testing.expect(!before.eql(&first));
+    try testing.expect(set.update(key(3), true));
+    try expect_bits(&set, &.{ false, true, true });
+    try testing.expect(!first.eql(&set.knowledge));
+    // The first copy still knows nobody.
+    for (0..3) |bit| try testing.expect(!before.get(bit));
+}
+
+test "a single peer set" {
+    const ordered = try testing.allocator.dupe(PublicKey, &.{key(42)});
+    var set = try BitSet(PublicKey).init(testing.allocator, ordered);
+    defer set.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), set.len());
+    try testing.expect(set.ordered[0].eql(key(42)));
+    try testing.expectEqual(@as(?usize, 0), set.position(key(42)));
+    try expect_bits(&set, &.{false});
+    try testing.expect(set.update(key(42), true));
+    try expect_bits(&set, &.{true});
+    try testing.expect(set.update(key(42), false));
+    try expect_bits(&set, &.{false});
+}

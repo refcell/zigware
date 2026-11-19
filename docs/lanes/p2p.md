@@ -344,107 +344,107 @@ Open:
   is private; drive via an untracked peer connecting)
 - [ ] `authenticated/discovery/actors/spawner/actor.rs` `router_rejection_sends_no_greeting`: when
   router.ready fails (router shut down), serve sends no greeting; network_test.zig
-- [ ] `authenticated/discovery/actors/tracker/actor.rs`
+- [x] `authenticated/discovery/actors/tracker/actor.rs`
   `test_connect_unauthorized_peer_returns_none`: Tracker.connect returns null for an untracked peer
   as dialer and as listener; new src/p2p/authenticated/discovery/tracker_test.zig (tracker.zig has
   no tests; lookup has the counterpart)
-- [ ] `authenticated/discovery/actors/tracker/actor.rs`
+- [x] `authenticated/discovery/actors/tracker/actor.rs`
   `test_connect_authorized_peer_receives_tracker_info`: after track+listen, Tracker.connect returns
   our own Info (key, ingress, verifies in ip namespace); tracker_test.zig
-- [ ] `authenticated/discovery/actors/tracker/actor.rs` `test_construct_no_sets_tracked`:
+- [x] `authenticated/discovery/actors/tracker/actor.rs` `test_construct_no_sets_tracked`:
   Tracker.construct with no tracked sets (bootstrapper connected) queues nothing on the outbox;
   tracker_test.zig
-- [ ] `authenticated/discovery/actors/tracker/actor.rs`
+- [x] `authenticated/discovery/actors/tracker/actor.rs`
   `test_handle_bit_vec_for_unknown_index_sends_no_peers`: Tracker.bit_vec for an unknown index
   queues no peers frame (directory_test only checks infos returns empty); tracker_test.zig
-- [ ] `authenticated/discovery/actors/tracker/actor.rs` `test_block_peer_standard_behavior`:
+- [x] `authenticated/discovery/actors/tracker/actor.rs` `test_block_peer_standard_behavior`:
   Tracker.block of a connected peer kills its outbox and removes it from dialable; tracker_test.zig
-- [ ] `authenticated/discovery/actors/tracker/actor.rs`
+- [x] `authenticated/discovery/actors/tracker/actor.rs`
   `test_register_disconnects_removed_peer_with_known_mailbox`: Tracker.track of a set without a
   connected peer kills that peer's outbox (directory_test checks only the returned kill list);
   tracker_test.zig
-- [ ] `authenticated/discovery/actors/tracker/actor.rs`
+- [x] `authenticated/discovery/actors/tracker/actor.rs`
   `test_reserved_removed_peer_rejected_on_connect`: a peer reserved then dropped from the sets gets
   null from Tracker.connect and no kill, and its reservation is still releasable; tracker_test.zig
-- [ ] `authenticated/discovery/actors/tracker/actor.rs`
+- [x] `authenticated/discovery/actors/tracker/actor.rs`
   `test_register_keeps_connected_peer_present_across_rollover`: a connected peer present in the new
   set is not killed when the old set rolls off, and construct still sends it a bit vec;
   tracker_test.zig
-- [ ] `authenticated/discovery/actors/tracker/actor.rs`
+- [x] `authenticated/discovery/actors/tracker/actor.rs`
   `test_block_clears_peer_mailbox_and_only_kills_once`: blocking a connected peer kills its outbox
   once and forgets it, so a second block sends no kill; tracker_test.zig
-- [ ] `authenticated/discovery/actors/tracker/actor.rs`
+- [x] `authenticated/discovery/actors/tracker/actor.rs`
   `test_blocked_subscription_tracks_block_and_expiry`: Tracker.blocked_subscription starts empty,
   shows the blocked peer with expiry, late subscribers see it, and both see empty after run_unblock;
   tracker_test.zig
-- [ ] `authenticated/discovery/actors/tracker/actor.rs` `test_block_peer_already_blocked_is_noop`:
+- [x] `authenticated/discovery/actors/tracker/actor.rs` `test_block_peer_already_blocked_is_noop`:
   blocking a tracked peer twice is a no-op and Tracker.connect then returns null without a kill;
   tracker_test.zig
-- [ ] `authenticated/discovery/actors/tracker/actor.rs` `test_handle_peers_learns_unknown_peer`:
+- [x] `authenticated/discovery/actors/tracker/actor.rs` `test_handle_peers_learns_unknown_peer`:
   Tracker.peers with info for a newly tracked peer, then a bit_vec from a connected peer, queues a
   peers frame holding that info; tracker_test.zig
-- [ ] `authenticated/discovery/actors/tracker/actor.rs`
+- [x] `authenticated/discovery/actors/tracker/actor.rs`
   `test_handle_peers_rejects_older_info_for_known_peer`: an older Info passed to Tracker.peers is
   ignored, so gossip still carries the newer timestamp (record_test covers only Record.update);
   tracker_test.zig
-- [ ] `authenticated/discovery/actors/tracker/actor.rs` `test_dialable_message`: Tracker.dialable
+- [x] `authenticated/discovery/actors/tracker/actor.rs` `test_dialable_message`: Tracker.dialable
   lists a configured bootstrapper with no sets tracked; tracker_test.zig
-- [ ] `authenticated/discovery/actors/tracker/actor.rs`
+- [x] `authenticated/discovery/actors/tracker/actor.rs`
   `test_secondary_peers_are_connectable_but_not_primary`: subscription update lists secondary
   separately from primary, secondary is acceptable, and after gossip it is still not dialable;
   tracker_test.zig
-- [ ] `authenticated/discovery/actors/tracker/actor.rs`
+- [x] `authenticated/discovery/actors/tracker/actor.rs`
   `test_overlapping_primary_secondary_no_duplicate_in_subscription`: the subscription update for a
   peer in both roles lists it as primary only (latest and all) and it is acceptable;
   tracker_test.zig (directory_test checks latest_update, not the subscription)
-- [ ] `authenticated/discovery/actors/tracker/actor.rs` `test_dial_message`: Tracker.dial of a
+- [x] `authenticated/discovery/actors/tracker/actor.rs` `test_dial_message`: Tracker.dial of a
   bootstrapper returns dialer metadata with its ingress, and dial of an unknown peer returns null;
   tracker_test.zig
-- [ ] `authenticated/discovery/actors/tracker/actor.rs` `test_bitvec_kill_on_length_mismatch`: a bit
+- [x] `authenticated/discovery/actors/tracker/actor.rs` `test_bitvec_kill_on_length_mismatch`: a bit
   vec whose length differs from the set kills the sender's outbox (directory_test checks only infos
   returning null); tracker_test.zig
-- [ ] `authenticated/discovery/actors/tracker/actor.rs` `test_bit_vec_comprehensive`: end to end:
+- [x] `authenticated/discovery/actors/tracker/actor.rs` `test_bit_vec_comprehensive`: end to end:
   unauthorized connect null, construct sends bit vec with self/learned peer bits, bit_vec answers
   with peers, eviction kills, construct picks only live indices; tracker_test.zig
-- [ ] `authenticated/discovery/actors/tracker/bit_set.rs`
+- [x] `authenticated/discovery/actors/tracker/bit_set.rs`
   `test_knowledge_reflects_updates_and_cloning`: a copy_knowledge snapshot stays unchanged after
   later updates (current test only checks the copy equals the live bits); bit_set.zig
-- [ ] `authenticated/discovery/actors/tracker/bit_set.rs` `test_single_peer_set`: a one-peer set has
+- [x] `authenticated/discovery/actors/tracker/bit_set.rs` `test_single_peer_set`: a one-peer set has
   len 1, position 0, and update toggles its single bit; bit_set.zig
-- [ ] `authenticated/discovery/actors/tracker/directory.rs` `test_block_peer_multiple_times`:
+- [x] `authenticated/discovery/actors/tracker/directory.rs` `test_block_peer_multiple_times`:
   blocking a tracked peer and an unknown peer three times each: repeats are no-ops and the blocked
   metric stays set (only a double block of an unknown peer is tested); directory_test.zig
-- [ ] `authenticated/discovery/actors/tracker/directory.rs`
+- [x] `authenticated/discovery/actors/tracker/directory.rs`
   `test_blocked_peer_remains_blocked_on_update`: update_peers on a blocked peer stores the new
   ingress but keeps it blocked until expiry, then the info stays; directory_test.zig
-- [ ] `authenticated/discovery/actors/tracker/directory.rs` `test_blocked_peer_not_dialable`:
+- [x] `authenticated/discovery/actors/tracker/directory.rs` `test_blocked_peer_not_dialable`:
   blocked peer leaves dialable and returns after unblock_expired (only the leave half is in "blocked
   peers are neither dialable nor shared"); directory_test.zig
-- [ ] `authenticated/discovery/actors/tracker/directory.rs` `test_blocked_peer_info_not_sharable`: a
+- [x] `authenticated/discovery/actors/tracker/directory.rs` `test_blocked_peer_info_not_sharable`: a
   connected peer that is blocked and then released has no sharable info, before or after unblock;
   directory_test.zig (the Zig test checks only infos while still connected)
-- [ ] `authenticated/discovery/actors/tracker/directory.rs` `test_infos_excludes_blocked_peers`:
+- [x] `authenticated/discovery/actors/tracker/directory.rs` `test_infos_excludes_blocked_peers`:
   after block+release of one of two connected peers, infos returns only the other (the Zig test
   stops before release and expects both); directory_test.zig
-- [ ] `authenticated/discovery/actors/tracker/directory.rs` `test_dialable_empty`: dialable on a
+- [x] `authenticated/discovery/actors/tracker/directory.rs` `test_dialable_empty`: dialable on a
   directory with no peers returns no peers and a null next_query_at; directory_test.zig
-- [ ] `authenticated/discovery/actors/tracker/directory.rs`
+- [x] `authenticated/discovery/actors/tracker/directory.rs`
   `test_dialable_expired_block_without_unblock`: once a block expires, dialable lists the peer with
   no stale next_query_at and dial succeeds even without unblock_expired; directory_test.zig
-- [ ] `authenticated/discovery/actors/tracker/directory.rs`
+- [x] `authenticated/discovery/actors/tracker/directory.rs`
   `test_reblock_after_expired_block_without_unblock`: re-blocking a peer whose block expired
   (unblock_expired not run) makes it undialable and unreservable again; directory_test.zig
-- [ ] `authenticated/discovery/actors/tracker/directory.rs`
+- [x] `authenticated/discovery/actors/tracker/directory.rs`
   `test_block_with_unbounded_duration_does_not_panic`: block with block_duration = max saturates
   without panicking and the peer is ineligible (lookup has "block with an unbounded duration
   saturates", discovery does not); directory_test.zig
-- [ ] `authenticated/discovery/actors/tracker/record.rs` `test_update_with_different_public_key`: a
+- [x] `authenticated/discovery/actors/tracker/record.rs` `test_update_with_different_public_key`: a
   discovered record accepts a newer Info signed by a different key, based on the timestamp alone;
   record_test.zig
-- [ ] `authenticated/discovery/actors/tracker/record.rs` `test_eligible_logic`: eligibility follows
+- [x] `authenticated/discovery/actors/tracker/record.rs` `test_eligible_logic`: eligibility follows
   primary set counts for unknown and discovered records, and an updated bootstrapper stays eligible
   (only the secondary increment and initial states are tested); record_test.zig
-- [ ] `authenticated/discovery/actors/tracker/record.rs`
+- [x] `authenticated/discovery/actors/tracker/record.rs`
   `test_reserve_with_unbounded_cooldown_does_not_panic`: reserve with a max cooldown succeeds, and
   after release returns rate_limited without overflowing; record_test.zig
 - [ ] `authenticated/lookup/mod.rs` `test_determinism_one`: Mode::One over 10 seeds with replay

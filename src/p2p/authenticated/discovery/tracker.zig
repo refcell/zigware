@@ -401,3 +401,7 @@ pub fn Tracker(comptime P: type) type {
         }
     };
 }
+
+test {
+    _ = @import("tracker_test.zig");
+}

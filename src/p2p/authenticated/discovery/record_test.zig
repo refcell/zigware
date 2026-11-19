@@ -228,3 +228,55 @@ test "dialable needs an inert outbound target with a valid ingress" {
     try testing.expect(secondary.dialable(now, true, true) == .unavailable);
     try testing.expect(secondary.acceptable());
 }
+
+test "an update takes newer info regardless of its key" {
+    // commonware `test_update_with_different_public_key`: `update` checks only timestamps.
+    var record = Record.unknown();
+    const first = peer_info(10, socket(8080), 1000);
+    const second = peer_info(11, socket(8080), 2000);
+    try testing.expect(record.update(first));
+    try expect_discovered(&record, first);
+    try testing.expect(record.update(second));
+    try expect_discovered(&record, second);
+}
+
+fn expect_discovered(record: *const Record, expected: Info) !void {
+    switch (record.address) {
+        .discovered => |discovered| {
+            try testing.expectEqual(@as(usize, 0), discovered.fails);
+            try expect_info(expected, discovered.info);
+        },
+        else => return error.TestExpectedDiscovered,
+    }
+}
+
+test "eligibility follows primary sets unless persistent" {
+    const info = peer_info(16, socket(8080), 100);
+    try testing.expect(!Record.myself(info).eligible());
+    // Bootstrappers are eligible with no sets, and stay so once discovered.
+    var bootstrapper = Record.bootstrapper(socket(8080));
+    try testing.expect(bootstrapper.eligible());
+    try testing.expect(bootstrapper.update(info));
+    try testing.expect(bootstrapper.eligible());
+    var unknown = Record.unknown();
+    try testing.expect(!unknown.eligible());
+    unknown.increment_primary();
+    try testing.expect(unknown.eligible());
+    unknown.decrement_primary();
+    try testing.expect(!unknown.eligible());
+    var discovered = Record.unknown();
+    try testing.expect(discovered.update(info));
+    try testing.expect(!discovered.eligible());
+    discovered.increment_primary();
+    try testing.expect(discovered.eligible());
+}
+
+test "an unbounded reservation cooldown saturates" {
+    var rng = utils.rng.test_rng();
+    var record = Record.unknown();
+    record.increment_primary();
+    const start: SystemTime = .UNIX_EPOCH;
+    try testing.expectEqual(.reserved, record.reserve(&rng, start, Duration.max));
+    record.release();
+    try testing.expectEqual(.rate_limited, record.reserve(&rng, start, Duration.max));
+}

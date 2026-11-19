@@ -459,3 +459,160 @@ test "blocking records the expiry until it passes" {
     defer gpa.free(text);
     try testing.expectEqual(@as(?i64, null), try metric_value(text, "directory_blocked", key(7)));
 }
+
+/// A directory over the shared registry `scope`, freed by the caller.
+fn edge_dir(scope: *const metrics.Scope, dir_config: directory_mod.Config) !Dir {
+    return Dir.init(gpa, &.{}, my_info(), dir_config, scope);
+}
+
+fn is_dialable(dir: *const Dir, at: SystemTime, peer: Key) !bool {
+    const dialable = try dir.dialable(gpa, at);
+    defer gpa.free(dialable.peers);
+    return contains(dialable.peers, peer);
+}
+
+fn blocked_metric(dir: *Dir, peer: Key) bool {
+    return dir.metrics.blocked.metric().get(.{ .peer = peer }) != null;
+}
+
+test "repeated blocks of tracked and unknown peers keep one block" {
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir = try edge_dir(&scope, config(3, false));
+    defer dir.deinit();
+    const tracked = key(50);
+    const unknown = key(99);
+    try expect_tracked(try track(&dir, 0, &.{tracked}, &.{}), &.{});
+    try testing.expect(!blocked_metric(&dir, tracked));
+    for ([_]Key{ tracked, unknown }) |peer| {
+        try testing.expect(try dir.block(epoch, peer));
+        try testing.expect(blocked_metric(&dir, peer));
+        for (0..2) |_| {
+            try testing.expect(!try dir.block(epoch, peer));
+            try testing.expect(blocked_metric(&dir, peer));
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), dir.blocked.count());
+}
+
+test "a blocked peer takes updates and keeps them past its unblock" {
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir = try edge_dir(&scope, config(3, true));
+    defer dir.deinit();
+    try expect_tracked(try track(&dir, 0, &.{key(1)}, &.{}), &.{});
+    try testing.expect(try dir.block(epoch, key(1)));
+    try testing.expect(!try is_dialable(&dir, epoch, key(1)));
+    dir.update_peers(&.{info_at(1, socket(127, 0, 0, 1, 9001), 200)});
+    try testing.expect(dir.blocked.contains(key(1)));
+    try testing.expect(dir.peers.get(key(1)).?.ingress() != null);
+    const later = at_ms(101_000);
+    try testing.expect(dir.unblock_expired(later));
+    try testing.expect(!dir.blocked.contains(key(1)));
+    try testing.expect(dir.peers.get(key(1)).?.ingress() != null);
+    // Unblocked, the peer is dialable again.
+    try testing.expect(try is_dialable(&dir, later, key(1)));
+}
+
+test "a blocked peer's info is not shared, even once unblocked" {
+    var rng = utils.rng.test_rng();
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir = try edge_dir(&scope, config(3, true));
+    defer dir.deinit();
+    try expect_tracked(try track(&dir, 0, &.{ key(1), key(2) }, &.{}), &.{});
+    dir.update_peers(&.{
+        info_at(1, socket(127, 0, 0, 1, 9001), 0),
+        info_at(2, socket(9, 9, 9, 9, 9090), 0),
+    });
+    const first = dir.dial(&rng, epoch, key(1)).?;
+    dir.connect(epoch, key(1), true);
+    const second = dir.dial(&rng, epoch, key(2)).?;
+    dir.connect(epoch, key(2), true);
+    defer dir.release(second);
+    try testing.expect(dir.info(key(1)) != null);
+    var bit_vec: types.BitVec = .{ .index = 0, .bits = try types.BitMap.zeroes(gpa, 2) };
+    defer bit_vec.deinit(gpa);
+    const both = (try dir.infos(gpa, at_ms(100), &bit_vec)).?;
+    try testing.expectEqual(@as(usize, 2), both.len);
+    gpa.free(both);
+    // The tracker kills a blocked peer's connection, which releases it.
+    try testing.expect(try dir.block(epoch, key(1)));
+    dir.release(first);
+    try testing.expectEqual(null, dir.info(key(1)));
+    const shared = (try dir.infos(gpa, at_ms(100), &bit_vec)).?;
+    defer gpa.free(shared);
+    try testing.expectEqual(@as(usize, 1), shared.len);
+    try testing.expect(shared[0].public_key.eql(key(2)));
+    _ = dir.unblock_expired(at_ms(101_000));
+    try testing.expectEqual(null, dir.info(key(1)));
+}
+
+test "an empty directory has nothing to dial and no next query" {
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir = try edge_dir(&scope, config(3, true));
+    defer dir.deinit();
+    const dialable = try dir.dialable(gpa, epoch);
+    defer gpa.free(dialable.peers);
+    try testing.expectEqual(@as(usize, 0), dialable.peers.len);
+    try testing.expectEqual(@as(?SystemTime, null), dialable.next_query_at);
+}
+
+test "an expired block stops nothing before unblock runs, and a re-block applies" {
+    var rng = utils.rng.test_rng();
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir_config = config(3, true);
+    dir_config.peer_connection_cooldown = .from_millis(200);
+    dir_config.block_duration = .from_secs(1);
+    var dir = try edge_dir(&scope, dir_config);
+    defer dir.deinit();
+    try expect_tracked(try track(&dir, 0, &.{key(1)}, &.{}), &.{});
+    dir.update_peers(&.{info_at(1, socket(127, 0, 0, 1, 9001), 200)});
+    try testing.expect(try dir.block(epoch, key(1)));
+    try testing.expect(!try is_dialable(&dir, epoch, key(1)));
+    // Two seconds later the block has expired, though `unblock_expired` has not run.
+    const later = at_ms(2_000);
+    const dialable = try dir.dialable(gpa, later);
+    defer gpa.free(dialable.peers);
+    try testing.expect(contains(dialable.peers, key(1)));
+    try testing.expectEqual(@as(?SystemTime, null), dialable.next_query_at);
+    // A re-block then makes it undialable and unreservable again.
+    try testing.expect(try dir.block(later, key(1)));
+    try testing.expect(!try is_dialable(&dir, later, key(1)));
+    try testing.expectEqual(null, dir.dial(&rng, later, key(1)));
+}
+
+test "an expired block does not prevent a reservation" {
+    var rng = utils.rng.test_rng();
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir_config = config(3, true);
+    dir_config.block_duration = .from_secs(1);
+    var dir = try edge_dir(&scope, dir_config);
+    defer dir.deinit();
+    try expect_tracked(try track(&dir, 0, &.{key(1)}, &.{}), &.{});
+    dir.update_peers(&.{info_at(1, socket(127, 0, 0, 1, 9001), 200)});
+    try testing.expect(try dir.block(epoch, key(1)));
+    dir.release(dir.dial(&rng, at_ms(2_000), key(1)).?);
+}
+
+test "a block that never expires saturates" {
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir_config = config(1, true);
+    dir_config.block_duration = Duration.max;
+    var dir = try edge_dir(&scope, dir_config);
+    defer dir.deinit();
+    try expect_tracked(try track(&dir, 0, &.{key(1)}, &.{}), &.{});
+    try testing.expect(try dir.block(epoch, key(1)));
+    try testing.expect(!dir.eligible(epoch, key(1)));
+}
