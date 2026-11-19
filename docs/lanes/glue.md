@@ -401,6 +401,15 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   earliest), `PendingLogScan`, `pending_logs(B, gpa, scan, *ancestry) !?PendingLogs`,
   `validate_future_participants`, `ArtifactRequests(A, R)`, `Ceremony`, `VerifiedLogs`,
   `Verification(V, P)` (`retain`, `ready`).
+- `dkg.orchestrator`: `max_payload_size(S, D, n)`; `Mailbox(B, A)` (a marshal reporter:
+  `init(sender)`, `report(Update)` forwards blocks and ignores tips) and `Message(B, A)`
+  (`finalized{block, ack}`, reliable overflow); `Actor(T)` with `init(ctx, Config(T)) !{
+  Actor, Mailbox }`, `run(votes, certificates, resolver: Channel) !void`, `deinit`, and
+  `ContractError`; `Config(T)`, `SimplexConfig(L)`. `T` declares `Context`, `Block`, `Ack`,
+  `Scheme`, `Provider` (`scheme(epoch) ?*const Scheme`), `Manager`, `Marshal`
+  (`get_processed`, `get_block`, `hint_finalized`), `Blocker`, `ElectorConfig`, `Elector`,
+  `build_elector(config, gpa, n) !Elector`, `Automaton` (a pointer), `Relay`, `Reporter`,
+  `Strategy`, `Sender`, and `Receiver`.
 - `dkg/tests/mocks.zig` (test fixtures): `StoreHarness`, `TestStore`, `MockBlock(Dir)`/`TestBlock`, `EncodedPayload`,
   `genesis_block`, `child`, `MemorySecretStore`, `StaticParticipants`, `MockConsumer`.
 
@@ -446,6 +455,13 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - One-shot DKG reports its outcome on a `oneshot.Sender(Actor(T).DkgOutcome)` in
   `Mode.dkg.completion` (commonware's `DkgCompletion` callback); a failed manager `track`
   is logged at info and completes the ceremony without an output, as commonware does.
+- orchestrator actor: commonware's panics (marshal skipped the final block, a boundary block
+  without the next epoch's `EpochInfo`, no scheme for an entered epoch) are
+  `ContractError`s that `run` returns. The run loop races the two backup channels,
+  `Engine.wait_stopped` (a canceled `Handle.join` would detach the engine), and the mailbox,
+  then handles every source that finished, in commonware's `select_loop!` order. Marshal sits
+  behind the same small reader interface the reshare actor uses. The `latest_epoch` gauge is
+  not carried.
 
 ### Backlog
 - [x] types (with conformance hashes), limits, fence, network.
@@ -477,8 +493,10 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   yielding to finalization, closed verification) and `finalization_error_panics`; the dkg
   window; the run loop; application.
 - [x] orchestrator: limits (`max_payload_size`) with `prefixes_simplex`.
-- [ ] orchestrator: mailbox, actor, and mod.rs's tests. (bootstrap and probe moved to the p2p lane, T-01a1d59c-49e5, which
-  owns src/glue/dkg/bootstrap/ and src/glue/dkg/probe/.)
+- [x] orchestrator: the actor, with tests of the epoch transition, catch-up hints, and
+  missing schemes.
+- [ ] orchestrator: mod.rs's cluster tests, on bls-math's node composition. (bootstrap and
+  probe moved to other lanes, which own src/glue/dkg/bootstrap/ and src/glue/dkg/probe/.)
 - [x] ~~tests: the dkg and reshare harnesses, properties, and mocks; lookup's peer-activation
   test.~~ Moved to the bls-math lane (T-01a1d57b-1003).
 - [x] orchestrator: mailbox (`Mailbox(B, A).report`, reliable overflow).
@@ -508,6 +526,8 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - 2026-11-18: one-shot DKG mode; a singleton ceremony completes through the mailbox
   (dealing, next_log, inclusion, epoch_info), and the test catches a lost outcome.
 - 2026-11-19: orchestrator mailbox; its test catches an overflow policy that drops reports.
+- 2026-11-19: orchestrator actor; its tests catch an early boundary acknowledgement, a
+  missing skipped-block check, and an ignored future-epoch hint.
 
 ## dkg probe/bootstrap (owner: p2p lane)
 

@@ -121,7 +121,7 @@ fn certificate_eql(comptime C: type, a: *const C, b: *const C) bool {
 pub fn recovered_epoch(processed: Processed, epocher: FixedEpocher) Epoch {
     const next = processed.height().next();
     const info = epocher.containing(next) orelse @panic("epocher must know recovered height");
-    return info.epoch();
+    return info.epoch;
 }
 
 /// Shared startup recovery plan for DKG actors. Initialize one plan after obtaining optional
