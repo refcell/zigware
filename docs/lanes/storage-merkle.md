@@ -264,7 +264,16 @@ variants need `runtime` storage; do them after its interface lands.
     `init_at_most` restarts (compressed too) and discarded torn blobs. Planted bug (bounded
     inspection always truncates the offsets to the ceiling) fails the preserve-offsets test.
     Not ported: the two decode-count tests, which count through a `Read::Cfg` counter.
-  - [ ] variable.rs: read_many, compression, data-loss recovery, replay, and the rest.
+  - [x] variable.rs batch 6 (`variable_repair_test.zig`): an `init_at_most` truncation that
+    survives a crash keeping unsynced writes and dropping resizes, a commit after a bounded
+    open, acknowledged data cut to a blob boundary, a short blob after the anchor, durable
+    offsets and data trailing-byte repairs, empty offsets after a prune and data-only sync,
+    a data-only sync across blobs, a mid-blob durable anchor, a full newest blob without a
+    successor, a crash between the offsets and data truncation, and a gap in the retained
+    blobs. Planted bug (publication skips data repair) fails four of them. A planted anchor
+    that accepts a watermark past the data end is not caught by design: inspection's
+    contiguity check rejects the lost blob first.
+  - [ ] variable.rs: read_many, compression, replay, and the rest.
 - [ ] journal/zstd: byte-exact libzstd level 3 (coordinator, correcting the earlier "byte
   identity not required"). commonware's storage conformance hashes four `<true>` journal
   workloads written with `compression: Some(3)`, so compressed journals must emit exactly
