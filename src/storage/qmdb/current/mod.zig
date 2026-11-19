@@ -21,6 +21,9 @@ pub const unordered = struct {
     pub const proof = @import("unordered/proof.zig");
 };
 
+/// State sync (`sync.Database(Db, H)`).
+pub const sync = @import("sync.zig");
+
 test {
     _ = @import("canonical_test.zig");
     _ = @import("db_test.zig");
@@ -28,6 +31,7 @@ test {
     _ = @import("operations_fuzz_test.zig");
     _ = @import("prune_grow_fuzz_test.zig");
     _ = @import("recovery_fuzz_test.zig");
+    _ = @import("sync.zig");
     _ = @import("grafting_test.zig");
     _ = @import("proof_test.zig");
     _ = @import("verification_test.zig");

@@ -42,8 +42,13 @@ it comes first once `any` lands.
   crypto lane (2026-11-19): genesis and sync-boundary syncs, post-sync batches, the four
   `from_sync_result` cases, local pins at the last commit's floor, and a wrong root, over all
   eight any variants.
-- [ ] current sync glue (`current/sync.zig`) and the `qmdb_any_{fixed,variable}_sync` fuzz
-  targets. Keyless and immutable glue, the engine, and the shared harness stay with the
+- [x] current sync glue (`current.sync.Database(Db, H)`, `current.Db.init_from_sync`): syncs
+  verify against the ops root; the bitmap is pruned to the chunks below the range start and
+  the grafted pins come from the ops tree (zero-chunk identity). Tests: genesis and pruned
+  syncs with reopen, post-sync batches, replacing a client's pruned db, local pins. Decision:
+  `discard_local_state` also clears grafted metadata as commonware does; no test isolates
+  it, since the first `sync` rewrites the metadata and `init` clears it beside an empty log.
+- [ ] the `qmdb_any_{fixed,variable}_sync` fuzz targets. Keyless and immutable glue, the engine, and the shared harness stay with the
   crypto lane.
 - [x] sync journal (`journal.init`/`resize`/`append` over contiguous journals, `Memory(Op)`)
   and the request tracker (`requests.Requests(F)`), with their commonware tests.
@@ -192,3 +197,4 @@ it comes first once `any` lands.
 - 2026-11-18: current operations and MMB prune-grow fuzz targets; ordered batch neighbors.
 - 2026-11-18: compact sync `Database` interface.
 - 2026-11-19: any sync glue.
+- 2026-11-19: current sync glue.

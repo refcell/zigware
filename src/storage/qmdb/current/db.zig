@@ -148,6 +148,69 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             return finish_init(gpa, scope, any_db, metadata, pinned);
         }
 
+        /// Builds the database over `log`, an authenticated log state sync filled from its
+        /// Merkle pruning boundary (commonware's current `build_db`): the `any` database is
+        /// rebuilt from the last commit's floor, its bitmap pruned to the chunks wholly below
+        /// the boundary, and the grafted tree rebuilt with pins read from the ops tree (a
+        /// pruned chunk is all zeros, so its grafted digest is the ops subtree root). The
+        /// grafted metadata partition is overwritten at the next `sync`. Takes ownership of
+        /// `log`, also on error. The boundary must not exceed the source's sync boundary.
+        pub fn init_from_sync(
+            gpa: Allocator,
+            storage: Storage,
+            scope: Scope,
+            cfg: Cfg,
+            log: Any.Log,
+        ) !Self {
+            var owned_log = log;
+            const pruned_chunks = owned_log.merkle.bounds().start / chunk_bits;
+            const partition = cfg.grafted_metadata_partition;
+            var metadata = open_metadata(gpa, storage, partition) catch |err| {
+                owned_log.deinit();
+                return err;
+            };
+            errdefer metadata.deinit();
+            const any_scope = scope.child("any");
+            const translator = cfg.translator;
+            const cache = cfg.init_cache;
+            var any_db = try Any.init_from_log(gpa, any_scope, owned_log, translator, cache);
+            errdefer any_db.deinit();
+            try prune_any_bitmap(&any_db, pruned_chunks);
+            var pins: [merkle.max_pinned_nodes]Digest = undefined;
+            const pinned = try ops_pins(&any_db, pruned_chunks, &pins);
+            assert(any_db.bitmap.pruned_chunks() == pruned_chunks);
+            return finish_init(gpa, scope, any_db, metadata, pinned);
+        }
+
+        /// The grafted tree's pins at `pruned_chunks` leaves, read from the ops tree.
+        fn ops_pins(
+            any_db: *Any,
+            pruned_chunks: u64,
+            out: *[merkle.max_pinned_nodes]Digest,
+        ) ![]const Digest {
+            var positions: [merkle.max_pinned_nodes]u64 = undefined;
+            const pinned = merkle.nodes_to_pin(F, pruned_chunks, &positions);
+            const height = grafting.height(N);
+            for (pinned, out[0..pinned.len]) |grafted_pos, *digest| {
+                const ops_pos = grafting.grafted_to_ops_pos(F, grafted_pos, height);
+                digest.* = try any_db.log.merkle.get_node(ops_pos) orelse
+                    return error.DataCorrupted; // A missing ops pinned node.
+            }
+            assert(pinned.len <= out.len);
+            return out[0..pinned.len];
+        }
+
+        /// Clears the grafted metadata `cfg` names when it records pruned chunks: they describe
+        /// the operations of a Merkle structure being discarded (sync's `discard_local_state`).
+        pub fn discard_grafted_metadata(gpa: Allocator, storage: Storage, cfg: Cfg) !void {
+            var metadata = try open_metadata(gpa, storage, cfg.grafted_metadata_partition);
+            defer metadata.deinit();
+            if (try read_pruned_chunks(&metadata) == 0) return;
+            metadata.clear();
+            try metadata.sync();
+            assert(metadata.count() == 0);
+        }
+
         /// Prunes the freshly opened `any` bitmap to the persisted `pruned_chunks`, checking
         /// that the selected commit is still reconstructible (commonware's checks in
         /// `init_with_bitmap`).
