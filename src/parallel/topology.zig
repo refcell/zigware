@@ -198,12 +198,12 @@ pub const Topology = struct {
     pub fn detect(io: std.Io) ?Topology {
         var cpus = std.Io.Dir.cwd().openDir(io, "/sys/devices/system/cpu", .{
             .iterate = true,
-        }) catch return null;
+        }) catch |err| return read_failed(Topology, io, err);
         defer cpus.close(io);
         var builder: Builder = .{};
         var entries = cpus.iterate();
         // Bounded by the directory, which holds one entry per possible CPU plus a few files.
-        while (entries.next(io) catch return null) |entry| {
+        while (entries.next(io) catch |err| return read_failed(Topology, io, err)) |entry| {
             const id_text = std.mem.cutPrefix(u8, entry.name, "cpu") orelse continue;
             const cpu = std.fmt.parseInt(usize, id_text, 10) catch continue;
             var list_buffer: [list_len_max]u8 = undefined;
@@ -214,16 +214,25 @@ pub const Topology = struct {
     }
 };
 
+/// Null for a failed sysfs read, re-arming a cancel the read took: the caller carries on
+/// without a topology, and an acknowledged cancel would leave its later waits blocked forever.
+fn read_failed(comptime T: type, io: std.Io, err: anyerror) ?T {
+    if (err == error.Canceled) io.recancel();
+    return null;
+}
+
 /// The `shared_cpu_list` of the highest-level Data or Unified cache of `cpu_name`, in `buffer`.
 fn llc_list(io: std.Io, cpus: std.Io.Dir, cpu_name: []const u8, buffer: []u8) ?[]const u8 {
     var path_buffer: [64]u8 = undefined;
     const cache_path = std.fmt.bufPrint(&path_buffer, "{s}/cache", .{cpu_name}) catch return null;
-    var cache = cpus.openDir(io, cache_path, .{ .iterate = true }) catch return null;
+    var cache = cpus.openDir(io, cache_path, .{ .iterate = true }) catch |err| {
+        return read_failed([]const u8, io, err);
+    };
     defer cache.close(io);
     var best_level: ?u32 = null;
     var best_len: usize = 0;
     var leaves = cache.iterate();
-    while (leaves.next(io) catch return null) |leaf| {
+    while (leaves.next(io) catch |err| return read_failed([]const u8, io, err)) |leaf| {
         if (!std.mem.startsWith(u8, leaf.name, "index")) continue;
         const level = leaf_level(io, cache, leaf.name) orelse continue;
         if (best_level) |best| if (level <= best) continue;
@@ -257,7 +266,9 @@ fn read_trimmed(
 ) ?[]const u8 {
     var path_buffer: [64]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ leaf, name }) catch return null;
-    const bytes = dir.readFile(io, path, buffer) catch return null;
+    const bytes = dir.readFile(io, path, buffer) catch |err| {
+        return read_failed([]const u8, io, err);
+    };
     // A full buffer may have cut the file short.
     if (bytes.len == buffer.len) return null;
     return std.mem.trim(u8, bytes, " \t\r\n");

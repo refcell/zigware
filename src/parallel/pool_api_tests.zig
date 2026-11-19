@@ -581,3 +581,25 @@ test "a policy records only its own strategy's calls and is shared by copies" {
     try testing.expectEqual(@as(usize, 2), policy.len());
     try testing.expectEqual(@as(usize, 0), other.len());
 }
+
+/// Creates a pool with workers, waits to be canceled, then destroys the pool. True when the
+/// cancel is still pending after the teardown, so a later wait fails at once.
+fn teardown_after_cancel(ready: *std.atomic.Value(bool)) bool {
+    const io = testing.io;
+    const pool = ThreadPool.create(gpa, io, .{ .threads = 2 }) catch return false;
+    ready.store(true, .release);
+    // The cancel is acknowledged here, so it is re-armed, as AGENTS.md requires.
+    if (io.sleep(.fromSeconds(60), .awake)) |_| {} else |_| io.recancel();
+    pool.destroy();
+    if (io.sleep(.fromSeconds(5), .awake)) |_| return false else |err| {
+        return err == error.Canceled;
+    }
+}
+
+test "destroying a pool in a canceled task leaves the cancel pending" {
+    var ready: std.atomic.Value(bool) = .init(false);
+    var future = try testing.io.concurrent(teardown_after_cancel, .{&ready});
+    // Bounded: the task sets `ready` right after creating its pool.
+    while (!ready.load(.acquire)) sleep_ns(100 * us);
+    try testing.expect(future.cancel(testing.io));
+}

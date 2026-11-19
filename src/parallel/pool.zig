@@ -103,7 +103,12 @@ pub const ThreadPool = struct {
         _ = pool.epoch.fetchAdd(1, .release);
         pool.mutex.unlock(pool.io);
         pool.io.futexWake(u32, &pool.epoch.raw, std.math.maxInt(u32));
-        pool.group.await(pool.io) catch pool.group.cancel(pool.io);
+        // `await` fails only with the caller's own cancel. Taking it here would leave the
+        // caller's later waits blocked forever, so it is re-armed after the workers stop.
+        pool.group.await(pool.io) catch {
+            pool.group.cancel(pool.io);
+            pool.io.recancel();
+        };
         assert(pool.group.token.raw == null);
     }
 
