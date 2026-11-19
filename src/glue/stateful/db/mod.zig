@@ -552,4 +552,5 @@ pub fn assert_managed_db(comptime DB: type) void {
 test {
     std.testing.refAllDecls(@This());
     _ = @import("mod_test.zig");
+    _ = @import("adapters_test.zig");
 }
