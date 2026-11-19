@@ -373,7 +373,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | transfers/tests.rs | 53 | 53 | 0 | 0 | |
 | stateful/probe/mod.rs (+2 conformance) | 22 | 22 | 0 | 0 | |
 | stateful/probe/limits.rs | 1 | 1 | 0 | 0 | |
-| stateful/db/mod.rs | 83 | 81 | 0 | 2 | |
+| stateful/db/mod.rs | 83 | 83 | 0 | 0 | |
 | stateful/db/any.rs | 4 | 3 | 0 | 1 | |
 | stateful/db/current.rs | 11 | 11 | 0 | 0 | |
 | stateful/db/keyless/standard.rs | 5 | 5 | 0 | 0 | |
@@ -393,7 +393,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/core/processing.rs, 3451-5885 | 39 | 38 | 0 | 1 | s |
 | stateful/actor/processor/mod.rs | 44 | 40 | 0 | 4 | |
 | stateful/tests/mod.rs, floor.rs | 28 | 27 | 1 | 0 | j |
-| **total** | **474** | **463** | **1** | **10** | |
+| **total** | **474** | **465** | **1** | **8** | |
 
 - db/mod.rs's barrier tests are ported since async start_sync step 6 (`Barrier` holds each
   member's `runtime.storage.Completion`): `barrier_waits_for_every_handle` (8),
@@ -401,9 +401,13 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   `barrier_panics_on_later_failure`'s shutdown half (3) are in db/barrier_test.zig.
 - Not portable (db/any.rs, 1): `ordered_any_is_qmdb` checks a Rust trait bound on
   commonware's `Qmdb` adapter trait, which zigware does not have (Rust-language).
-- Not portable (db/mod.rs, 2): tuple
-  members run one after another under their mutexes, so `tuple_new_batches_queues_reads_concurrently`
-  and `tuple_apply_runs_databases_in_parallel` have no concurrency to observe.
+- db/mod.rs's `tuple_new_batches_queues_reads_concurrently` and
+  `tuple_apply_runs_databases_in_parallel` are ported (2026-11-19, utils lane) in
+  db/tuple_test.zig: `Tuple.new_batches` and `Tuple.apply` now run every member in one
+  `Io.Group` (as commonware joins them), each task holding only its member's lock, and drain the
+  group before returning or releasing anything. adapters_test.zig checks that a concurrent apply
+  over two QMDBs ends at the roots of applying each member in turn. Planted bugs caught: the old
+  serial loop (both concurrency tests) and an apply that skips its last member (equivalence).
 - Open, d (deployer):
   - db/mod.rs: done. The cross-adapter rstests are in adapters_test.zig, the tuple apply
     locking tests in tuple_test.zig, the generation and reached-event tests in

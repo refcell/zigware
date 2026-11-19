@@ -555,17 +555,25 @@ pub fn Tuple(comptime types: anytype) type {
             return targets;
         }
 
-        /// A batch over each member's applied state. Each member's lock is released before the
-        /// next is taken, so no lock is held when this returns.
+        /// A batch over each member's applied state, built on every member at once (commonware
+        /// joins the members' reads). Each member's lock is released before its task ends, so
+        /// no lock is held when this returns. Fails with the first failing member's error, by
+        /// index, after releasing the batches built.
         pub fn new_batches(self: *const Self) !Unmerkleized {
             var batches: Unmerkleized = undefined;
-            var built: usize = 0;
-            errdefer inline for (0..count) |i| {
-                if (i < built) batches[i].deinit();
-            };
+            var results: [count]anyerror!void = undefined;
+            var group: Io.Group = .init;
             inline for (0..count) |i| {
-                batches[i] = try self.members[i].new_batches();
-                built += 1;
+                group.async(self.io(), Task(i).new_batch, .{ self, &batches[i], &results[i] });
+            }
+            // Drains every member, forwarding a cancel to them, before anything is released.
+            const awaited = group.await(self.io());
+            const failure = first_failure(&results, awaited);
+            if (failure) |err| {
+                inline for (0..count) |i| {
+                    if (results[i]) |_| batches[i].deinit() else |_| {}
+                }
+                return err;
             }
             return batches;
         }
@@ -596,13 +604,58 @@ pub fn Tuple(comptime types: anytype) type {
             return result;
         }
 
-        /// Applies each batch to its member, holding one member's lock at a time (holding
-        /// several could deadlock reads that span members). A failure loses that member and
-        /// stops; earlier members stay applied, so the set must be discarded.
+        /// Applies each batch to its member, every member at once (commonware joins them); a
+        /// member's task holds only that member's lock, so reads that span members cannot
+        /// deadlock. A failure loses that member; the others still apply, so the set must be
+        /// discarded. Fails with the first failing member's error, by index. A cancel reaches
+        /// every member: the ones that finished stay applied, the rest are untouched.
         pub fn apply(self: *const Self, batches: *const Merkleized) !void {
-            inline for (types, 0..) |DB, i| {
-                try mutate(DB, self.members[i], .apply, .{&batches[i]});
+            var results: [count]anyerror!void = undefined;
+            var group: Io.Group = .init;
+            inline for (0..count) |i| {
+                group.async(self.io(), Task(i).apply, .{ self, &batches[i], &results[i] });
             }
+            const awaited = group.await(self.io());
+            if (first_failure(&results, awaited)) |err| return err;
+        }
+
+        fn io(self: *const Self) Io {
+            return self.members[0].cell.io;
+        }
+
+        /// The first member failure by index, or the drained group's own cancel.
+        fn first_failure(
+            results: *const [count]anyerror!void,
+            awaited: Io.Cancelable!void,
+        ) ?anyerror {
+            awaited catch |err| return err;
+            for (results) |result| result catch |err| return err;
+            return null;
+        }
+
+        /// Member `i`'s concurrent work; each writes its outcome to `result`.
+        fn Task(comptime i: usize) type {
+            const DB = types[i];
+            return struct {
+                fn new_batch(
+                    self: *const Self,
+                    batch: *UnmerkleizedOf(DB),
+                    result: *anyerror!void,
+                ) Io.Cancelable!void {
+                    if (self.members[i].new_batches()) |built| {
+                        batch.* = built;
+                        result.* = {};
+                    } else |err| result.* = err;
+                }
+
+                fn apply(
+                    self: *const Self,
+                    batch: *const MerkleizedOf(DB),
+                    result: *anyerror!void,
+                ) Io.Cancelable!void {
+                    result.* = mutate(DB, self.members[i], .apply, .{batch});
+                }
+            };
         }
 
         /// Persists every member; the barrier reports each member's outcome.

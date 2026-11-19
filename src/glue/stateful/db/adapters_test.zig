@@ -424,3 +424,51 @@ fn Stress(comptime DB: type) type {
 test "stateful db adapters: readers merkleize beside a writer" {
     inline for (.{ AnyFixed, CurrentUnorderedFixed }) |DB| try Stress(DB).run();
 }
+
+/// One round of writes for member `member` of the equivalence check.
+fn write_round(batch: *AnyFixed.Unmerkleized, member: u64, round: u64) !void {
+    for (0..3) |i| {
+        const key = digest_of("tuple-key", member * 100 + round * 10 + i);
+        try batch.write(key, digest_of("tuple-value", round * 10 + i));
+    }
+}
+
+test "stateful db adapters: a concurrent tuple apply matches applying each member in turn" {
+    const Set = db.Tuple(.{ AnyFixed, AnyFixed });
+    var harnesses: [4]Harness = undefined;
+    for (&harnesses) |*harness| try harness.init(testing.io);
+    defer for (&harnesses) |*harness| harness.deinit();
+    const first = try harnesses[0].open(AnyFixed);
+    var set: Set = .{ .members = .{ first, try harnesses[1].open(AnyFixed) } };
+    defer set.deinit();
+    const serial_first = try harnesses[2].open(AnyFixed);
+    const serial = [2]AnyFixed.Shared{ serial_first, try harnesses[3].open(AnyFixed) };
+    defer for (serial) |shared| shared.deinit();
+    for (0..3) |round| {
+        var batches = try set.new_batches();
+        var merkleized: Set.Merkleized = undefined;
+        inline for (0..2) |i| {
+            try write_round(&batches[i], i, round);
+            merkleized[i] = try batches[i].merkleize();
+        }
+        defer inline for (0..2) |i| merkleized[i].deinit();
+        try set.apply(&merkleized);
+        inline for (0..2) |i| {
+            var batch = try serial[i].new_batches();
+            errdefer batch.deinit();
+            try write_round(&batch, i, round);
+            var applied = try batch.merkleize();
+            defer applied.deinit();
+            try serial[i].apply(&applied);
+        }
+    }
+    const concurrent_targets = try set.committed_targets();
+    inline for (0..2) |i| {
+        const serial_target = try serial[i].committed_targets();
+        const target = &concurrent_targets[i];
+        try testing.expect(db.targets_eql(AnyFixed.SyncTarget, &serial_target, target));
+    }
+    // The two members hold different writes, so a swapped batch could not match.
+    const targets = &concurrent_targets;
+    try testing.expect(!db.targets_eql(AnyFixed.SyncTarget, &targets[0], &targets[1]));
+}
