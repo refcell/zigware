@@ -542,3 +542,176 @@ pub fn Hailstorm(comptime H: type) type {
         }
     };
 }
+
+/// commonware `ack_pipeline_backlog` and `ack_pipeline_backlog_persists_on_restart`: one
+/// validator with three pending acknowledgements and a manually acknowledging application.
+pub fn AckPipeline(comptime H: type) type {
+    return struct {
+        const Self = @This();
+        const App = Application(H.ApplicationBlock);
+        const Validator = H.Validator(App);
+        const Proposal = simplex_types.Proposal(H.Commitment);
+        const max_pending_acks = 3;
+
+        ctx: Ctx,
+        gpa: Allocator,
+        fixture: H.Fixture,
+        network: harness.TestNetwork,
+        app: App,
+        node: *Validator,
+
+        /// Five finalized blocks fill the pipeline to three before any ack; releasing acks in
+        /// FIFO order lets the rest dispatch.
+        pub fn backlog(gpa: Allocator) !void {
+            try run_seeded(gpa, 0xA11CE, backlog_body);
+        }
+
+        /// Three acks released without yielding are drained together and their processed
+        /// height survives a restart.
+        pub fn persists_on_restart(gpa: Allocator) !void {
+            try run_seeded(gpa, 0xA11CF, restart_body);
+        }
+
+        fn run_seeded(gpa: Allocator, seed: u64, comptime body: fn (Ctx) anyerror!void) !void {
+            var runner = try runtime.deterministic.Runner.init(gpa, .{
+                .seed = seed,
+                .timeout_ns = 120 * std.time.ns_per_s,
+            });
+            defer runner.deinit();
+            try try runner.start_context(body, .{});
+        }
+
+        fn start(self: *Self, ctx: Ctx) !void {
+            const gpa = ctx.gpa();
+            self.ctx = ctx;
+            self.gpa = gpa;
+            var rng = utils.rng.test_rng();
+            self.fixture = try H.fixture(gpa, &rng);
+            errdefer self.fixture.deinit(gpa);
+            const participants = self.fixture.participants;
+            const max_size = harness.max_message_size(H.Variant);
+            self.network = try .start(gpa, ctx.io(), 1, participants, max_size);
+            errdefer self.network.stop();
+            self.app = try .manual_ack(gpa, ctx.io());
+            errdefer self.app.deinit();
+            const node_ctx = ctx.child("validator").with_attribute("index", 0);
+            self.node = try self.setup(node_ctx, self.app.clone());
+            assert((try self.app.acknowledged()).is_zero());
+        }
+
+        fn setup(self: *Self, ctx: Ctx, app: App) !*Validator {
+            const provider: H.Provider = .init(&self.fixture.schemes[0]);
+            const me = self.fixture.participants[0];
+            const network = self.network.network;
+            return Validator.setup(ctx, network, me, provider, max_pending_acks, app);
+        }
+
+        fn stop(self: *Self) void {
+            self.node.crash();
+            self.app.deinit();
+            self.network.stop();
+            self.fixture.deinit(self.gpa);
+            self.* = undefined;
+        }
+
+        /// Verifies and finalizes the chain's heights 1 through `count` at the validator.
+        fn finalize_chain(self: *Self, count: u64) !void {
+            const gpa = self.gpa;
+            const epoch_length = utils.NonZero(u64).init(harness.blocks_per_epoch).?;
+            const epocher = types.FixedEpocher.new(epoch_length);
+            var parent = harness.genesis_parent();
+            var parent_commitment = H.genesis_parent_commitment(num_validators);
+            for (1..count + 1) |value| {
+                const height: Height = .new(value);
+                var block = try H.make_test_block(gpa, parent, parent_commitment, height, value, 4);
+                defer H.Variant.deinit_block(gpa, &block);
+                parent = H.digest(&block);
+                parent_commitment = H.commitment(&block);
+                const round: Round = .new(epocher.containing(height).?.epoch, .new(value));
+                try H.verify(self.node, round, &block);
+                const proposal = Proposal.init(round, .new(value - 1), parent_commitment);
+                const quorum = harness.quorum;
+                var finalization = try H.make_finalization(gpa, &self.fixture, proposal, quorum);
+                defer finalization.deinit(gpa);
+                _ = self.node.mailbox.report(.{ .finalization = finalization });
+            }
+        }
+
+        fn pending_heights(self: *Self, out: []u64) ![]u64 {
+            const pending = try self.app.pending_ack_heights(self.gpa);
+            defer self.gpa.free(pending);
+            const count = @min(pending.len, out.len);
+            for (pending[0..count], out[0..count]) |height, *slot| slot.* = height.get();
+            return out[0..pending.len];
+        }
+
+        /// Waits until the application holds `blocks` blocks and `pending` pending acks.
+        fn wait_for(self: *Self, blocks: usize, pending: usize) !void {
+            while (true) {
+                var buffer: [8]u64 = undefined;
+                const heights = try self.pending_heights(&buffer);
+                const done = self.app.block_count() >= blocks and heights.len >= pending;
+                if (done and (pending > 0 or heights.len == 0)) return;
+                try self.ctx.sleep(.fromMilliseconds(10));
+            }
+        }
+
+        fn expect_pending_one_to_three(self: *Self) !void {
+            var buffer: [8]u64 = undefined;
+            const heights = try self.pending_heights(&buffer);
+            if (!std.mem.eql(u64, heights, &.{ 1, 2, 3 })) return error.AckPipelineWrongPending;
+        }
+
+        fn backlog_body(ctx: Ctx) anyerror!void {
+            var self: Self = undefined;
+            try self.start(ctx);
+            defer self.stop();
+            try self.finalize_chain(5);
+            // The backlog fills to its capacity before any ack is released.
+            try self.wait_for(3, 3);
+            try self.expect_pending_one_to_three();
+            if (self.app.contains(.new(4))) return error.AckPipelineDispatchedPastCapacity;
+            if (self.app.contains(.new(5))) return error.AckPipelineDispatchedPastCapacity;
+            // Releasing acks keeps FIFO order and lets further blocks dispatch.
+            for (1..6) |expected| {
+                while (true) {
+                    var buffer: [8]u64 = undefined;
+                    const heights = try self.pending_heights(&buffer);
+                    if (heights.len > 0 and heights[0] == expected) break;
+                    try ctx.sleep(.fromMilliseconds(10));
+                }
+                const acknowledged = self.app.acknowledge_next() orelse
+                    return error.AckPipelineNoPending;
+                if (acknowledged.get() != expected) return error.AckPipelineOutOfOrder;
+            }
+            // Every finalized block is delivered once the backlog drains.
+            try self.wait_for(5, 0);
+        }
+
+        fn restart_body(ctx: Ctx) anyerror!void {
+            var self: Self = undefined;
+            try self.start(ctx);
+            defer self.stop();
+            try self.finalize_chain(3);
+            try self.wait_for(0, 3);
+            try self.expect_pending_one_to_three();
+            // Acknowledge every pending block without yielding, so marshal drains them in one
+            // ack event and syncs its metadata once.
+            for (1..4) |expected| {
+                const acknowledged = self.app.acknowledge_next() orelse
+                    return error.AckPipelineNoPending;
+                if (acknowledged.get() != expected) return error.AckPipelineOutOfOrder;
+            }
+            try ctx.sleep(.fromMilliseconds(10));
+            const tip = self.app.tip() orelse return error.AckPipelineNoTip;
+            if (tip.height.get() != 3) return error.AckPipelineWrongTip;
+            // A restart restores the processed height from metadata.
+            self.node.crash();
+            const restart_ctx = ctx.child("validator_restart").with_attribute("index", 0);
+            const app: App = try .manual_ack(self.gpa, ctx.io());
+            self.node = try self.setup(restart_ctx, app);
+            const restored = self.node.height orelse return error.AckPipelineNoHeight;
+            if (restored.get() != 3) return error.AckPipelineWrongRestoredHeight;
+        }
+    };
+}

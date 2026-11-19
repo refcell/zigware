@@ -360,3 +360,5 @@ ports its range's tests and the helpers defined in it, into
   sync is pooled in `Actor.Syncs` and released per batch, ahead of every other event.
 - 2026-11-18: generic `mocks/scenarios.Hailstorm(H)` (harness.rs 448-1008) with the three
   standard wrappers; a short storm per shape runs outside `-Dslow-tests`.
+- 2026-11-18: generic `mocks/scenarios.AckPipeline(H)` (`backlog`, `persists_on_restart`;
+  harness.rs 3235-3441) with the standard wrappers.

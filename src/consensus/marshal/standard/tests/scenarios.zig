@@ -71,3 +71,13 @@ test "standard hailstorm restarts across epochs" {
     if (!build_options.slow_tests) return error.SkipZigTest;
     _ = try Hailstorm.run(gpa, 13, storm(5, 5, 2));
 }
+
+const AckPipeline = scenarios.AckPipeline(harness.StandardHarness);
+
+test "standard ack pipeline backlog" {
+    try AckPipeline.backlog(gpa);
+}
+
+test "standard ack pipeline backlog persists on restart" {
+    try AckPipeline.persists_on_restart(gpa);
+}
