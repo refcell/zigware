@@ -405,10 +405,12 @@ pub fn recv_unless_closed(
         select.cancelDiscard();
         return error.Canceled;
     };
-    const first = try select.await();
+    // A canceled await leaves both branches running: stop them before this frame returns.
+    const awaited = select.await();
     while (select.cancel()) |rest| {
         if (rest == .received) if (rest.received) |value| discard(U, value) else |_| {};
     }
+    const first = try awaited;
     return switch (first) {
         .closed => null,
         .received => |result| result,

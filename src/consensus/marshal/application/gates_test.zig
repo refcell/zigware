@@ -248,6 +248,32 @@ test "forward cancels in flight input when output closes" {
     }.body);
 }
 
+test "a canceled forward stops its waits before returning" {
+    // A crash cancels a forward that waits on both channels; its select branches must end
+    // before the frame that owns them, or they later touch freed memory.
+    _ = try run(0, struct {
+        fn body(io: Io) anyerror!void {
+            var input = try oneshot.channel(bool, gpa, io);
+            defer input.sender.deinit();
+            var output = try oneshot.channel(bool, gpa, io);
+            defer output.receiver.deinit();
+            var started = try oneshot.channel(void, gpa, io);
+            defer started.receiver.deinit();
+            var forwarder = try io.concurrent(forward_task, .{
+                io,
+                started.sender,
+                output.sender,
+                input.receiver,
+            });
+            try started.receiver.recv();
+            try io.sleep(.fromMilliseconds(1), .awake);
+            try testing.expectError(error.Canceled, forwarder.cancel(io));
+            try testing.expect(input.sender.is_closed());
+            try testing.expectError(error.Closed, output.receiver.recv());
+        }
+    }.body);
+}
+
 test "drive adopts a ready verdict without fallback" {
     _ = try run(0, struct {
         fn body(io: Io) anyerror!void {

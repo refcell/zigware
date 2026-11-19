@@ -466,13 +466,15 @@ fn DeferredOver(comptime T: [5]type) type {
                 select.cancelDiscard();
                 return error.Canceled;
             };
-            const first = try select.await();
+            // A canceled await leaves the branches running: stop them before returning.
+            const awaited = select.await();
             while (select.cancel()) |rest| {
                 if (rest == .received) if (rest.received) |value| {
                     var late = value;
                     late.deinit();
                 } else |_| {};
             }
+            const first = try awaited;
             return switch (first) {
                 .consensus, .gate => null,
                 .received => |result| result,
