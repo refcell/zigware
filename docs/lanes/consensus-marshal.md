@@ -297,6 +297,47 @@ ports its range's tests and the helpers defined in it, into
   `actor_ingress.zig` (mailbox), `actor_backfill.zig` (resolver), and `actor_finalize.zig`
   (storage, floors, repair, dispatch) to keep files and functions within TigerStyle.
 
+## Consensus tally outside simplex (2026-11-19, against main)
+
+Every `#[test]` (macro expansions counted) and fuzz target in commonware's consensus crate
+outside simplex and marshal, matched to its Zig counterpart. Nothing is open.
+
+| Source | Tests | Ported | Open | Not portable |
+| --- | --- | --- | --- | --- |
+| aggregation/mod.rs (9 scenarios x 6 fixtures + 3) | 57 | 57 | 0 | 0 |
+| aggregation/safe_tip.rs | 17 | 16 | 0 | 1 |
+| aggregation/engine.rs | 3 | 2 | 0 | 1 |
+| aggregation/types.rs (+ 5 conformance hashes) | 8 | 8 | 0 | 0 |
+| aggregation/limits.rs, mocks/monitor.rs | 2 | 2 | 0 | 0 |
+| types.rs (+ 5 conformance hashes) | 80 | 72 | 0 | 8 |
+| reporter.rs | 3 | 3 | 0 | 0 |
+| lib.rs | 0 | 0 | 0 | 0 |
+| consensus/fuzz targets | 15 | 15 | 0 | 0 |
+| consensus/fuzz crate tests (bounds, invariants, simplex) | 26 | 26 | 0 | 0 |
+
+- aggregation/mod.rs: `mod_test.zig`. `for_all_fixtures` runs all 6 fixtures under
+  `-Dslow-tests` (nightly) and ed25519 elsewhere; determinism and both unclean shutdowns loop
+  over every fixture under `-Dslow-tests`.
+- aggregation/types.rs: `types_test.zig` (`test_codec` runs every scheme;
+  `activity_invalid_enum` is the unknown-tag check in `check_codec`); limits.rs's
+  `widest_encodings` is "widest encodings" there too.
+- types.rs: `types_test.zig` and `commitment.zig`, one Zig test per behavior across Epoch,
+  Height, and View (constructors, arithmetic, display, ordering, codec, ranges, terms, admits,
+  epocher), with the Epoch, Height, View, Round, and TestCommitment conformance hashes.
+- reporter.rs: `reporter.zig`.
+- fuzz targets: `src/consensus/fuzz/` (simplex lane): attributable_map, simplex_elector,
+  simplex_messages, and the 6 schemes x {standard, twin}, each a seeded minifuzz test plus a
+  `std.testing.fuzz` test. The fuzz crate's `property_test_*_connected` (proptest over
+  `FuzzInput`) are covered by each scheme's seeded minifuzz run; `test_can_finalize_logic` is
+  in `fuzz/types.zig`.
+- Not portable: `should_panic` (a Zig test cannot catch a panic): engine.rs
+  `assembly_failure_panics`, safe_tip.rs `test_validation_failures` (three `catch_unwind`
+  cases), and types.rs's `{epoch,height,view}_next_overflow`,
+  `view_term_end_overflow_panics`, `view_next_term_start_overflow_panics`, and
+  `fixed_epocher_rejects_length_one`; and types.rs `test_round_conversions`, which checks
+  Rust's `From`/`Into` tuple conversions (Zig's `Round` has plain `epoch`/`view` fields,
+  checked in "round order, codec, and fields").
+
 ## Test tally (2026-11-19, against main)
 
 Every `fn test_*` in commonware's `marshal/standard/mod.rs` and `marshal/coding/mod.rs`, by
