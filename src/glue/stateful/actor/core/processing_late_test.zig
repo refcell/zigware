@@ -1158,3 +1158,155 @@ test "stateful processing: a tip redelivery keeps an acquiring verification" {
     try testing.expectEqual(attempts, gate.read("clones"));
     try testing.expect(!verdict.is_ready());
 }
+
+/// A probe's gate with its two ends, the release still owned until sent.
+const HeldGate = struct {
+    started: utils.channel.oneshot.Receiver(void),
+    release: utils.channel.oneshot.Sender(void),
+    released: bool = false,
+
+    fn add(probe: *harness.Probe) !HeldGate {
+        const handles = try probe.add_gate();
+        return .{ .started = handles.started, .release = handles.release };
+    }
+
+    fn open(gate: *HeldGate) !void {
+        std.debug.assert(!gate.released);
+        gate.released = true;
+        try gate.release.send({});
+    }
+
+    fn deinit(gate: *HeldGate) void {
+        gate.started.deinit();
+        if (!gate.released) gate.release.deinit();
+    }
+};
+
+// commonware `admitted_verification_keeps_processing_alive`: a verification admitted to a
+// block's processing before an earlier caller cancels keeps that shared processing alive,
+// and the block is processed once. Adapted: commonware orders the admission before the
+// cancellation through the scheduler; here the test waits until the second request joined
+// the processing before cancelling the first.
+test "stateful processing: an admitted verification keeps processing alive" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer deinit_fixture(&fixture);
+    const genesis = TestBlock.genesis();
+    const block, var batch = try fixture.harness.build_child(&genesis, 1);
+    batch.deinit();
+    var probe: harness.Probe = .{ .target = block.digest() };
+    defer probe.deinit();
+    var process = try HeldGate.add(&probe);
+    defer process.deinit();
+    var repeat = try HeldGate.add(&probe);
+    defer repeat.deinit();
+    fixture.processing.verifications.verifier.app.probe = &probe;
+
+    var first = try fixture.verify(&.{ block, genesis });
+    try process.started.recv();
+    var gate: AncestryGate = .{};
+    const ancestry = try GatedAncestry.init(&gate, &.{ block, genesis }, 0);
+    var second = try verify_with(&fixture, ancestry);
+    defer second.deinit();
+    try fixture.barrier();
+    try testing.expect(gate.read("clones") > 0); // The second acquisition is waiting.
+    gate.release();
+    try fixture.await_joiners(block.digest(), 2);
+    first.deinit(); // The first caller leaves.
+    try fixture.barrier();
+    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expect(!process.release.is_closed()); // The processing is still alive.
+    try testing.expect(!repeat.started.is_ready());
+    try testing.expectEqual(1, probe.calls);
+    try process.open();
+    try testing.expect(try second.recv());
+    try testing.expectEqual(1, probe.calls);
+}
+
+fn losing_and_winner(fixture: *Fixture) !struct { TestBlock, TestBlock } {
+    const genesis = TestBlock.genesis();
+    const losing, var losing_batch = try fixture.harness.build_child(&genesis, 1);
+    losing_batch.deinit();
+    const winner, var winner_batch = try fixture.harness.build_child(&genesis, 2);
+    winner_batch.deinit();
+    return .{ losing, winner };
+}
+
+// commonware `cancellation_during_finalization_join_releases_maintenance`: a finalization
+// waiting for a competing execution proceeds when that request's caller cancels: the
+// winner is reconstructed and acknowledged, and the cancelled request gets no reply.
+test "stateful processing: a cancellation during a finalization join releases it" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer deinit_fixture(&fixture);
+    const genesis = TestBlock.genesis();
+    const losing, const winner = try losing_and_winner(&fixture);
+    // Null target: the gate holds the losing execution; the winner's reconstruction passes.
+    var probe: harness.Probe = .{ .target = null };
+    defer probe.deinit();
+    var held = try HeldGate.add(&probe);
+    defer held.deinit();
+    var hooks: harness.Probe = .{ .target = null };
+    defer hooks.deinit();
+    fixture.processing.verifications.verifier.app.probe = &probe;
+    fixture.processing.processor.app.probe = &probe;
+    fixture.processing.processor.app.finalized_probe = &hooks;
+
+    var request = try fixture.verify(&.{ losing, genesis });
+    try held.started.recv();
+    // A second verification never acquires its block, and is parked by the finalization.
+    var gate: AncestryGate = .{};
+    var acquiring = try verify_with(&fixture, try GatedAncestry.init(&gate, &.{}, 0));
+    defer acquiring.deinit();
+    var receipt = try fixture.finalize(winner);
+    defer receipt.deinit();
+    try gate.await_parked();
+    try testing.expectEqual(null, receipt.poll());
+    try testing.expectEqual(0, hooks.calls);
+    // Cancelling the losing request ends the wait with its gate still held.
+    request.deinit();
+    try held.release.closed();
+    try receipt.wait();
+    try testing.expectEqual(2, probe.calls);
+    try testing.expectEqual(1, hooks.calls);
+}
+
+// commonware `paused_acquisition_restarts_after_finalization`: a verification whose block
+// arrives while its finalization is paused answers from the restarted acquisition once the
+// finalization completes, without processing the block as a candidate.
+test "stateful processing: a paused acquisition restarts after finalization" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer deinit_fixture(&fixture);
+    const genesis = TestBlock.genesis();
+    const losing, const winner = try losing_and_winner(&fixture);
+    var probe: harness.Probe = .{ .target = null };
+    defer probe.deinit();
+    var held = try HeldGate.add(&probe);
+    defer held.deinit();
+    var hooks: harness.Probe = .{ .target = null };
+    defer hooks.deinit();
+    fixture.processing.verifications.verifier.app.probe = &probe;
+    fixture.processing.processor.app.probe = &probe;
+    fixture.processing.processor.app.finalized_probe = &hooks;
+
+    var losing_request = try fixture.verify(&.{ losing, genesis });
+    defer losing_request.deinit();
+    try held.started.recv();
+    var gate: AncestryGate = .{};
+    const ancestry = try GatedAncestry.init(&gate, &.{ winner, genesis }, 0);
+    var verification = try verify_with(&fixture, ancestry);
+    defer verification.deinit();
+    // Finalizing the winner pauses the acquisition; the block arrives during the pause.
+    var receipt = try fixture.finalize(winner);
+    defer receipt.deinit();
+    try gate.await_parked();
+    gate.release();
+    try testing.expectEqual(null, receipt.poll());
+    try held.open();
+    try testing.expect(!try losing_request.recv());
+    try receipt.wait();
+    try testing.expect(try verification.recv());
+    try testing.expectEqual(2, probe.calls);
+    try testing.expectEqual(1, hooks.calls);
+}
