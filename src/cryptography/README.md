@@ -74,9 +74,6 @@ Other bench prefixes: `sha256::`, `sha512::`, `blake3::`, `secp256r1::`, `bls123
   [crypto lane log](../../docs/lanes/crypto.md#log).
 - Hashing never allocates. `finalize` resets the hasher in place, and `hash_many` writes into
   a caller-provided slice. See the [crypto lane log](../../docs/lanes/crypto.md#log).
-- `hash_across` and `hash_pair` run on the calling thread, because `std.crypto`'s BLAKE3 does
-  not expose the chaining values that parallel subtree hashing needs. Digests are identical.
-  See the [crypto lane log](../../docs/lanes/crypto.md#log).
 - secp256r1 signs with its own RFC 6979 nonce generator on std's P-256 arithmetic, since
   `std.crypto.sign.ecdsa` is not RFC 6979. See the
   [crypto lane log](../../docs/lanes/crypto.md#log).

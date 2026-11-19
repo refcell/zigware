@@ -27,22 +27,26 @@ off: vectors, conformance hashes, unit tests, fuzz plans, benches, and batch ver
 
 ```sh
 zig build test-curve25519                         # unit tests, vectors, and seeded fuzz
-zig build bench -Dbench-filter=curve25519::       # benchmarks (ReleaseFast)
+zig build bench -Dbench-filter=curve25519::       # sign, verify, x25519 (ReleaseFast)
 ```
 
-`zig build test` also runs each benchmark once on its smoke inputs. The fuzz plans run as
-minifuzz searches and as a coverage-guided target ([fuzz_test.zig](fuzz_test.zig)). For long
-fuzz runs, use `zig build test --fuzz -Doptimize=ReleaseSafe`. The conformance test skips in
-Debug unless you pass `-Dslow-tests`.
+`-Dbench-filter=batch_verify::` runs the batch verification benchmark. `zig build test` also
+runs each benchmark once on its smoke inputs. The fuzz plans run as minifuzz searches and as
+a coverage-guided target ([fuzz_test.zig](fuzz_test.zig)). For long fuzz runs, use
+`zig build test --fuzz -Doptimize=ReleaseSafe`. The conformance test skips in Debug unless
+you pass `-Dslow-tests`.
 
 ## Differences from commonware
 
-All of these are recorded in the
+Unless noted, these are recorded in the
 [curve25519 lane decisions](../../../docs/lanes/curve25519.md#decisions).
 
-- Single verification and X25519 use `std.crypto` (`ed25519.core` with a lenient decoder, and
-  `std.crypto.dh.X25519`), where the vectors prove it agrees. The crate's private field, group,
-  and MSM backends are not ported.
+- Field and group arithmetic is `std.crypto`'s (`ed25519.core` with a lenient decoder, and
+  `std.crypto.dh.X25519`), where the vectors prove it agrees. Single verification ports the
+  crate's half-size Straus check and its AVX-512 IFMA point backend. The bucket MSM runs on IFMA,
+  then curve25519-dalek's AVX2 backend, then std's arithmetic. The crate's portable and NEON
+  backends are not ported. See the [crypto lane log](../../../docs/lanes/crypto.md#log) and
+  [BENCHMARKS.md](../../../docs/BENCHMARKS.md#updates-since-the-table).
 - `verify_batch` takes no allocator. Each batch is cut into chunks of at most 128 signatures on
   the stack, and the window width is fixed at 6 bits, so `width_for` is not ported.
 - The verdict of a batch depends only on its items and seed, at every thread count.

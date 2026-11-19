@@ -15,7 +15,8 @@ checked.
 ## Modules
 
 - `compute_hash` ([root.zig](root.zig)): commits seeds `0..n_cases` with a type's `commit`
-  and returns the hex SHA-256 of every commitment, each prefixed by its length.
+  and returns one hex SHA-256 over all of them, each prefixed by its length as a little-endian
+  u64.
 - `find`, `Entry` ([root.zig](root.zig)): look up a type's `n_cases` and hash in the text of a
   conformance TOML file.
 - `verify` ([root.zig](root.zig)): checks that a type still produces its recorded hash, and

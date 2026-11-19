@@ -19,9 +19,9 @@ Six lane files track the zigware port:
 [storage-archive](../../docs/lanes/storage-archive.md),
 [storage-qmdb](../../docs/lanes/storage-qmdb.md),
 [storage-qmdb-sync](../../docs/lanes/storage-qmdb-sync.md), and
-[coding](../../docs/lanes/coding.md) (for bmt). Every backlog item is ticked except two:
-storage-qmdb's upstream 102430409 (the store's strategy and any's shared batched read), and
-storage-merkle's byte-exact zstd item, whose six pieces are all ticked.
+[coding](../../docs/lanes/coding.md) (for bmt). Every backlog item is ticked except one:
+storage-qmdb-sync's reshare harness phase 2, the ten state-sync ceremonies in
+`src/glue/dkg/tests/reshare/`.
 
 ## Modules
 
@@ -51,8 +51,8 @@ zig build qmdb-constantinople -- <args>   # also qmdb-scale (see storage-qmdb.md
 ```
 
 Benchmark prefixes are `archive`, `bmt`, `freezer`, `index`, `journal`, `merkle`, `metadata`,
-and `qmdb`. `zig build test` also runs each benchmark once on its smoke inputs. For long,
-coverage-guided fuzzing, run `zig build test --fuzz -Doptimize=ReleaseSafe`.
+`ordinal`, `qmdb`, and `rmap`. `zig build test` also runs each benchmark once on its smoke
+inputs. For long, coverage-guided fuzzing, run `zig build test --fuzz -Doptimize=ReleaseSafe`.
 
 ## Differences from commonware
 
@@ -61,7 +61,8 @@ coverage-guided fuzzing, run `zig build test --fuzz -Doptimize=ReleaseSafe`.
   [storage-qmdb decisions](../../docs/lanes/storage-qmdb.md#decisions)).
 - Where commonware consumes a handle on a failed call, the cache, prunable archive, and
   metadata are left failed instead, and only `deinit` may follow
-  ([storage-archive decisions](../../docs/lanes/storage-archive.md#decisions)).
+  ([storage-archive decisions](../../docs/lanes/storage-archive.md#decisions),
+  [storage-journal decisions](../../docs/lanes/storage-journal.md#decisions)).
 - There is no C libzstd. Journals decompress with `std.compress.zstd`. They compress with a
   port that writes exactly libzstd 1.5.7's level-3 frames, and the configured level is not
   read ([storage-journal decisions](../../docs/lanes/storage-journal.md#decisions)).

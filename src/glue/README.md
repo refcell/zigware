@@ -10,9 +10,11 @@ A Zig port of commonware's
 **ALPHA** upstream: breaking changes are expected. See commonware's
 [stability levels](https://github.com/commonwarexyz/monorepo#stability).
 The zigware port is in progress. [docs/lanes/glue.md](../../docs/lanes/glue.md) tracks it.
-Every commonware test in `simulate` and `transfers` has a counterpart. `stateful` and `dkg`
-still have open backlog items, including some of `stateful`'s processing tests and the
-`dkg` reshare ceremony tests.
+Every commonware test in `simulate` and `transfers` has a counterpart, and so does every `dkg`
+test but one that is not portable. `stateful` has one open item: its end-to-end tests. The
+engine and both apps (`single_db`, `multi_db`) are ported, and `tests/mod.rs`'s scenarios run
+on both engines under rotating leaders. Commonware also runs them under stable leaders, which
+are not enabled yet because several scenarios still fail under them.
 
 ## Modules
 

@@ -24,7 +24,7 @@ including its test audit.
 
 ```sh
 zig build test-coding                          # unit tests, including the minifuzz searches
-zig build bench -Dbench-filter=reed_solomon    # encode, decode, and size benchmarks (ReleaseFast)
+zig build bench -Dbench-filter=reed_solomon    # coding's and cryptography's Reed-Solomon benches
 ```
 
 `zig build test` also runs each benchmark once on its smoke inputs. For long, coverage-guided

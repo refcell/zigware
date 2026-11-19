@@ -16,8 +16,9 @@ checked, and its test audit lists no open formatting tests.
 
 - `hex`, `hex_encode` ([root.zig](root.zig)): bytes to lowercase hexadecimal. `hex` allocates
   and the caller frees; `hex_encode` writes into a caller buffer.
-- `from_hex` ([root.zig](root.zig)): hexadecimal to bytes. It strips ASCII whitespace and one
-  `0x` or `0X` prefix, and returns null on invalid input.
+- `from_hex` ([root.zig](root.zig)): hexadecimal to bytes. It strips spaces, tabs, CR, and LF,
+  then a leading `0X`, then one more `0x` or `0X`, as commonware does. It returns null on
+  invalid input.
 - `Hex`, `fmt_hex` ([root.zig](root.zig)): a `{f}` formatter that renders bytes as lowercase
   hex without allocating.
 - `hex_literal` ([root.zig](root.zig)): comptime parsing of a hex literal into a `[N]u8`

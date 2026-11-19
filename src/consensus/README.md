@@ -16,12 +16,11 @@ commonware's [stability levels](https://github.com/commonwarexyz/monorepo#stabil
 The zigware port is in progress. Three lane files track it:
 
 - [docs/lanes/consensus-simplex.md](../../docs/lanes/consensus-simplex.md) tracks the root,
-  `types`, `reporter`, and `simplex`. Its backlog is done except the 96 voter-actor tests of
-  `actors/voter/mod.rs`, which are not ported yet.
+  `types`, `reporter`, and `simplex`. Every item in its backlog is done, including the 96
+  voter-actor tests of `actors/voter/mod.rs`.
 - [docs/lanes/consensus-marshal.md](../../docs/lanes/consensus-marshal.md) tracks `marshal`
-  and `aggregation`. Its test tally ports 192 of the 197 tests in `marshal/standard/mod.rs`
-  (1 in progress, 4 not portable) and all 101 in `marshal/coding/mod.rs`. Nothing is open in
-  aggregation.
+  and `aggregation`. Its test tally ports 193 of the 197 tests in `marshal/standard/mod.rs`
+  (4 not portable) and all 101 in `marshal/coding/mod.rs`. Nothing is open in aggregation.
 - [docs/lanes/broadcast-collector.md](../../docs/lanes/broadcast-collector.md) tracks
   `marshal/coding`, the erasure-coded variant.
 
@@ -71,9 +70,10 @@ test.
   ([simplex decisions](../../docs/lanes/consensus-simplex.md#decisions))
 - The simplex engine takes a built elector, which the caller owns, instead of an elector
   config. ([simplex decisions](../../docs/lanes/consensus-simplex.md#decisions))
-- Marshal's archive writes are durable when they return, so its syncs finish inside the event
-  that starts them. A storage or allocation error ends the marshal actor with the error, where
-  commonware panics. ([marshal decisions](../../docs/lanes/consensus-marshal.md#decisions))
+- Marshal's actor handles events in arrival order, not by `select_loop!` priority. It pools
+  archive syncs still in flight until they complete. A storage or allocation error ends the
+  marshal actor with the error, where commonware panics.
+  ([marshal decisions](../../docs/lanes/consensus-marshal.md#decisions))
 - Error variants carry no payload. For example, `Certificate.from_acks` returns
   `InsufficientAttestations` without the expected and found counts.
   ([marshal decisions](../../docs/lanes/consensus-marshal.md#decisions))

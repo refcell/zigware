@@ -13,7 +13,7 @@ stable, and breaking changes come with a migration path. See commonware's
 [stability levels](https://github.com/commonwarexyz/monorepo#stability).
 The p2p lane's own backlog is done. [docs/lanes/p2p.md](../../docs/lanes/p2p.md) tracks it. Its
 [test audit](../../docs/lanes/p2p.md#test-audit-p2p-2026-11-19-commonware-43b357a41) counts 476
-commonware tests: 445 ported, 0 open, 31 not portable. `authenticated/lookup/` belongs to the
+commonware tests: 463 ported, 0 open, 13 not portable. `authenticated/lookup/` belongs to the
 parallel lane ([docs/lanes/parallel.md](../../docs/lanes/parallel.md)).
 
 ## Modules
@@ -58,7 +58,7 @@ All of these are recorded in the [p2p lane decisions](../../docs/lanes/p2p.md#de
 - Discovery runs its dialer, listener, handshakes, and connections as tasks in one `Io.Group`.
   The tracker is locked state instead of an actor. A finished listener or dialer does not stop
   the network; cancelation does.
-- Message payloads are byte slices until the runtime lane ports `IoBuf`.
+- Message payloads are byte slices, not `runtime.iobuf.IoBuf` values.
 - `Quota` and `KeyedRateLimiter` live in p2p until the runtime lane takes them. Keys sit in a
   sorted array, so the limiter is deterministic.
 - Link latency samples match `rand_distr`'s `Normal` bit for bit. Whole-run random streams can

@@ -68,8 +68,9 @@ with `-Dslow-tests`.
   [runtime lane decisions](../../docs/lanes/runtime.md#decisions).
 - A `Runner` can `start` several roots in sequence, which replaces `Checkpoint` and `recover`.
   See the [runtime lane decisions](../../docs/lanes/runtime.md#decisions).
-- Blobs sync synchronously and must be closed. `read_many` and `start_sync` are not ported.
-  See the [runtime lane decisions](../../docs/lanes/runtime.md#decisions).
+- Blobs must be closed, and closing does not sync. `read_many` is not ported. `start_sync`
+  returns a `Completion`, and backends without their own sync inline. See the
+  [runtime lane decisions](../../docs/lanes/runtime.md#decisions).
 - The production runtime runs on `std.Io.Threaded`, because `std.Io.Uring` does not compile in
   Zig 0.17.1. io_uring is our own backend and stays off by default. See the
   [runtime-telemetry lane decisions](../../docs/lanes/runtime-telemetry.md#decisions).

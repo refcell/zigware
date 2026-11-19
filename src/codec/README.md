@@ -11,8 +11,8 @@ Stability upstream varies by primitive. lib.rs puts `buf`, `codec`, `config`, `e
 `extensions`, `mode`, `types`, `util`, and `varint` in the **BETA** scope. `uint`,
 `conformance`, and `fuzz` are ALPHA, and so are a few items inside `varint` and `types/lazy`.
 See commonware's [stability levels](https://github.com/commonwarexyz/monorepo#stability).
-Every backlog item in [docs/lanes/codec.md](../../docs/lanes/codec.md) is done, and its test
-audit lists no open tests. Vectored writes (`write_bufs`) are not ported yet.
+Every backlog item in [docs/lanes/codec.md](../../docs/lanes/codec.md) is done, and every
+commonware test is ported or not portable. Vectored writes (`write_bufs`) are not ported yet.
 
 ## Modules
 
