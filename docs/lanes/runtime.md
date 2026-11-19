@@ -557,27 +557,27 @@ Open:
   reports BlobResizeFailed
 - [x] `storage/iouring.rs:2174` `test_blob_sync_reports_kernel_error`: sync on a socket descriptor
   reports BlobSyncFailed
-- [ ] `storage/iouring.rs:2769` `test_clean_sync_is_skipped`: sync with no mutation since the last
+- [x] `storage/iouring.rs:2769` `test_clean_sync_is_skipped`: sync with no mutation since the last
   sync skips the fsync
 - [x] `storage/tokio/blob.rs:2017` `test_invalid_write_range_leaves_open_clean`: overflowing write
   ranges fail OffsetOverflow and mutate nothing
 - [x] `storage/tokio/mod.rs:669` `test_v1_paged_alignment`: paged writer on a V1 blob keeps each
   page on one aligned 4 KiB disk page
-- [ ] `storage/tokio/mod.rs:1102` `test_partition_scan_waits_for_sync`: scanning an inherited
+- [x] `storage/tokio/mod.rs:1102` `test_partition_scan_waits_for_sync`: scanning an inherited
   partition waits for its directory fsync
-- [ ] `storage/tokio/mod.rs:1163` `test_partition_scan_sync_failure`: failed partition directory
+- [x] `storage/tokio/mod.rs:1163` `test_partition_scan_sync_failure`: failed partition directory
   fsync fails the scan; the next scan retries
-- [ ] `storage/tokio/mod.rs:1187` `test_partition_open_syncs_once`: first open of an inherited blob
+- [x] `storage/tokio/mod.rs:1187` `test_partition_open_syncs_once`: first open of an inherited blob
   fsyncs its partition directory once
-- [ ] `storage/tokio/mod.rs:1217` `test_partition_sync_creation_and_removal`: directory fsyncs on
+- [x] `storage/tokio/mod.rs:1217` `test_partition_sync_creation_and_removal`: directory fsyncs on
   partition creation, inheritance, and removal
-- [ ] `storage/tokio/mod.rs:1279` `test_blob_remove_sync_failure_retires_partition`: failed fsync
+- [x] `storage/tokio/mod.rs:1279` `test_blob_remove_sync_failure_retires_partition`: failed fsync
   after blob removal is redone by the next scan
 - [x] `storage/tokio/mod.rs:1364` `test_first_open_flushes_existing_blob`: first open of an existing
   blob per instance fsyncs it once
 - [x] `storage/tokio/mod.rs:1441` `test_remove_forgets_first_open_names`: removing a blob or
   partition forgets its first-open flushed names
-- [ ] `storage/tokio/mod.rs:1669` `test_clean_sync_is_skipped`: sync with no mutation since the last
+- [x] `storage/tokio/mod.rs:1669` `test_clean_sync_is_skipped`: sync with no mutation since the last
   sync skips the fsync
 - [x] `iobuf/buf.rs:2386` `test_iobufmut_try_with_alignment_declines_impossible_layouts`: oversized
   aligned allocations fail instead of panicking
@@ -596,9 +596,8 @@ Open:
 - [x] `iobuf/bufs.rs:4281` `test_non_empty_range_encode_iobufs_matches_encode`: encode_iobufs of a
   NonEmptyRange of byte values equals encode
 
-The open storage tests wait on features of production/storage.zig (runtime-telemetry lane): the
-two `test_clean_sync_is_skipped` need a dirty flag that skips a clean blob's fsync, and the five
-tokio/mod.rs partition tests need commonware's non-Linux cache of synced partition directories.
+The tokio/mod.rs partition-sync tests run on every platform with
+`Config.sync_inherited_partitions` set (it defaults to commonware's non-Linux only).
 
 Not portable:
 - `storage/iouring.rs` `test_dirty_sync_waits_without_blocking_other_io`,

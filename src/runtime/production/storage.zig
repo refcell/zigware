@@ -22,6 +22,7 @@
 //! blob's handles keep reading and writing its unlinked file.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const iface = @import("../storage.zig");
 const header = @import("../storage/header.zig");
 const ring_mod = @import("ring.zig");
@@ -45,6 +46,18 @@ pub const Config = struct {
     layout: iface.BlobLayout = iface.default_blob_layout,
     /// Runs blob I/O through io_uring; it must outlive the storage.
     ring: ?*ring_mod.Ring = null,
+    /// Fsync an inherited partition's directory the first time this instance scans, opens, or
+    /// removes a blob in it. Like commonware, only off Linux by default.
+    sync_inherited_partitions: bool = builtin.os.tag != .linux,
+};
+
+/// Most partitions remembered as synced; past it, inherited partitions sync on every access.
+pub const synced_partitions_max = 1024;
+
+/// Test hook: pauses the next directory sync, announcing it, until released.
+pub const SyncGate = struct {
+    entered: Io.Event = .unset,
+    release: Io.Event = .unset,
 };
 
 pub const Storage = struct {
@@ -58,6 +71,13 @@ pub const Storage = struct {
     live: std.StringArrayHashMapUnmanaged(*Blob) = .empty,
     /// Keys whose first-open flush has run (or that were created) through this instance.
     flushed: std.StringArrayHashMapUnmanaged(void) = .empty,
+    /// Partitions whose inherited directory entries this instance made durable (commonware's
+    /// `Partitions.synced`), at most `synced_partitions_max`, under `mutex`.
+    synced: std.StringArrayHashMapUnmanaged(void) = .empty,
+    /// Test hook: the next directory sync fails with this error before reaching the disk.
+    fail_next_dir_sync: ?Error = null,
+    /// Test hook: the next directory sync waits on this gate first.
+    dir_sync_gate: ?*SyncGate = null,
 
     /// Takes ownership of `root` and acquires its hold, waiting while another storage holds
     /// it.
@@ -75,6 +95,8 @@ pub const Storage = struct {
         assert(self.live.count() == 0);
         for (self.flushed.keys()) |key| self.gpa.free(key);
         self.flushed.deinit(self.gpa);
+        for (self.synced.keys()) |key| self.gpa.free(key);
+        self.synced.deinit(self.gpa);
         self.live.deinit(self.gpa);
         self.hold.close(self.io);
         self.root.close(self.io);
@@ -155,7 +177,7 @@ pub const Storage = struct {
     fn partition_create(self: *Storage, partition: []const u8) Error!Dir {
         const status = self.root.createDirPathStatus(self.io, partition, .default_dir) catch
             return error.PartitionCreationFailed;
-        if (status == .created) try sync_dir(self.io, self.root);
+        if (status == .created) try self.dir_sync(self.root);
         return self.root.openDir(self.io, partition, .{}) catch error.PartitionCreationFailed;
     }
 
@@ -182,6 +204,7 @@ pub const Storage = struct {
             path.name,
         );
         if (resolved) |existing| {
+            try self.partition_sync_once(path.partition, partition_dir);
             if (!self.flushed.contains(key)) {
                 // The previous run may have left writes in the page cache: settle them first.
                 file.sync(self.io) catch return error.BlobSyncFailed;
@@ -191,7 +214,8 @@ pub const Storage = struct {
         }
         // A new blob (or one torn during creation): make its directory entry durable, then
         // write the header region over an emptied file.
-        try sync_dir(self.io, partition_dir);
+        try self.dir_sync(partition_dir);
+        try self.partition_synced(path.partition);
         var region: [header.region_max]u8 = undefined;
         const created = header.create(.only(self.config.layout), versions, &region);
         file.setLength(self.io, 0) catch return error.BlobResizeFailed;
@@ -219,22 +243,65 @@ pub const Storage = struct {
             const partition_dir = self.root.openDir(self.io, partition, .{}) catch
                 return error.BlobMissing;
             defer partition_dir.close(self.io);
+            // Retired before the unlink, so a failed removal never leaves it marked durable.
+            self.partition_invalidate(partition);
             partition_dir.deleteFile(self.io, key[partition.len + 1 ..]) catch
                 return error.BlobMissing;
             self.forget(key, false);
-            try sync_dir(self.io, partition_dir);
+            try self.dir_sync(partition_dir);
+            try self.partition_synced(partition);
         } else {
             const partition_dir = self.root.openDir(self.io, partition, .{}) catch |err|
                 return if (err == error.FileNotFound) error.PartitionMissing else error.Io;
             partition_dir.close(self.io);
+            self.partition_invalidate(partition);
             self.root.deleteTree(self.io, partition) catch return error.Io;
             var prefix_buffer: [iface_partition_size_max + 1]u8 = undefined;
             if (partition.len > iface_partition_size_max) return error.PartitionNameInvalid;
             @memcpy(prefix_buffer[0..partition.len], partition);
             prefix_buffer[partition.len] = '/';
             self.forget(prefix_buffer[0 .. partition.len + 1], true);
-            try sync_dir(self.io, self.root);
+            try self.dir_sync(self.root);
         }
+    }
+
+    /// Makes `dir`'s entries durable, through the test hooks.
+    fn dir_sync(self: *Storage, dir: Dir) Error!void {
+        if (self.dir_sync_gate) |gate| {
+            self.dir_sync_gate = null;
+            gate.entered.set(self.io);
+            gate.release.wait(self.io) catch return error.Canceled;
+        }
+        if (self.fail_next_dir_sync) |err| {
+            self.fail_next_dir_sync = null;
+            return err;
+        }
+        try sync_dir(self.io, dir);
+    }
+
+    /// Syncs an inherited partition's directory on its first access (commonware `sync_once`).
+    fn partition_sync_once(self: *Storage, partition: []const u8, dir: Dir) Error!void {
+        if (!self.config.sync_inherited_partitions) return;
+        if (self.synced.contains(partition)) return;
+        try self.dir_sync(dir);
+        try self.partition_synced(partition);
+        assert(self.synced.contains(partition) or self.synced.count() == synced_partitions_max);
+    }
+
+    /// Records `partition` as synced; call only after its directory sync succeeded.
+    fn partition_synced(self: *Storage, partition: []const u8) Error!void {
+        if (!self.config.sync_inherited_partitions) return;
+        if (self.synced.contains(partition)) return;
+        if (self.synced.count() == synced_partitions_max) return;
+        const key = try self.gpa.dupe(u8, partition);
+        errdefer self.gpa.free(key);
+        try self.synced.putNoClobber(self.gpa, key, {});
+        assert(self.synced.count() <= synced_partitions_max);
+    }
+
+    fn partition_invalidate(self: *Storage, partition: []const u8) void {
+        if (self.synced.fetchSwapRemove(partition)) |entry| self.gpa.free(entry.key);
+        assert(!self.synced.contains(partition));
     }
 
     /// Drops the live claim and first-open record of `key`, or of every key it prefixes.
@@ -265,6 +332,8 @@ pub const Storage = struct {
         const partition_dir = self.root.openDir(self.io, partition, options) catch |err|
             return if (err == error.FileNotFound) error.PartitionMissing else error.ReadFailed;
         defer partition_dir.close(self.io);
+        // Make inherited directory entries durable before exposing their blob names.
+        try self.partition_sync_once(partition, partition_dir);
         var names: std.ArrayList([]u8) = .empty;
         errdefer {
             for (names.items) |item| gpa.free(item);
@@ -425,6 +494,12 @@ pub const Blob = struct {
     file: File,
     data_offset: u64,
     key: []u8,
+    /// Bumped after every write and resize, once its I/O has finished (or failed partway).
+    generation: std.atomic.Value(u64) = .init(0),
+    /// The highest generation a successful fsync covered. Equal to `generation`: clean.
+    synced_generation: std.atomic.Value(u64) = .init(0),
+    /// Syncs skipped because nothing changed since the last one (commonware `skipped`).
+    syncs_skipped: std.atomic.Value(u64) = .init(0),
 
     fn create(storage: *Storage, file: File, key: []const u8, data_offset: u64) Error!*Blob {
         assert(data_offset <= header.region_max);
@@ -517,22 +592,48 @@ pub const Blob = struct {
         // Like commonware, the write must end within the signed file extent, checked before
         // any I/O.
         if (position + total > std.math.maxInt(i64)) return error.OffsetOverflow;
-        for (chunks) |chunk| {
-            try file_write(self.storage, self.file, chunk, position);
-            position += chunk.len;
+        {
+            defer self.mutated();
+            for (chunks) |chunk| {
+                try file_write(self.storage, self.file, chunk, position);
+                position += chunk.len;
+            }
         }
         assert(position == self.data_offset + offset + total);
-        if (options.sync) try file_sync(self.storage, self.file);
+        if (options.sync) try self.sync();
     }
 
     pub fn resize(self: *Blob, length: u64) Error!void {
         const raw_length = try self.raw_offset(length, 0);
+        defer self.mutated();
         self.file.setLength(self.storage.io, raw_length) catch |err|
             return or_canceled(err, error.BlobResizeFailed);
     }
 
+    /// Fsyncs the blob unless nothing changed since the last successful sync. A mutation
+    /// that finishes during the fsync bumps `generation` past the one recorded, so it stays
+    /// dirty; one that finished before the load is in the page cache the fsync flushes.
     pub fn sync(self: *Blob) Error!void {
+        const current = self.generation.load(.acquire);
+        if (self.synced_generation.load(.acquire) == current) {
+            _ = self.syncs_skipped.fetchAdd(1, .monotonic);
+            return;
+        }
         try file_sync(self.storage, self.file);
+        var seen = self.synced_generation.load(.monotonic);
+        while (seen < current) {
+            seen = self.synced_generation.cmpxchgWeak(seen, current, .release, .monotonic) orelse
+                break;
+        }
+        assert(self.synced_generation.load(.monotonic) >= current);
+    }
+
+    fn mutated(self: *Blob) void {
+        _ = self.generation.fetchAdd(1, .release);
+    }
+
+    fn dirty(self: *const Blob) bool {
+        return self.synced_generation.load(.acquire) != self.generation.load(.acquire);
     }
 
     /// Releases the handle without syncing.
@@ -543,6 +644,12 @@ pub const Blob = struct {
             if (live == self) {
                 const removed = storage.live.swapRemove(self.key);
                 assert(removed);
+                // Unsynced changes stay owed: the next open flushes the file again.
+                if (self.dirty()) {
+                    if (storage.flushed.fetchSwapRemove(self.key)) |entry| {
+                        storage.gpa.free(entry.key);
+                    }
+                }
             }
         }
         storage.mutex.unlock(storage.io);

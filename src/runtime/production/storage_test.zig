@@ -538,7 +538,10 @@ test "sync of a socket descriptor is BlobSyncFailed (test_blob_sync_reports_kern
     const fds = try socket_pair();
     defer close_pair(fds);
     try redirect_blob(opened, fds[0]);
-    try testing.expectError(error.BlobSyncFailed, opened.blob.sync());
+    // A clean open skips the sync; a mutation, even a failed one, makes it reach the kernel.
+    try testing.expectError(error.BlobResizeFailed, opened.blob.resize(0));
+    // A failed fsync leaves the blob dirty, so the next sync fails too.
+    for (0..2) |_| try testing.expectError(error.BlobSyncFailed, opened.blob.sync());
 }
 
 fn expect_flushed(storage: *const file_storage.Storage, keys: []const []const u8) !void {
@@ -586,4 +589,194 @@ test "remove forgets first-open names (test_remove_forgets_first_open_names)" {
     try expect_flushed(&storage, &.{ "a/31", "a/32", "b/31" });
     try storage.remove("a", null);
     try expect_flushed(&storage, &.{"b/31"});
+}
+
+fn blob_handle(blob: iface.Blob) *file_storage.Blob {
+    return @ptrCast(@alignCast(blob.ptr));
+}
+
+/// commonware `test_clean_sync_is_skipped` (iouring.rs and tokio/mod.rs), without `start_sync`.
+fn expect_clean_sync_skipped(ring: ?*Ring) !void {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.createDirPathOpen(io, "root", .{});
+    var storage = try file_storage.Storage.init(io, gpa, root, .{ .ring = ring });
+    defer storage.deinit();
+    var blob = (try storage.storage().open("partition", "clean")).blob;
+    const skipped = &blob_handle(blob).syncs_skipped;
+    try blob.sync();
+    try blob.sync();
+    try testing.expectEqual(@as(u64, 2), skipped.load(.monotonic));
+    // A mutation makes the next sync real, and only the next one.
+    try blob.write_at(0, "hello", .{});
+    try blob.sync();
+    try testing.expectEqual(@as(u64, 2), skipped.load(.monotonic));
+    try blob.sync();
+    try blob.resize(3);
+    try blob.sync();
+    try blob.sync();
+    try testing.expectEqual(@as(u64, 4), skipped.load(.monotonic));
+    // A handle closed with unsynced changes leaves them owed: the next open flushes again.
+    // "636c65616e" is hex("clean").
+    try blob.write_at(0, "x", .{});
+    blob.close();
+    try expect_flushed(&storage, &.{});
+    blob = (try storage.storage().open("partition", "clean")).blob;
+    defer blob.close();
+    try expect_flushed(&storage, &.{"partition/636c65616e"});
+    try blob.sync();
+    try testing.expectEqual(@as(u64, 1), blob_handle(blob).syncs_skipped.load(.monotonic));
+}
+
+test "a sync with nothing changed since the last skips the fsync (test_clean_sync_is_skipped)" {
+    try expect_clean_sync_skipped(null);
+    var ring: Ring = undefined;
+    try init_ring(&ring);
+    defer ring.deinit();
+    try expect_clean_sync_skipped(&ring);
+}
+
+/// Storage that syncs inherited partition directories, as commonware does off Linux.
+fn partition_sync_storage(tmp: *testing.TmpDir) !file_storage.Storage {
+    const root = try tmp.dir.createDirPathOpen(io, "root", .{});
+    return file_storage.Storage.init(io, gpa, root, .{ .sync_inherited_partitions = true });
+}
+
+fn expect_scan(
+    storage: *file_storage.Storage,
+    partition: []const u8,
+    names: []const []const u8,
+) !void {
+    const scanned = try storage.scan(gpa, partition);
+    defer scanned.deinit(gpa);
+    try testing.expectEqual(names.len, scanned.items.len);
+    for (names, scanned.items) |name, item| try testing.expectEqualStrings(name, item);
+}
+
+fn scan_empty(storage: *file_storage.Storage) anyerror!void {
+    try expect_scan(storage, "partition", &.{});
+}
+
+test "a scan of an inherited partition waits for its sync (test_partition_scan_waits_for_sync)" {
+    for ([_]bool{ false, true }) |cancel| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.createDirPath(io, "root/partition");
+        try tmp.dir.createDirPath(io, "root/other");
+        var storage = try partition_sync_storage(&tmp);
+        defer storage.deinit();
+        // Pause the first directory sync while its scan holds the namespace lock.
+        var gate: file_storage.SyncGate = .{};
+        storage.dir_sync_gate = &gate;
+        var first = try io.concurrent(scan_empty, .{&storage});
+        try gate.entered.wait(io);
+        // A queued scan waits even if the one ahead of it is canceled; it then syncs itself.
+        var next = try io.concurrent(scan_empty, .{&storage});
+        if (cancel) {
+            try testing.expectError(error.Canceled, first.cancel(io));
+        } else {
+            gate.release.set(io);
+            try first.await(io);
+        }
+        try next.await(io);
+        try testing.expect(storage.synced.contains("partition"));
+
+        // A cached scan leaves the failure armed for the other partition's first sync.
+        storage.fail_next_dir_sync = error.WriteFailed;
+        try expect_scan(&storage, "partition", &.{});
+        try testing.expectError(error.WriteFailed, storage.scan(gpa, "other"));
+        try expect_scan(&storage, "other", &.{});
+        try testing.expectError(error.PartitionMissing, storage.scan(gpa, "missing"));
+        try testing.expectEqual(@as(usize, 2), storage.synced.count());
+    }
+}
+
+test "a failed partition sync fails the scan; the next retries (test_partition_scan_sync_failure)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "root/partition");
+    var storage = try partition_sync_storage(&tmp);
+    defer storage.deinit();
+    storage.fail_next_dir_sync = error.WriteFailed;
+    try testing.expectError(error.WriteFailed, storage.scan(gpa, "partition"));
+    try testing.expect(!storage.synced.contains("partition"));
+    try expect_scan(&storage, "partition", &.{});
+    try testing.expect(storage.synced.contains("partition"));
+}
+
+test "an inherited blob's first open syncs its partition (test_partition_open_syncs_once)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var previous = try open_storage(&tmp, "root");
+        defer previous.deinit();
+        (try previous.storage().open("partition", "blob")).blob.close();
+    }
+    var storage = try partition_sync_storage(&tmp);
+    defer storage.deinit();
+    const opened = try storage.storage().open("partition", "blob");
+    try testing.expectEqual(@as(u64, 0), opened.len);
+    try testing.expect(storage.synced.contains("partition"));
+    opened.blob.close();
+    // A cached reopen leaves the failure armed.
+    storage.fail_next_dir_sync = error.WriteFailed;
+    (try storage.storage().open("partition", "blob")).blob.close();
+    try testing.expect(storage.fail_next_dir_sync != null);
+}
+
+test "partition syncs on creation, inheritance, and removal" {
+    // commonware `test_partition_sync_creation_and_removal`.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var previous = try open_storage(&tmp, "root");
+        defer previous.deinit();
+        for ([_][]const u8{ "inherited", "retired" }) |partition| {
+            (try previous.storage().open(partition, "blob")).blob.close();
+        }
+    }
+    var storage = try partition_sync_storage(&tmp);
+    defer storage.deinit();
+    // Creation syncs the partition, so its first scan uses the cache.
+    (try storage.storage().open("created", "blob")).blob.close();
+    try testing.expect(storage.synced.contains("created"));
+    try expect_scan(&storage, "created", &.{"blob"});
+    // Removing an inherited blob also syncs its partition before caching it.
+    try storage.remove("inherited", "blob");
+    try testing.expect(storage.synced.contains("inherited"));
+    try expect_scan(&storage, "inherited", &.{});
+    // Removing a partition retires its entry before the name is reused.
+    try expect_scan(&storage, "retired", &.{"blob"});
+    try storage.remove("retired", null);
+    try testing.expectError(error.PartitionMissing, storage.scan(gpa, "retired"));
+    try testing.expect(!storage.synced.contains("retired"));
+    (try storage.storage().open("retired", "new")).blob.close();
+    try testing.expect(storage.synced.contains("retired"));
+    try expect_scan(&storage, "retired", &.{"new"});
+    try testing.expectError(error.BlobMissing, storage.remove("missing", "blob"));
+    try testing.expect(!storage.synced.contains("missing"));
+}
+
+test "a failed sync after a blob removal is redone by the next scan" {
+    // commonware `test_blob_remove_sync_failure_retires_partition`.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        var previous = try open_storage(&tmp, "root");
+        defer previous.deinit();
+        (try previous.storage().open("partition", "blob")).blob.close();
+    }
+    var storage = try partition_sync_storage(&tmp);
+    defer storage.deinit();
+    try expect_scan(&storage, "partition", &.{"blob"});
+    try testing.expect(storage.synced.contains("partition"));
+    // The unlink lands, then the directory sync fails.
+    storage.fail_next_dir_sync = error.WriteFailed;
+    try testing.expectError(error.WriteFailed, storage.remove("partition", "blob"));
+    const stat = tmp.dir.statFile(io, "root/partition/626c6f62", .{});
+    try testing.expectError(error.FileNotFound, stat);
+    try testing.expect(!storage.synced.contains("partition"));
+    // A later scan finishes the missing sync before caching the empty partition.
+    try expect_scan(&storage, "partition", &.{});
+    try testing.expect(storage.synced.contains("partition"));
 }
