@@ -10,6 +10,9 @@ verifying, store, and the shared harness, which `coding/harness.zig` extends). A
 
 Reference: `~/.cache/zigware/commonware-ref/consensus/src/{aggregation,marshal}`.
 
+Thread: https://ampcode.com/threads/T-01a1d5ef-5571-7424-8220-609c9811da57 (message it with
+send_thread_message).
+
 Aggregation (about 4.6k Rust lines) needs only what is on main: consensus types,
 cryptography's certificate schemes (ed25519, secp256r1, bls12381 multisig and threshold),
 `actor.mailbox`, `utils` oneshot, `runtime.telemetry.metrics`, and `p2p.simulated`. Do it first.
@@ -269,6 +272,9 @@ ports its range's tests and the helpers defined in it, into
   (storage, floors, repair, dispatch) to keep files and functions within TigerStyle.
 
 ## Backlog
+- [ ] Pool the finalized-archive sync (`actor_finalize.start_finalized_sync` runs inline;
+  commonware pools it). Then flip `pooled_finalized_sync` in `standard/tests/dispatch.zig`
+  (3 skipped tests: mailbox not blocked by a sync, per-batch release, stale floor anchor).
 - [x] aggregation: types (all 5 conformance hashes match), scheme, limits, safe_tip.
 - [x] aggregation: config, metrics, engine, mocks; mod.rs `all_online` with ed25519.
 - [x] aggregation: the rest of mod.rs (byzantine proposer, unclean shutdowns, lossy links,
@@ -341,3 +347,5 @@ ports its range's tests and the helpers defined in it, into
 - 2026-11-18: kept-finalization prune restart and late-finalization batch dispatch tests
   (1219-1599 done); actor takes ready buffer waiters before acks, mailbox, and resolver
   events (commonware's biased order), with a regression test in `tests/restart.zig`.
+- 2026-11-18: aggregation "determinism" runs one seed on ed25519 outside nightly, and
+  "unclean byzantine shutdown" runs only under `-Dslow-tests` (CI wall time).

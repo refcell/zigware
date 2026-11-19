@@ -535,10 +535,14 @@ fn lossy(seed: u64) Scenario {
     };
 }
 
+// Under `-Dslow-tests` (nightly), every fixture over seeds 1-5; otherwise (outside Debug) one
+// seed with the quick fixture, to keep CI's wall time down.
 test "determinism" {
     try skip_slow();
+    const seed_max = if (build_options.slow_tests) 6 else 2;
     inline for (fixtures) |entry| {
-        inline for (1..6) |seed| {
+        if (!build_options.slow_tests and !entry[2]) continue;
+        inline for (1..seed_max) |seed| {
             const R = Run(entry[0], entry[1], lossy(seed));
             try testing.expectEqual(try R.run(), try R.run());
         }
@@ -753,8 +757,9 @@ fn UncleanByzantineShutdown(comptime S: type, comptime fixture: anytype) type {
     };
 }
 
+// Nightly only (`-Dslow-tests`): about a minute even in ReleaseSafe.
 test "unclean byzantine shutdown" {
-    try skip_slow();
+    if (!build_options.slow_tests) return error.SkipZigTest;
     inline for (fixtures) |entry| try UncleanByzantineShutdown(entry[0], entry[1]).run();
 }
 
