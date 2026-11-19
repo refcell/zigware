@@ -156,8 +156,8 @@ Partial:
   (commonware's crash retention 1.0), so recovery sees the uncommitted put on disk.
 - [x] archive `many_keys_{prunable,immutable}_large`: 50,000 keys under `-Dslow-tests`.
 - [x] freezer: `recovery_zeroes_torn_table_slot`, `checkpoint_rewinds_completed_resize`,
-  short-table mismatch with retry and unchanged length. Determinism runs 300 keys, not 1,000
-  (counted as ported).
+  short-table mismatch with retry and unchanged length. Determinism runs commonware's 1,000
+  keys under `-Dslow-tests` and 60 keys per push.
 - [x] ordinal `init_clears_unmarked_records` checks that recovery issues one sync.
 - [x] `bits_for_indices` has a direct test (utils.rs `test_bits_for_indices`).
 
@@ -189,3 +189,5 @@ Partial:
   immutable interrupted destroy stays partial (clearing lane).
 - 2026-11-19: immutable interrupted destroy with unsynced writes kept; no partials left
   (clearing lane).
+- 2026-11-19: freezer determinism at 60 keys per push and commonware's 1,000 under
+  `-Dslow-tests` (it was the slowest test here at 9.9 s in Debug; clearing lane).

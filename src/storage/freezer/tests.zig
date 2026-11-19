@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const testing = std.testing;
+const build_options = @import("build_options");
 const runtime = @import("runtime");
 const utils = @import("utils");
 const cryptography = @import("cryptography");
@@ -492,9 +493,17 @@ fn check_operations_and_restart(num_keys: usize) ![4]u8 {
 }
 
 test "freezer determinism" {
-    const first = try check_operations_and_restart(300);
-    const second = try check_operations_and_restart(300);
-    try testing.expectEqual(first, second);
+    // Per push: 60 keys still span many sections (256-byte values over a 128-byte target)
+    // and several resizes of the 8-entry table.
+    const first = try check_operations_and_restart(60);
+    try testing.expectEqual(first, try check_operations_and_restart(60));
+}
+
+test "freezer determinism at commonware's size" {
+    // Commonware's slow `test_determinism`: 1,000 keys, twice.
+    if (!build_options.slow_tests) return error.SkipZigTest;
+    const first = try check_operations_and_restart(1_000);
+    try testing.expectEqual(first, try check_operations_and_restart(1_000));
 }
 
 // `freezer_operations` fuzz target: random puts (keys drawn from a small pool so collisions
