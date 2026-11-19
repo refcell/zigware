@@ -287,8 +287,9 @@ variants need `runtime` storage; do them after its interface lands.
     pass), replay read options (zigware's replay takes none), `View` ownership, should-panic,
     snapshot, and the parked or dropped sync-handle tests (start_sync staging, deferred
     failures, destroy after an unobserved failed sync).
-  - [ ] variable.rs: start_sync flush failure and the init data-before-offsets sync check
-    (need a partition-scoped sync fault).
+  - [x] variable.rs: start_sync flush failure and the init data-before-offsets sync check,
+    ported by storage-journal in `contiguous/variable_faults_test.zig` (the partition-scoped
+    sync fault is `runtime.storage.mocks.SyncFault`, commonware's `SyncFaultContext`).
 - [ ] journal/zstd: byte-exact libzstd level 3 (coordinator, correcting the earlier "byte
   identity not required"). commonware's storage conformance hashes four `<true>` journal
   workloads written with `compression: Some(3)`, so compressed journals must emit exactly

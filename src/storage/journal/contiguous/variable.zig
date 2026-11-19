@@ -1491,4 +1491,5 @@ test {
     _ = @import("variable_bounded_test.zig");
     _ = @import("variable_repair_test.zig");
     _ = @import("variable_reads_test.zig");
+    _ = @import("variable_faults_test.zig");
 }
