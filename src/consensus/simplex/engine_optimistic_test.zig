@@ -10,11 +10,42 @@ const consensus_types = @import("../types.zig");
 const engine_test = @import("engine_test.zig");
 const application_mod = @import("mocks/application.zig");
 const utils = @import("utils");
+const cryptography = @import("cryptography");
+const runtime = @import("runtime");
+const elector_mod = @import("elector.zig");
+const mock_scheme = @import("mocks/scheme.zig");
+
+/// commonware `scheme_mocks::fixture` with round robin, which `one_offline_stable_leader` and
+/// `1k` run on.
+/// It hosts only this file's DSTs: engine_test.zig's run on commonware's fixtures.
+pub const MockFixture = struct {
+    pub const harness_only = {};
+    const Digest = cryptography.Sha256.Digest;
+    pub const Scheme = mock_scheme.Scheme(Digest);
+    pub const Elector = elector_mod.RoundRobinElector;
+
+    pub fn fixture(rng: anytype, n: u32) !cryptography.certificate.mocks.Fixture(Scheme) {
+        return mock_scheme.fixture(Digest, testing.allocator, rng, "consensus", n);
+    }
+
+    pub fn elector(n: u32) !Elector {
+        const RoundRobin = elector_mod.RoundRobin(cryptography.Sha256);
+        return RoundRobin.default().build(testing.allocator, n);
+    }
+
+    pub fn deinit_elector(value: *Elector) void {
+        value.deinit(testing.allocator);
+    }
+};
 
 pub fn Suite(comptime F: type) type {
     return struct {
         const E = engine_test.Suite(F);
         const ed25519 = F == engine_test.Ed25519Fixture;
+        const mocks = F == MockFixture;
+        /// commonware runs the stable-leader variants in its slow group; Debug runs without
+        /// `-Dslow-tests` skip them.
+        const slow_variants = builtin.mode != .debug or build_options.slow_tests;
         const Context = E.Context;
         const Harness = E.Harness;
         const RoundRobin = E.RoundRobin;
@@ -233,5 +264,92 @@ pub fn Suite(comptime F: type) type {
             if (comptime !ed25519 or !build_options.slow_tests) return error.SkipZigTest;
             _ = try E.run_seeded(0, full_term_scenario, .{});
         }
+
+        /// commonware's stable-leader optimistic variants: five-view terms, a 13 s stall timeout,
+        /// and two optimistic views.
+        fn optimistic_terms() RoundRobin {
+            return term(5, 13, 2);
+        }
+
+        test "unclean shutdown with a stable leader optimistic" {
+            if (comptime !ed25519 or !slow_variants) return error.SkipZigTest;
+            var runner = try runtime.deterministic.Runner.init(E.gpa, .{ .seed = 0 });
+            defer runner.deinit();
+            const restarts_max = 200;
+            const required: u64 = if (E.quick) 15 else 100;
+            const args = .{ required, optimistic_terms() };
+            const restarts = for (0..restarts_max) |restart| {
+                if (try (try runner.start_context(E.unclean_run, args))) break restart;
+            } else return error.TestUnexpectedResult;
+            try testing.expect(restarts > 0);
+        }
+
+        test "backfill with a stable leader optimistic" {
+            if (comptime !ed25519 or !slow_variants) return error.SkipZigTest;
+            // A long stall timeout keeps the healthy prefix (one validator offline) from
+            // stall-nullifying.
+            _ = try E.run_seeded(0, E.backfill_scenario, .{term(5, 51, 2)});
+        }
+
+        test "one offline with a stable leader" {
+            if (comptime !mocks or !slow_variants) return error.SkipZigTest;
+            _ = try E.run_seeded(0, E.one_offline_scenario, .{term(3, 12, 0)});
+        }
+
+        test "partition with a stable leader optimistic" {
+            if (comptime !ed25519 or !slow_variants) return error.SkipZigTest;
+            _ = try E.run_seeded(0, E.partition, .{optimistic_terms()});
+        }
+
+        test "slow and lossy links with a stable leader optimistic" {
+            if (comptime !ed25519 or !slow_variants) return error.SkipZigTest;
+            const required: u64 = if (E.quick) 10 else 20;
+            _ = try E.run_seeded(6, E.slow_and_lossy_links, .{ required, optimistic_terms() });
+        }
+
+        test "equivocator is blocked with a stable leader optimistic" {
+            if (comptime !ed25519 or !slow_variants) return error.SkipZigTest;
+            const detected = for (0..5) |seed| {
+                var runner = try runtime.deterministic.Runner.init(E.gpa, .{ .seed = seed });
+                defer runner.deinit();
+                const args = .{optimistic_terms()};
+                if (try (try runner.start_context(E.equivocator_run, args))) break true;
+            } else false;
+            try testing.expect(detected);
+        }
+
+        /// commonware `1k`: ten validators on lossy links with jittered application latencies
+        /// finalize 1000 views without faults, invalid activity, or blocks.
+        fn thousand_scenario(ctx: Context) !void {
+            const required = 1000;
+            var harness: Harness = undefined;
+            try harness.start_network(ctx, 10, E.link_ms(80, 10, 0.98), .honest, .{});
+            defer harness.deinit();
+            harness.propose_latency = .{ .mean = 100, .std_dev = 50 };
+            harness.verify_latency = .{ .mean = 50, .std_dev = 40 };
+            harness.certify_latency = struct {
+                fn latency(_: usize) application_mod.Latency {
+                    return .{ .mean = 50, .std_dev = 40 };
+                }
+            }.latency;
+            for (0..10) |index| try harness.start_validator(index);
+            try harness.wait_all(required);
+            for (harness.validators) |*validator| {
+                validator.reporter.assert_no_faults();
+                validator.reporter.assert_no_invalid();
+            }
+            const blocked = try harness.oracle().blocked(E.gpa);
+            defer E.gpa.free(blocked);
+            try testing.expectEqual(0, blocked.len);
+        }
+
+        test "1k views finalize" {
+            if (comptime !mocks or !build_options.slow_tests) return error.SkipZigTest;
+            _ = try E.run_seeded(0, thousand_scenario, .{});
+        }
     };
+}
+
+test {
+    _ = Suite(MockFixture);
 }

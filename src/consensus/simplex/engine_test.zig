@@ -49,7 +49,8 @@ pub fn Suite(comptime F: type) type {
     return struct {
         const primary = F == Ed25519Fixture;
         const full = build_options.slow_tests;
-        const fixture_enabled = primary or full;
+        /// A fixture that only hosts another file's DSTs (`harness_only`) runs none of these.
+        const fixture_enabled = primary or (full and !@hasDecl(F, "harness_only"));
         pub const gpa = testing.allocator;
         const Sha256 = cryptography.Sha256;
         const Digest = Sha256.Digest;
@@ -294,7 +295,21 @@ pub fn Suite(comptime F: type) type {
                 role: Role,
                 timeouts: Timeouts,
             ) !void {
+                try harness.start_with_terms(ctx, n, link, role, timeouts, .default());
+            }
+
+            /// `start_timed` with validators electing leaders by `round_robin`.
+            pub fn start_with_terms(
+                harness: *Harness,
+                ctx: Context,
+                n: u32,
+                link: ?Link,
+                role: Role,
+                timeouts: Timeouts,
+                round_robin: RoundRobin,
+            ) !void {
                 try harness.start_network(ctx, n, link, role, timeouts);
+                harness.round_robin = round_robin;
                 for (0..harness.validators.len) |index| {
                     if (index == 0 and role == .absent) continue;
                     if (index == 0 and role.is_byzantine()) {
@@ -370,7 +385,7 @@ pub fn Suite(comptime F: type) type {
                 errdefer gpa.destroy(byzantine);
                 const scheme = &harness.schemes[index];
                 const n: u32 = @intCast(harness.validators.len);
-                var elector = try F.elector(n);
+                var elector = try harness.build_elector(n);
                 errdefer F.deinit_elector(&elector);
                 byzantine.* = .{
                     .role = role,
@@ -810,9 +825,10 @@ pub fn Suite(comptime F: type) type {
         }
 
         /// commonware `slow_and_lossy_links_seeded`: half the messages drop.
-        fn slow_and_lossy_links(ctx: Context, required: u64) !void {
+        pub fn slow_and_lossy_links(ctx: Context, required: u64, round_robin: RoundRobin) !void {
             var harness: Harness = undefined;
-            try harness.start(ctx, 5, link_ms(200, 150, 0.5), .honest);
+            const link = link_ms(200, 150, 0.5);
+            try harness.start_with_terms(ctx, 5, link, .honest, .{}, round_robin);
             defer harness.deinit();
             try harness.wait_all(required);
             try harness.check(required);
@@ -820,7 +836,8 @@ pub fn Suite(comptime F: type) type {
 
         test "slow and lossy links" {
             if (comptime !primary) return error.SkipZigTest;
-            _ = try run_seeded(6, slow_and_lossy_links, .{if (quick) 10 else 20});
+            const required: u64 = if (quick) 10 else 20;
+            _ = try run_seeded(6, slow_and_lossy_links, .{ required, RoundRobin.default() });
         }
 
         test "determinism: the same seed replays the same run" {
@@ -828,8 +845,9 @@ pub fn Suite(comptime F: type) type {
             const required: u64 = if (quick) 5 else 20;
             var states: [2][8]u8 = undefined;
             for (&states, 0..) |*state, seed| {
-                state.* = try run_seeded(seed, slow_and_lossy_links, .{required});
-                const again = try run_seeded(seed, slow_and_lossy_links, .{required});
+                const args = .{ required, RoundRobin.default() };
+                state.* = try run_seeded(seed, slow_and_lossy_links, args);
+                const again = try run_seeded(seed, slow_and_lossy_links, args);
                 try testing.expectEqualSlices(u8, state, &again);
             }
             // A different seed takes a different path.
@@ -842,10 +860,10 @@ pub fn Suite(comptime F: type) type {
         }
 
         /// commonware `partition`: cut the validators in half, check nothing finalizes, then heal.
-        fn partition(ctx: Context) !void {
+        pub fn partition(ctx: Context, round_robin: RoundRobin) !void {
             var harness: Harness = undefined;
             const link = link_ms(10, 1, 1.0);
-            try harness.start(ctx, 10, link, .honest);
+            try harness.start_with_terms(ctx, 10, link, .honest, .{}, round_robin);
             defer harness.deinit();
             const required: u64 = if (quick) 5 else 20;
             try harness.wait_all(required);
@@ -863,7 +881,7 @@ pub fn Suite(comptime F: type) type {
 
         test "partition heals" {
             if (comptime !primary) return error.SkipZigTest;
-            _ = try run_seeded(0, partition, .{});
+            _ = try run_seeded(0, partition, .{RoundRobin.default()});
         }
 
         /// commonware `conflicter`/`nuller`: validator 0 is Byzantine; the honest three still
@@ -952,9 +970,9 @@ pub fn Suite(comptime F: type) type {
 
         /// commonware `backfill`: validator 0 joins late, after the others accrued nullifications
         /// over slow links, and catches up through the resolver while validator 1 is cut off.
-        fn backfill_scenario(ctx: Context) !void {
+        pub fn backfill_scenario(ctx: Context, round_robin: RoundRobin) !void {
             var harness: Harness = undefined;
-            try harness.start(ctx, 4, null, .absent);
+            try harness.start_with_terms(ctx, 4, null, .absent, .{}, round_robin);
             defer harness.deinit();
             try harness.link_all(link_ms(10, 1, 1.0), &not_zero);
             const required = 50;
@@ -976,16 +994,16 @@ pub fn Suite(comptime F: type) type {
 
         test "backfill: a late validator catches up through the resolver" {
             if (comptime !primary) return error.SkipZigTest;
-            _ = try run_seeded(0, backfill_scenario, .{});
+            _ = try run_seeded(0, backfill_scenario, .{RoundRobin.default()});
         }
 
         /// commonware `one_offline`: validator 0 never starts; the other four finalize, it never
         /// appears in their activity, and the views it leads are nullified (up to 10 exceptions).
         /// (Its leader-labelled timeout metrics follow with the actor metrics.)
-        fn one_offline_scenario(ctx: Context) !void {
+        pub fn one_offline_scenario(ctx: Context, round_robin: RoundRobin) !void {
             var harness: Harness = undefined;
             const n = 5;
-            try harness.start(ctx, n, null, .absent);
+            try harness.start_with_terms(ctx, n, null, .absent, .{}, round_robin);
             defer harness.deinit();
             try harness.link_all(link_ms(10, 1, 1.0), &not_zero);
             const required: u64 = if (quick) 30 else 100;
@@ -1059,7 +1077,7 @@ pub fn Suite(comptime F: type) type {
 
         test "one offline: the others finalize and nullify its views" {
             if (comptime !primary) return error.SkipZigTest;
-            _ = try run_seeded(0, one_offline_scenario, .{});
+            _ = try run_seeded(0, one_offline_scenario, .{RoundRobin.default()});
         }
 
         /// commonware `slow_validator`: validator 0 proposes, verifies, and certifies 10 s late, so
@@ -1167,9 +1185,10 @@ pub fn Suite(comptime F: type) type {
         /// for a random victim and one for the rest. The honest six finalize through a crash and
         /// restart of one of them; returns whether anyone blocked the equivocator (only it may be
         /// blocked).
-        fn equivocator_run(ctx: Context) !bool {
+        pub fn equivocator_run(ctx: Context, round_robin: RoundRobin) !bool {
             var harness: Harness = undefined;
-            try harness.start(ctx, 7, link_ms(10, 1, 1.0), .equivocator);
+            const link = link_ms(10, 1, 1.0);
+            try harness.start_with_terms(ctx, 7, link, .equivocator, .{}, round_robin);
             defer harness.deinit();
             const required: u64 = if (quick) 10 else 50;
             try harness.wait_all(required);
@@ -1195,7 +1214,8 @@ pub fn Suite(comptime F: type) type {
             const detected = for (0..5) |seed| {
                 var runner = try runtime.deterministic.Runner.init(gpa, .{ .seed = seed });
                 defer runner.deinit();
-                if (try (try runner.start_context(equivocator_run, .{}))) break true;
+                const args = .{RoundRobin.default()};
+                if (try (try runner.start_context(equivocator_run, args))) break true;
             } else false;
             try testing.expect(detected);
         }
@@ -1567,14 +1587,15 @@ pub fn Suite(comptime F: type) type {
         /// One run of commonware `unclean_shutdown`: start every validator from its journal, stop
         /// them all at a random point within 2 s, and report whether all reached `required`. Short
         /// timeouts let a restarted cluster time out of views it cannot finish, as in commonware.
-        fn unclean_run(ctx: Context, required: u64) !bool {
+        pub fn unclean_run(ctx: Context, required: u64, round_robin: RoundRobin) !bool {
             var harness: Harness = undefined;
             const timeouts: Harness.Timeouts = .{
                 .leader_ms = 500,
                 .certification_ms = 1000,
                 .retry_ms = 500,
             };
-            try harness.start_timed(ctx, 5, link_ms(50, 50, 1.0), .honest, timeouts);
+            const link = link_ms(50, 50, 1.0);
+            try harness.start_with_terms(ctx, 5, link, .honest, timeouts, round_robin);
             defer harness.deinit();
             const rng: IoRng = .{ .io = ctx.io() };
             const wait_ms = 100 + rng.next_u64() % 1900;
@@ -1594,7 +1615,8 @@ pub fn Suite(comptime F: type) type {
             // Each start after the first crashes storage, keeping only synced journal contents.
             const restarts = for (0..restarts_max) |restart| {
                 const required: u64 = if (quick) 15 else 100;
-                if (try (try runner.start_context(unclean_run, .{required}))) break restart;
+                const args = .{ required, RoundRobin.default() };
+                if (try (try runner.start_context(unclean_run, args))) break restart;
             } else return error.TestUnexpectedResult;
             try testing.expect(restarts > 0);
         }
