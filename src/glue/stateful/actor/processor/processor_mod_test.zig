@@ -365,3 +365,99 @@ test "stateful processor: process ancestry survives recovery and finalization" {
     try expect_record(log.items[1], .finalized, &expected);
     try testing.expectEqual(3, try counter(&harness));
 }
+
+fn wait_and_release(
+    execution: *harness_mod.Execution,
+    flight: *harness_mod.Execution.Flight,
+) anyerror!void {
+    defer execution.release(flight);
+    return flight.wait();
+}
+
+/// Block 1 on genesis, built in `harness` but not cached, with a probe gating its processing.
+fn gated_candidate(harness: *Harness, probe: *Probe) !struct { TestBlock, HeldGate } {
+    const genesis = TestBlock.genesis();
+    const block, var merkleized = try harness.build_child(&genesis, 1);
+    merkleized.deinit();
+    probe.* = .{ .target = block.digest() };
+    const handles = try probe.add_gate();
+    return .{ block, .{ .started = handles.started, .release = handles.release } };
+}
+
+const HeldGate = struct {
+    started: @import("utils").channel.oneshot.Receiver(void),
+    release: @import("utils").channel.oneshot.Sender(void),
+    released: bool = false,
+
+    fn open(gate: *HeldGate) !void {
+        gate.released = true;
+        try gate.release.send({});
+    }
+
+    fn deinit(gate: *HeldGate) void {
+        gate.started.deinit();
+        if (!gate.released) gate.release.deinit();
+    }
+};
+
+// commonware `dropped_flight_handle_releases_waker`: of three requests sharing one held
+// processing, one leaves while the others wait; the flight stays active, and the remaining
+// two receive the result. Adapted: zigware's requests wait on the flight's event rather
+// than registering wakers, so the dropped request's release is the observable part.
+test "stateful processor: a request leaving a shared flight leaves it running" {
+    var harness: Harness = undefined;
+    try harness.init();
+    defer harness.deinit();
+    var probe: Probe = undefined;
+    const block, var gate = try gated_candidate(&harness, &probe);
+    defer probe.deinit();
+    defer gate.deinit();
+    const genesis = TestBlock.genesis();
+    const app: TestApp = .{ .probe = &probe };
+    const execution = harness.execution;
+    const io = testing.io;
+
+    const first = (try execution.join_flight(app, try harness.ancestry(&.{ block, genesis }))).?;
+    try gate.started.recv();
+    const second = (try execution.join_flight(app, try harness.ancestry(&.{ block, genesis }))).?;
+    const third = (try execution.join_flight(app, try harness.ancestry(&.{ block, genesis }))).?;
+    try testing.expectEqual(first, second);
+    try testing.expectEqual(first, third);
+    var first_wait = try io.concurrent(wait_and_release, .{ execution, first });
+    var third_wait = try io.concurrent(wait_and_release, .{ execution, third });
+    execution.release(second); // The second request leaves while the others wait.
+    try testing.expect(!execution.flights_idle());
+    try testing.expect(!gate.release.is_closed());
+    try gate.open();
+    try first_wait.await(io);
+    try third_wait.await(io);
+    try testing.expect(execution.flights_idle());
+    try testing.expect(execution.pending_contains(block.digest()));
+    try testing.expectEqual(1, probe.calls);
+}
+
+// commonware `woken_request_dropped_before_polling_hands_processing_on`: once the held
+// processing finishes, the first request leaves without collecting the result; the second
+// still completes it, and the block is cached.
+test "stateful processor: a request leaving after completion hands the flight on" {
+    var harness: Harness = undefined;
+    try harness.init();
+    defer harness.deinit();
+    var probe: Probe = undefined;
+    const block, var gate = try gated_candidate(&harness, &probe);
+    defer probe.deinit();
+    defer gate.deinit();
+    const genesis = TestBlock.genesis();
+    const app: TestApp = .{ .probe = &probe };
+    const execution = harness.execution;
+
+    const first = (try execution.join_flight(app, try harness.ancestry(&.{ block, genesis }))).?;
+    try gate.started.recv();
+    const second = (try execution.join_flight(app, try harness.ancestry(&.{ block, genesis }))).?;
+    var second_wait = try testing.io.concurrent(wait_and_release, .{ execution, second });
+    try gate.open();
+    execution.release(first); // Leaves without waiting for the result.
+    try second_wait.await(testing.io);
+    try testing.expect(execution.pending_contains(block.digest()));
+    try testing.expect(execution.flights_idle());
+}
