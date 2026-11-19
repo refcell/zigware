@@ -93,12 +93,12 @@ test "summary: genesis and digest" {
 test "summary: ledger vector genesis" {
     // The empty balances database's root, the payout log's initial root, and the summary
     // before the first close, pinned by commonware's ledger vector.
-    const balances = digest_hex("4e051a8ba89ab421a291d4b906848b2e0f80402175824a056cc3cc00efc4cc65");
+    const balances = digest_hex("f1e9c318380f461bd04baeaec21206e3a51666d47a423e302ef9e8d6bcf3b699");
     const start = TestSummary.genesis(PublicKey, u64, balances);
     const log = digest_hex("97f9a47536a9ff3eda91ef4e53351d365e104280df46dbcc5dddc7adfabcef2c");
     try testing.expect(start.payouts.root.eql(log));
     try testing.expectEqual(@as(u64, 1), start.payouts.size);
-    const digest = digest_hex("dc78896a8eab075c7672d704b58798ff2687447dc6132852a86f007847bf5af0");
+    const digest = digest_hex("bca2adf2d2f2da18fbc30bebdc4bd6ca110eb3606ec46bde9faf3ebb30b03f1e");
     try testing.expect(start.digest().eql(digest));
 
     // The deposit queue's running hash after bob's deposit of 5, chained from genesis.

@@ -11,6 +11,20 @@ const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const merkle = @import("../merkle/mod.zig");
 
+// One wire-tag table serves every database, so no tag stands for two kinds of operation; an
+// encoded operation opens with its tag (commonware's `qmdb::operation` contexts).
+
+/// Wire tag for a commit operation; every database tags its commits alike.
+pub const commit_context: u8 = 0;
+/// Wire tag for an update operation of an any or current database.
+pub const update_context: u8 = 1;
+/// Wire tag for a delete operation of an any or current database.
+pub const delete_context: u8 = 2;
+/// Wire tag for a set operation of an immutable database.
+pub const set_context: u8 = 3;
+/// Wire tag for an append operation of a keyless database.
+pub const append_context: u8 = 4;
+
 /// Writes `location` as a varint (commonware's `Location::write`).
 pub fn write_location(location: u64, writer: *codec.Writer) void {
     codec.varint.write(u64, location, writer);

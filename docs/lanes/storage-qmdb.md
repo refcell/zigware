@@ -190,6 +190,15 @@ which every database here is built on.
   Issue 5669: one case of each four-case test, batches of 150. Store recovery and
   reopen-at-pruned-floor: 200 keys. Store churn: scripted plus one seed. Release builds and
   `-Dslow-tests` (nightly) keep commonware's full sizes. Conformance-hash tests stay full.
+- [x] Upstream a9ffc25f3 (#5787): one operation tag table for every database in
+  `qmdb.operation` (commit 0, update 1, delete 2, set 3, append 4; any, immutable, and keyless
+  re-export theirs). Applied the commit's 95 `storage/conformance.toml` hash changes, its
+  clearing ledger vectors, and the dkg example's state roots, which were regenerated with
+  the scratch Rust vector test over 43b357a41 plus this commit only.
+- [ ] Upstream 90960d81c (#5770): immutable `get`/`get_many` read from the inactivity floor.
+- [ ] Upstream `qmdb::commit_floor_at`: immutable init reads its floor through it and
+  returns its errors instead of panicking.
+- [ ] Upstream 102430409 (#5649): the store's strategy and any's shared batched read.
 
 ## Public API (on main)
 - `storage.qmdb.value`: `Fixed(V)`, `Variable(V)` (encodings with `Value`, `fixed`), `check`,
@@ -415,3 +424,4 @@ which every database here is built on.
 - 2026-11-19: immutable batch E (start_sync, metrics, bounded-init crash history); audit done.
 - 2026-11-19: qmdb duration metrics timed on an optional config `io`; metrics tests ported.
 - 2026-11-19: qmdb dbs pass their `io` down to their journals.
+- 2026-11-19: upstream a9ffc25f3: one qmdb operation tag table; hashes and vectors updated.

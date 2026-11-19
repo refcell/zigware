@@ -54,14 +54,14 @@ test "ledger: vector" {
     var start = try t.genesis(store.balances.root());
     defer start.deinit();
     const genesis = start.summary;
-    try expect_hex(&store.balances.root().bytes, "4e051a8ba89ab421a291d4b906848b2e" ++
-        "0f80402175824a056cc3cc00efc4cc65");
+    try expect_hex(&store.balances.root().bytes, "f1e9c318380f461bd04baeaec21206e3" ++
+        "a51666d47a423e302ef9e8d6bcf3b699");
     try testing.expect(genesis.payouts.root.eql(store.log.root()));
     try testing.expectEqual(genesis.payouts.size, store.log.bounds().end);
     try expect_hex(&store.log.root().bytes, "97f9a47536a9ff3eda91ef4e53351d36" ++
         "5e104280df46dbcc5dddc7adfabcef2c");
-    try expect_hex(&genesis.digest().bytes, "dc78896a8eab075c7672d704b58798ff" ++
-        "2687447dc6132852a86f007847bf5af0");
+    try expect_hex(&genesis.digest().bytes, "bca2adf2d2f2da18fbc30bebdc4bd6ca" ++
+        "110eb3606ec46bde9faf3ebb30b03f1e");
 
     // The deposit queue's running hash after bob's deposit, chained from genesis. The queues
     // of epoch 1 also hold alice's deposit after bob's and the forced withdrawals of bob and
@@ -170,15 +170,15 @@ fn expect_first_close(
 ) !t.Checkpoint {
     var first = try store.post(start, close, queued);
     errdefer first.deinit();
-    try expect_encoding(t.TestSummary, first.summary, "0000000000000001dc78896a8eab075c" ++
-        "7672d704b58798ff2687447dc6132852a86f007847bf5af0bb7e4f8026a16dea" ++
-        "4b1b699ee9a17fa361272f269a044f0532c3fae7729b059ccbeaa33ee0fadca4" ++
-        "0a7a84e3ef4538a6d5a9225c44b2e85fc27c58fc0dde40f50451b5519948527b" ++
-        "730a86197f813f51283fa3545ca2b6c74ca20596b4f4461fec02f90c99746c6d" ++
+    try expect_encoding(t.TestSummary, first.summary, "0000000000000001bca2adf2d2f2da18" ++
+        "fbc30bebdc4bd6ca110eb3606ec46bde9faf3ebb30b03f1ebb7e4f8026a16dea" ++
+        "4b1b699ee9a17fa361272f269a044f0532c3fae7729b059c60299dc2396510e3" ++
+        "10a5c06b01a4e3e7e6014cc94ad5687020691a5566690b2f04ce5acf079e17d1" ++
+        "d15a28b9a42a4908f692b1cfb3e19f316ac130d0dd626c550402f90c99746c6d" ++
         "c051366862ffe2d129f1729cb9134387158fe590c943d69f55e902e9e2c7b054" ++
         "fce05131d767f27fe4b9b130cf6fd44114d394fbf97853f27ef05d");
-    try expect_hex(&first.summary.digest().bytes, "4ea46f121bbf323e7dd93e6c34665a9c" ++
-        "c8f3b0cd117b950586426d44729165ae");
+    try expect_hex(&first.summary.digest().bytes, "ccb6e9a75d0fd05ce5307dbf32e67c6e" ++
+        "f2d9db20611b5f442d8b3938bff7fee8");
 
     // Bob's balance under the balances root of that summary, as a claim after a halt proves.
     const bob = t.account(1);
@@ -188,11 +188,11 @@ fn expect_first_close(
     try testing.expect(balance.verify(Sha256, PublicKey, &first.summary.balances, bob));
     try testing.expectEqual(@as(u64, 7), balance.balance);
     try expect_encoding(t.BalanceProof, balance, "0000000000000007043c000000000000" ++
-        "00000000000000000000000000000000000000000000000000060002e8deb066" ++
-        "466eaf1b04f892d6986303eb407d463a51b4739a8c2513ac826becca71e1ff83" ++
-        "de02f877f9e2c800a2502f61e761b10a0432c6703d620d79f7a9318c00011aee" ++
-        "11ebaa71f4483e3129068f72caf28d4c1b4faa01f6b925e7fe97c2493636199f" ++
-        "565a0c239b645ac33ac70a041ffda7cf66adc2e76d88454be81900cd252a");
+        "00000000000000000000000000000000000000000000000000060002cd18d0f8" ++
+        "070b23a202f67aaf8d1c3135a1bc836241569548b82971ac76039f2114918dbc" ++
+        "a46ba089a4224b438db93329797e30eb7eb1cfe1fdbaa7f48b8795cb00011aee" ++
+        "11ebaa71f4483e3129068f72caf28d4c1b4faa01f6b925e7fe97c24936362ece" ++
+        "bd67707d4f3c51398d06f3217ab2452924cc733192f7173a42b8a1062ab7");
 
     // The payout log after that close, and the proof of bob's payout at index 1.
     const payouts = first.summary.payouts;
@@ -200,12 +200,12 @@ fn expect_first_close(
     defer early.deinit(gpa);
     try testing.expect(early.verify(Sha256, &payouts.root));
     try testing.expectEqual(@as(u64, 4), payouts.size);
-    try expect_hex(&payouts.root.bytes, "51b5519948527b730a86197f813f5128" ++
-        "3fa3545ca2b6c74ca20596b4f4461fec");
+    try expect_hex(&payouts.root.bytes, "ce5acf079e17d1d15a28b9a42a4908f6" ++
+        "92b1cfb3e19f316ac130d0dd626c5504");
     try expect_encoding(PayoutProof, early, "01478b8e507e0bb2b18c0f9e0824769e" ++
         "8562d10df9abe2e774896f82b4b4405266000000000000000304000266b4a8b2" ++
-        "a17f0463f7427c0239106eaf710ea7129f42d184a58c50cdff614ba4c9b32f58" ++
-        "d153a4f26cb6078783a7d3a6cfab16d8f6fcedaa19ed63c338e2a9ce");
+        "a17f0463f7427c0239106eaf710ea7129f42d184a58c50cdff614ba422f18941" ++
+        "eaddc443f89b982cfc48f48a4f2af31296564dedbdf0d721c193e2e1");
     return first;
 }
 
@@ -230,13 +230,13 @@ fn expect_second_close(store: *Store, first: *const t.Checkpoint) !void {
     try testing.expect(late.verify(Sha256, &payouts.root));
     try testing.expect(!early.verify(Sha256, &payouts.root));
     try testing.expectEqual(@as(u64, 7), payouts.size);
-    try expect_hex(&payouts.root.bytes, "540a194296da3b72974ec85cba28b56c" ++
-        "e0cae59481844b2480db323061d7554d");
+    try expect_hex(&payouts.root.bytes, "47c3d72b316a6c4149eb38b4a2f37e14" ++
+        "6e9ae0585aff0101199ff6e2eb251de4");
     try expect_encoding(PayoutProof, late, "01478b8e507e0bb2b18c0f9e0824769e" ++
         "8562d10df9abe2e774896f82b4b44052660000000000000003070003" ++
-        "8a4c9a9db0462d62f8c5467b7d7ae30b90514a347f1abb4265e7184ec9052e42" ++
+        "ce005e6008436eba508102f19d0736c11ff2fde8ea90a6e23a3da2886fcf9b7c" ++
         "66b4a8b2a17f0463f7427c0239106eaf710ea7129f42d184a58c50cdff614ba4" ++
-        "c9b32f58d153a4f26cb6078783a7d3a6cfab16d8f6fcedaa19ed63c338e2a9ce");
+        "22f18941eaddc443f89b982cfc48f48a4f2af31296564dedbdf0d721c193e2e1");
 }
 
 /// The proof that `log` holds `payout` at `index`, under its current root.

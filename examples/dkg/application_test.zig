@@ -14,14 +14,14 @@ const ed25519 = zigware.cryptography.ed25519;
 const App = application.App;
 const Database = application.Database;
 
-const initial_root = "1bb24ad3198bc9f4190c3b359a13234591ca8600ad83230a95d649f7f2279a55";
+const initial_root = "fc2920dd5634817b5bd13d9a23ddaa852a692caae10cb924a5962b5570da63fd";
 
 /// Root and `[start, end)` after each height.
 const expected = [_]struct { []const u8, u64, u64 }{
-    .{ "fa2a08a308a38fe26011a77fc056f400617a8eddb753adf731d949688c7f04be", 2, 4 },
-    .{ "3edbbb969f37d5168ee270ce1995cca2a482dfd47b95a1209b1fe1aba6b2efc9", 5, 7 },
-    .{ "a1bb63ad049c721ec6ec929914dc70d6e34baffaf9cd9903f746ef15570d82c2", 8, 10 },
-    .{ "3e7eae57bc2136599523a9a72f7be4e174c58e1740c1c93d74e28f034efa1863", 11, 13 },
+    .{ "db009085769d6cd778d94d278a5a5c701903cbe58d02733e117175f95218d6e0", 2, 4 },
+    .{ "7ed96b7a7dd995e4b0f8548314b5aab1b145065cd7136937ba40a33d0e9c5625", 5, 7 },
+    .{ "e46d20d0ce680e75a51135375400a3a71341816bec879a2105ba83bdc419d5cf", 8, 10 },
+    .{ "e0fee8082df999bd6b3afc96d54a98763dbb8a0258449694de643f246e7647fa", 11, 13 },
 };
 
 const Harness = struct {

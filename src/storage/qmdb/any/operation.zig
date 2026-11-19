@@ -14,12 +14,9 @@ const merkle = @import("../../merkle/mod.zig");
 const value_mod = @import("../value.zig");
 const operation = @import("../operation.zig");
 
-/// Wire tag for `delete`.
-pub const delete_context: u8 = 0xD1;
-/// Wire tag for `update`.
-pub const update_context: u8 = 0xD2;
-/// Wire tag for `commit`.
-pub const commit_context: u8 = 0xD3;
+pub const delete_context = operation.delete_context;
+pub const update_context = operation.update_context;
+pub const commit_context = operation.commit_context;
 
 pub const update = struct {
     /// An unordered update: a key and its new value.

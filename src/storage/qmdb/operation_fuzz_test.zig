@@ -28,14 +28,14 @@ const bytes_cfg: codec.Cfg(Bytes) = .{ .range = .to_inclusive(64) };
 const Target = struct { type, []const u8 };
 
 const targets = [_]Target{
-    .{ keyless.Operation(Mmr, value.Fixed(U64)), &.{ 0, 1 } },
-    .{ keyless.Operation(Mmb, value.Variable(Bytes)), &.{ 0, 1 } },
-    .{ immutable.Operation(Mmr, U64, value.Fixed(U64)), &.{ 0, 1 } },
-    .{ immutable.Operation(Mmr, Bytes, value.Variable(U64)), &.{ 0, 1 } },
-    .{ any.Ordered(Mmr, U64, value.Fixed(U64)), &.{ 0xD1, 0xD2, 0xD3 } },
-    .{ any.Ordered(Mmb, U64, value.Variable(Bytes)), &.{ 0xD1, 0xD2, 0xD3 } },
-    .{ any.Unordered(Mmr, U64, value.Fixed(U64)), &.{ 0xD1, 0xD2, 0xD3 } },
-    .{ any.Unordered(Mmb, U64, value.Variable(Bytes)), &.{ 0xD1, 0xD2, 0xD3 } },
+    .{ keyless.Operation(Mmr, value.Fixed(U64)), &.{ 0, 4 } },
+    .{ keyless.Operation(Mmb, value.Variable(Bytes)), &.{ 0, 4 } },
+    .{ immutable.Operation(Mmr, U64, value.Fixed(U64)), &.{ 0, 3 } },
+    .{ immutable.Operation(Mmr, Bytes, value.Variable(U64)), &.{ 0, 3 } },
+    .{ any.Ordered(Mmr, U64, value.Fixed(U64)), &.{ 0, 1, 2 } },
+    .{ any.Ordered(Mmb, U64, value.Variable(Bytes)), &.{ 0, 1, 2 } },
+    .{ any.Unordered(Mmr, U64, value.Fixed(U64)), &.{ 0, 1, 2 } },
+    .{ any.Unordered(Mmb, U64, value.Variable(Bytes)), &.{ 0, 1, 2 } },
     .{ chain.Commitment(Mmr, Digest), &.{} },
 };
 

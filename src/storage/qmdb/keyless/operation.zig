@@ -12,10 +12,8 @@ const merkle = @import("../../merkle/mod.zig");
 const value_mod = @import("../value.zig");
 const operation = @import("../operation.zig");
 
-/// Wire tag for `commit`.
-pub const commit_context: u8 = 0;
-/// Wire tag for `append`.
-pub const append_context: u8 = 1;
+pub const commit_context = operation.commit_context;
+pub const append_context = operation.append_context;
 
 pub fn Operation(comptime F: type, comptime E: type) type {
     merkle.check_family(F);
