@@ -66,7 +66,7 @@ pub const SigningKey = struct {
     }
 
     pub fn write(self: *const SigningKey, writer: *codec.Writer) void {
-        writer.write_bytes(&self.inner.seed);
+        writer.write_bytes(&self.inner.seed.value);
     }
 
     pub fn read(_: std.mem.Allocator, reader: *codec.Reader, _: void) codec.Error!SigningKey {
