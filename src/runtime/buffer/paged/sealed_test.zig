@@ -479,3 +479,115 @@ test "sealed: a dont_cache replay leaves the page cache cold, sealed or snapshot
         try testing.expectEqualSlices(u8, data[0..page_size], &probe);
     }
 }
+
+// writer.rs's snapshot and replay-options tests.
+
+test "sealed: a snapshot copies the partial page without writing it" {
+    var h = try Harness.init(buffer_size);
+    defer h.deinit();
+    var w = try h.writer("snapshot_copy");
+    defer w.deinit();
+    _ = try w.append("hello");
+    var snapshot = try w.snapshot();
+    defer snapshot.deinit();
+    try testing.expectEqual(@as(u64, 0), h.storage.writes);
+    // Appending and syncing later bytes writes the page without changing the view.
+    _ = try w.append(" world");
+    try w.sync();
+    try testing.expectEqual(@as(u64, 1), h.storage.writes);
+    try testing.expectEqual(@as(u64, 5), snapshot.size);
+    var read: [5]u8 = undefined;
+    try snapshot.read_at(0, &read);
+    try testing.expectEqualStrings("hello", &read);
+}
+
+test "sealed: replay refills and seeks use the replay's read options" {
+    var h = try Harness.init(buffer_size);
+    defer h.deinit();
+    var w = try h.writer("replay_read_options");
+    defer w.deinit();
+    const data: [page_size * 2]u8 = @splat(3);
+    _ = try w.append(&data);
+    try w.sync();
+    const reads = h.storage.reads;
+    // One physical page per batch: crossing the page boundary refills.
+    var replay = try w.replay(physical_page_size, .{ .dont_cache = true });
+    defer replay.deinit();
+    try testing.expect(try replay.ensure(1));
+    replay.advance(page_size);
+    try testing.expect(try replay.ensure(1));
+    try testing.expectEqual(@as(u64, 2), h.storage.dont_cache_reads);
+    // Seeking discards the buffered pages and reads again with the same options.
+    try replay.seek_to(0);
+    try testing.expect(try replay.ensure(1));
+    try testing.expectEqual(@as(u64, 3), h.storage.dont_cache_reads);
+    try testing.expectEqual(reads + 3, h.storage.reads);
+}
+
+test "sealed: appends leave a snapshot's partial page intact" {
+    var h = try Harness.init(buffer_size);
+    defer h.deinit();
+    var w = try h.writer("snapshot_blocks_shrink");
+    defer w.deinit();
+    const data = try cycle(page_size * 2 + 7);
+    defer gpa.free(data);
+    _ = try w.append(data);
+    try w.sync();
+    var snapshot = try w.snapshot();
+    defer snapshot.deinit();
+    const read = try gpa.alloc(u8, data.len);
+    defer gpa.free(read);
+    try snapshot.read_at(0, read);
+    try testing.expectEqualSlices(u8, data, read);
+    _ = try w.append(&.{ 0, 0, 0 });
+    try testing.expectEqual(snapshot.size + 3, w.size());
+    @memset(read, 0);
+    try snapshot.read_at(0, read);
+    try testing.expectEqualSlices(u8, data, read);
+    try testing.expectEqual(@as(u64, data.len), snapshot.size);
+}
+
+test "sealed: snapshot read_many_into matches read_at" {
+    var h = try Harness.init(buffer_size);
+    defer h.deinit();
+    var w = try h.writer("snapshot_read_many");
+    defer w.deinit();
+    const item_size = 4;
+    const data = try cycle(page_size * 3 + 13);
+    defer gpa.free(data);
+    _ = try w.append(data);
+    try w.sync();
+    var snapshot = try w.snapshot();
+    defer snapshot.deinit();
+    // Page starts, page ends, page interiors, and the frozen tail.
+    const offsets = [_]u64{ 0, page_size - item_size, page_size + 5, page_size * 3 + 2 };
+    var batch: [offsets.len * item_size]u8 = undefined;
+    _ = try snapshot.read_many_into(&batch, &offsets, item_size);
+    for (offsets, 0..) |offset, index| {
+        var single: [item_size]u8 = undefined;
+        try snapshot.read_at(offset, &single);
+        const item = batch[index * item_size ..][0..item_size];
+        try testing.expectEqualSlices(u8, &single, item);
+        const start: usize = @intCast(offset);
+        try testing.expectEqualSlices(u8, data[start..][0..item_size], item);
+    }
+}
+
+test "sealed: a snapshot's sync reads prefer its own tail over cached pages" {
+    var h = try Harness.init(buffer_size);
+    defer h.deinit();
+    var w = try h.writer("snapshot_try_read_tail");
+    defer w.deinit();
+    const full: [page_size]u8 = @splat(0xAA);
+    _ = try w.append(&full);
+    try w.sync();
+    _ = try w.append("oldtail");
+    var snapshot = try w.snapshot();
+    defer snapshot.deinit();
+    // Stale cached bytes must not replace the snapshot's owned partial tail.
+    const poison: [page_size]u8 = @splat(0xBB);
+    try testing.expectEqual(@as(usize, 0), h.cache_ref.cache(w.cache_id(), &poison, page_size));
+    var read: [7]u8 = undefined;
+    try testing.expect(snapshot.try_read_sync_into(&read, page_size));
+    try testing.expectEqualStrings("oldtail", &read);
+}
