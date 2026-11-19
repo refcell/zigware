@@ -14,6 +14,7 @@ pub const Application = application.Application;
 pub const harness = @import("harness.zig");
 pub const scenarios = @import("scenarios.zig");
 pub const scenarios_queries = @import("scenarios_queries.zig");
+pub const scenarios_recoverable = @import("scenarios_recoverable.zig");
 
 test {
     std.testing.refAllDecls(@This());

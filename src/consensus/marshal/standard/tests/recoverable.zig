@@ -246,3 +246,24 @@ fn parent_by_commitment_body(ctx: Ctx) anyerror!void {
 test "standard block provider parent fetches by commitment" {
     try run(parent_by_commitment_body);
 }
+
+const build_options = @import("build_options");
+const recoverable = @import("../../mocks/scenarios_recoverable.zig");
+
+/// commonware's seeds 0..16 under `-Dslow-tests`; two otherwise, to keep Debug runs fast.
+const contract_seeds: []const u64 = if (build_options.slow_tests)
+    &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }
+else
+    &.{ 0, 1 };
+
+test "standard proposed success implies recoverable after restart" {
+    try recoverable.SuccessRecoverable(H, .proposed).run(gpa, contract_seeds);
+}
+
+test "standard verified success implies recoverable after restart" {
+    try recoverable.SuccessRecoverable(H, .verified).run(gpa, contract_seeds);
+}
+
+test "standard certified success implies recoverable after restart" {
+    try recoverable.SuccessRecoverable(H, .certified).run(gpa, contract_seeds);
+}
