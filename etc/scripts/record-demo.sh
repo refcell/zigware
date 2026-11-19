@@ -247,6 +247,55 @@ EOF
       kill $(jobs -p) 2>/dev/null || true
       wait 2>/dev/null || true
       ;;
+    interop)
+      # commonware's chat (left) and zigware's (right) as two friends over authenticated
+      # discovery: commonware's is built from the reference clone (etc/scripts/interop.sh).
+      reference=${COMMONWARE_REF:-$HOME/.cache/zigware/commonware-ref}
+      target=${INTEROP_TARGET:-${TMPDIR:-/tmp}/zigware-interop-target}
+      (cd "$reference" && CARGO_TARGET_DIR="$target" cargo build --release --offline -q \
+        -p commonware-chat)
+      if [ -n "$(find src examples/chat build.zig -newer zig-out/bin/chat -print -quit \
+        2>/dev/null || echo stale)" ] || [ ! -x zig-out/bin/chat ]; then
+        zig build -Doptimize=ReleaseFast >/dev/null
+      fi
+      rust_chat=$target/release/commonware-chat
+      zig_chat=$(realpath zig-out/bin/chat)
+      t() { tmux -L zigware-demo -f /dev/null "$@"; }
+      t kill-server 2>/dev/null || true
+      t new-session -d -s interop -x 220 -y 50 "$rust_chat --me=1@3201 --friends=1,2"
+      t set-option -g status off
+      t set-option -g pane-border-status top
+      t set-option -g pane-border-format ' #[bold]#{pane_title}#[default] '
+      t select-pane -t interop -T 'commonware (Rust): friend 1'
+      t split-window -h -t interop \
+        "$zig_chat --me=2@3202 --friends=1,2 --bootstrappers=1@127.0.0.1:3201"
+      t select-pane -t interop -T 'zigware (Zig): friend 2'
+      mapfile -t panes < <(t list-panes -t interop -F '#{pane_id}')
+      say() {
+        local pane=$1 text=$2 i
+        for ((i = 0; i < ${#text}; i++)); do
+          t send-keys -t "$pane" -l "${text:i:1}"
+          sleep 0.05
+        done
+        t send-keys -t "$pane" Enter
+      }
+      (
+        # Type once the friends are connected, so no line is dropped.
+        for _ in $(seq 120); do
+          ss -Htn state established '( sport = :3201 or dport = :3201 )' | grep -q . && break
+          sleep 0.5
+        done
+        sleep 2
+        say "${panes[0]}" 'hello from Rust'
+        sleep 2
+        say "${panes[1]}" 'hello from Zig'
+        sleep 4
+        t detach-client -s interop
+      ) &
+      t attach -t interop || true
+      wait %%
+      t kill-server
+      ;;
     *) echo "unknown demo: $name" >&2; exit 1 ;;
   esac
   exit 0
@@ -258,11 +307,13 @@ case $name in
   log) size=200x44 ;;
   bridge) size=160x40 ;;
   dkg) size=220x50 ;;
+  interop) size=220x50 ;;
   *) size=104x40 ;;
 esac
 DEMO_SESSION=1 TERM=xterm-256color asciinema rec --overwrite --quiet --output-format asciicast-v2 --window-size "$size" \
   --command "$0 $name" "$out.cast"
-if [ "$name" = chat ] || [ "$name" = log ] || [ "$name" = bridge ] || [ "$name" = dkg ]; then
+if [ "$name" = chat ] || [ "$name" = log ] || [ "$name" = bridge ] || [ "$name" = dkg ] ||
+  [ "$name" = interop ]; then
   # End on the panes, not tmux's exit screen: cut where tmux leaves the alternate screen.
   awk 'index($0, "\\u001b[?1049l") { exit } { print }' "$out.cast" >"$out.cast.cut"
   mv "$out.cast.cut" "$out.cast"
@@ -272,6 +323,7 @@ font=16 fps=30
 [ "$name" = log ] && font=12 fps=6
 [ "$name" = bridge ] && font=14 fps=8
 [ "$name" = dkg ] && font=12 fps=8
+[ "$name" = interop ] && font=14 fps=12
 # x264's default quality (crf 23) puts dkg's five busy panes near 4 MB; 28 keeps it under 3.
 crf=23
 [ "$name" = dkg ] && crf=28
