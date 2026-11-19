@@ -63,17 +63,31 @@ pub fn expect_panic(
     return judge(stderr.term, stderr.output, expected);
 }
 
-/// The index of the one test whose full name ends in `.<src.fn_name>` (`.test.<name>`).
+/// The index of the calling test: the one named `<file path, dotted>.<src.fn_name>`, as the
+/// test runner names it, else the only one whose name ends in `.<src.fn_name>`.
 fn test_index(comptime src: std.builtin.SourceLocation) u32 {
     comptime assert(std.mem.startsWith(u8, src.fn_name, "test."));
+    const full = comptime dotted(src.file) ++ "." ++ src.fn_name;
     const suffix = "." ++ src.fn_name;
     var found: ?u32 = null;
     for (builtin.test_functions, 0..) |test_fn, index| {
+        if (std.mem.eql(u8, test_fn.name, full)) return @intCast(index);
         if (!std.mem.endsWith(u8, test_fn.name, suffix)) continue;
-        if (found != null) @panic("death test name is not unique: " ++ src.fn_name);
+        if (found != null) @panic("death test name is not unique: " ++ full);
         found = @intCast(index);
     }
-    return found orelse @panic("no test named " ++ src.fn_name);
+    return found orelse @panic("no test named " ++ full);
+}
+
+/// `a/b/c.zig` as the test runner prefixes its tests: `a.b.c`.
+fn dotted(comptime file: []const u8) []const u8 {
+    comptime {
+        const stem = if (std.mem.endsWith(u8, file, ".zig")) file[0 .. file.len - 4] else file;
+        var name: [stem.len]u8 = stem[0..stem.len].*;
+        std.mem.replaceScalar(u8, &name, '/', '.');
+        const result = name;
+        return &result;
+    }
 }
 
 const Outcome = struct { term: std.process.Child.Term, output: []u8 };
