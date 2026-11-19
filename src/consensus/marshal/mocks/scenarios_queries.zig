@@ -879,8 +879,8 @@ pub fn CommitmentFetchHeightHintMismatch(comptime H: type) type {
     };
 }
 
-/// One validator over prunable finalized archives (commonware `setup_prunable_validator`),
-/// on a network of every participant.
+/// Up to two validators over prunable finalized archives (commonware
+/// `setup_prunable_validator`).
 fn PrunableSingle(comptime H: type) type {
     return struct {
         const Self = @This();
@@ -893,12 +893,14 @@ fn PrunableSingle(comptime H: type) type {
         nodes: [2]*Validator,
         started: usize,
 
-        fn start(self: *Self, ctx: Ctx) !void {
+        /// Starts a network tracking the first `peers` participants.
+        fn start(self: *Self, ctx: Ctx, peers: usize) !void {
+            assert(peers >= 1 and peers <= num_validators);
             const gpa = ctx.gpa();
             var rng = utils.rng.test_rng();
             self.validators = try H.fixture(gpa, &rng);
             errdefer self.validators.deinit(gpa);
-            const participants = self.validators.participants;
+            const participants = self.validators.participants[0..peers];
             const max_size = harness.max_message_size(H.Variant);
             self.network = try .start(gpa, ctx.io(), 1, participants, max_size);
             self.started = 0;
@@ -1007,7 +1009,7 @@ pub fn PruneFinalizedArchives(comptime H: type) type {
         fn body(ctx: Ctx) anyerror!void {
             const gpa = ctx.gpa();
             var single: PrunableSingle(H) = undefined;
-            try single.start(ctx);
+            try single.start(ctx, num_validators);
             defer single.stop(gpa);
             var node = try single.add(ctx, "init", 0);
             var blocks: [20]H.TestBlock = undefined;
@@ -1052,7 +1054,7 @@ pub fn FloorRetainsProcessedPredecessor(comptime H: type) type {
         fn body(ctx: Ctx) anyerror!void {
             const gpa = ctx.gpa();
             var single: PrunableSingle(H) = undefined;
-            try single.start(ctx);
+            try single.start(ctx, num_validators);
             defer single.stop(gpa);
             // Prunable archives use ten-item sections, so a floor at 20 starts a new section.
             const node = try single.add(ctx, "validator", 0);
@@ -1078,6 +1080,174 @@ pub fn FloorRetainsProcessedPredecessor(comptime H: type) type {
             // The section holding block 19 survives; older sections are pruned.
             try expect_stored(H, gpa, node.mailbox, 19, 19, true);
             try expect_stored(H, gpa, node.mailbox, 9, 9, false);
+        }
+    };
+}
+
+/// commonware `reject_stale_block_delivery_after_floor_update`: a block the victim fetched
+/// that arrives only after its floor passed the block's height is dropped without blocking
+/// the serving peer and is not persisted.
+///
+/// In zigware the floor update retires the victim's pending fetch, so the delayed response
+/// is never delivered (checked: without the floor update the block is stored). The
+/// assertions still hold, but the stale-delivery branch itself is not reached.
+pub fn RejectStaleBlockDeliveryAfterFloorUpdate(comptime H: type) type {
+    return struct {
+        pub fn run(gpa: Allocator) !void {
+            try run_timed(gpa, 0xBADC0DE, 120, body, .{});
+        }
+
+        fn body(ctx: Ctx) anyerror!void {
+            const gpa = ctx.gpa();
+            var single: PrunableSingle(H) = undefined;
+            // Only the victim and the attacker are peers.
+            try single.start(ctx, 2);
+            defer single.stop(gpa);
+            const victim = try single.add(ctx, "victim", 0);
+            const attacker = try single.add(ctx, "attacker", 1);
+            const keys = single.validators.participants;
+            const oracle = single.network.network.oracle();
+            try single.network.link_all(keys[0..2], harness.link);
+            try oracle.remove_link(keys[1], keys[0]);
+
+            // The attacker can serve the stale block by commitment.
+            const parent_commitment = H.genesis_parent_commitment(num_validators);
+            const stale_parent = harness.Sha256.hash(&.{"stale-parent"});
+            var stale = try H.make_test_block(gpa, stale_parent, parent_commitment, .new(5), 5, 4);
+            defer stale.deinit();
+            try H.propose(attacker, round_at(5), &stale);
+            try H.verify(attacker, round_at(5), &stale);
+            // The finalization makes the victim fetch the block; responses are cut off.
+            var finalization = try single.finalization(gpa, &stale);
+            defer finalization.deinit(gpa);
+            _ = victim.mailbox.report(.{ .finalization = finalization });
+            try ctx.sleep(.fromMilliseconds(500));
+
+            try advance_floor(ctx, &single, victim);
+            // Restore attacker -> victim traffic so the delayed responses arrive.
+            try oracle.add_link(keys[1], keys[0], harness.link);
+            try ctx.sleep(.fromSeconds(3));
+
+            // A stale but valid delivery is not Byzantine.
+            const blocked = try oracle.blocked(gpa);
+            defer gpa.free(blocked);
+            for (blocked) |pair| {
+                const by_victim = pair.origin.eql(keys[0]) and pair.recipient.eql(keys[1]);
+                try testing.expect(!by_victim);
+            }
+            try expect_stored(H, gpa, victim.mailbox, 5, 5, false);
+        }
+
+        /// Sets the victim's floor at height 10 and verifies the floor block there.
+        fn advance_floor(ctx: Ctx, single: *PrunableSingle(H), victim: anytype) !void {
+            const gpa = ctx.gpa();
+            const parent_commitment = H.genesis_parent_commitment(num_validators);
+            const grandparent = harness.Sha256.hash(&.{"floor-grandparent"});
+            var floor_parent =
+                try H.make_test_block(gpa, grandparent, parent_commitment, .new(9), 9, 4);
+            defer floor_parent.deinit();
+            const parent = H.digest(&floor_parent);
+            const commitment = H.commitment(&floor_parent);
+            var anchor = try H.make_test_block(gpa, parent, commitment, .new(10), 10, 4);
+            defer anchor.deinit();
+            try victim.mailbox.set_floor(try single.finalization(gpa, &anchor));
+            try H.verify(victim, round_at(10), &anchor);
+            // Mailbox messages are FIFO, so this answers after `set_floor` is handled.
+            var barrier = try victim.mailbox.get_finalization(.new(10));
+            if (barrier) |*value| value.deinit(gpa);
+        }
+    };
+}
+
+/// commonware `sync_height_floor`: validators 1 through 3 finalize the whole chain; a late
+/// validator 0 given a floor at height 100 and the latest finalization backfills only from
+/// the floor up.
+pub fn SyncHeightFloor(comptime H: type) type {
+    return struct {
+        const C = scenarios.Cluster(H);
+        const floor_height: u64 = 100;
+
+        pub fn run(gpa: Allocator) !void {
+            try run_timed(gpa, 0xFF, 300, body, .{});
+        }
+
+        fn body(ctx: Ctx) anyerror!void {
+            const gpa = ctx.gpa();
+            var single: Single(H) = undefined;
+            try single.start(ctx, try .init(gpa, ctx.io()));
+            defer single.stop(gpa);
+            // commonware starts validator 0 last; here it starts first but stays unlinked
+            // and receives nothing until the others hold the chain.
+            for (1..num_validators) |_| try single.add(ctx, try .init(gpa, ctx.io()));
+            const keys = single.validators.participants;
+            try single.network.link_all(keys[1..], harness.link);
+            const blocks = try gpa.alloc(H.TestBlock, harness.num_blocks);
+            defer gpa.free(blocks);
+            try make_chain(H, gpa, blocks);
+            defer free_chain(blocks);
+            for (blocks) |*block| try drive(ctx, &single, block);
+            try wait_delivered(ctx, &single);
+
+            // Link validator 0 both ways; the others are already linked.
+            const oracle = single.network.network.oracle();
+            for (keys[1..]) |peer| {
+                try oracle.add_link(keys[0], peer, harness.link);
+                try oracle.add_link(peer, keys[0], harness.link);
+            }
+            const source = single.nodes[1].mailbox;
+            const latest = (try source.get_finalization(.new(harness.num_blocks))) orelse
+                return error.TestNoFinalization;
+            const floor = (try source.get_finalization(.new(floor_height))) orelse
+                return error.TestNoFinalization;
+            const node = single.nodes[0];
+            try node.mailbox.set_floor(floor);
+            _ = node.mailbox.report(.{ .finalization = latest });
+            var latest_owned = latest;
+            latest_owned.deinit(gpa);
+            const expected_count = harness.num_blocks - floor_height + 2;
+            while (true) {
+                try ctx.sleep(.fromSeconds(1));
+                if (node.application.block_count() != expected_count) continue;
+                const tip = node.application.tip() orelse continue;
+                if (tip.height.get() >= harness.num_blocks) break;
+            }
+            for (1..harness.num_blocks + 1) |height| {
+                var found = try node.mailbox.get_block(.{ .height = .new(height) });
+                defer if (found) |*value| H.Variant.deinit_block(gpa, value);
+                if (height < floor_height) {
+                    try testing.expect(found == null);
+                } else {
+                    const block = found orelse return error.TestNoBlock;
+                    try testing.expectEqual(height, block_height(&block).get());
+                }
+            }
+        }
+
+        /// Proposes and verifies `block` at validator `1 + height % 3`, notarizes it there,
+        /// and finalizes it at validators 1 through 3.
+        fn drive(ctx: Ctx, single: *Single(H), block: *const H.TestBlock) !void {
+            const gpa = ctx.gpa();
+            const height = H.height(block).get();
+            const index = 1 + height % (num_validators - 1);
+            const round = round_of(height);
+            try H.propose(single.nodes[index], round, block);
+            try H.verify(single.nodes[index], round, block);
+            try ctx.sleep(.fromMilliseconds(link_latency_ms));
+            const proposal = Single(H).Proposal.init(round, .new(height - 1), H.commitment(block));
+            try single.notarize(gpa, index, proposal);
+            for (1..num_validators) |at| try single.finalize_at(gpa, at, proposal);
+        }
+
+        fn wait_delivered(ctx: Ctx, single: *Single(H)) !void {
+            outer: while (true) {
+                try ctx.sleep(.fromSeconds(1));
+                for (single.nodes[1..num_validators]) |node| {
+                    if (node.application.block_count() != harness.num_blocks + 1) continue :outer;
+                    const tip = node.application.tip() orelse continue :outer;
+                    if (tip.height.get() < harness.num_blocks) continue :outer;
+                }
+                return;
+            }
         }
     };
 }

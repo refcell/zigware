@@ -81,3 +81,11 @@ test "standard prune finalized archives" {
 test "standard floor retains processed predecessor" {
     try queries.FloorRetainsProcessedPredecessor(H).run(gpa);
 }
+
+test "standard reject stale block delivery after floor update" {
+    try queries.RejectStaleBlockDeliveryAfterFloorUpdate(H).run(gpa);
+}
+
+test "standard sync height floor" {
+    try queries.SyncHeightFloor(H).run(gpa);
+}
