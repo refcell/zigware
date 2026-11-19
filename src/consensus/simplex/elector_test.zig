@@ -317,3 +317,33 @@ test "random v1 select leader conformance hash matches commonware" {
         @embedFile("../conformance.toml"),
     );
 }
+
+// commonware round_robin_build_panics_on_empty_participants (should_panic "no participants").
+test "round robin build panics on empty participants" {
+    try utils.death.expect_panic(@src(), "no participants", struct {
+        fn body() !void {
+            var built = try RoundRobin.default().build(gpa, 0);
+            built.deinit(gpa);
+        }
+    }.body);
+}
+
+// commonware random_build_panics_on_empty_participants (should_panic "no participants").
+test "random build panics on empty participants" {
+    try utils.death.expect_panic(@src(), "no participants", struct {
+        fn body() !void {
+            _ = Random.init(.v1).build(MinPk, 0);
+        }
+    }.body);
+}
+
+// commonware random_panics_on_none_certificate_after_view_1 (should_panic): view 2 needs the
+// previous round's certificate; electing without one asserts.
+test "random panics on a missing certificate after view 1" {
+    try utils.death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            const random = Random.init(.v1).build(MinPk, 5);
+            _ = random.elect(round(1, 2), null);
+        }
+    }.body);
+}

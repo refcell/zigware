@@ -451,3 +451,59 @@ test "the twins elector scripts one leader per term" {
     const round: Round = .new(.new(333), .new(7));
     try testing.expectEqual(reference.elect(round, {}), elector.elect(round, {}));
 }
+
+// commonware route_with_groups_panics_when_sender_is_missing (should_panic "sender not in any
+// partition"): the strict view split routes every participant to one half, so a sender
+// outside it panics.
+test "view routes panic when the sender is in no partition" {
+    try utils.death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            _ = twins.view_route(.new(1), .one, 4, 4);
+        }
+    }.body);
+}
+
+// commonware cases_panic_on_scenario_overflow (should_panic "scenario space overflows u128").
+test "cases panic on scenario overflow" {
+    try utils.death.expect_panic(@src(), "scenario space overflows u128", struct {
+        fn body() !void {
+            const framework: twins.Framework = .{
+                .participants = 4,
+                .faults = 1,
+                .rounds = 40,
+                .mode = .sampled,
+                .max_cases = 1,
+            };
+            const generated = try generate(framework);
+            twins.free_cases(gpa, generated);
+        }
+    }.body);
+}
+
+// commonware cases_reject_more_than_64_participants (catch_unwind): 65 participants panic.
+test "cases reject more than 64 participants" {
+    try utils.death.expect_panic(@src(), "participants must be <= 64", struct {
+        fn body() !void {
+            const framework: twins.Framework = .{
+                .participants = twins.participants_max + 1,
+                .faults = 1,
+                .rounds = 1,
+                .mode = .sampled,
+                .max_cases = 1,
+            };
+            const generated = try generate(framework);
+            twins.free_cases(gpa, generated);
+        }
+    }.body);
+}
+
+// commonware route_panics_when_sender_is_missing_from_participants (should_panic "sender
+// missing from runtime participant list"): looking up a sender outside the participants.
+test "routing panics when the sender is missing from the participants" {
+    try utils.death.expect_panic(@src(), "sender missing from the participant list", struct {
+        fn body() !void {
+            const participants = [_]u32{ 0, 1, 2, 3 };
+            _ = twins.index_of(u32, 99, &participants);
+        }
+    }.body);
+}

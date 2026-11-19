@@ -321,18 +321,20 @@ resolver; those lanes are running, so do the types first and the actors as they 
   resent notarize or finalize with another attestation, and votes below the current view
   (reported but not assembled; with historical votes, conflicts detected), and a buffered
   next-term lane quorum assembling on term entry.
-  verifier.rs: 29 of its 32 have counterparts
+  verifier.rs: all 32 have counterparts
   (lazy vote buffers, quorum reservations, the ready, exact-quorum, empty-pending, and
   verified-quorum cases, late leader votes, non-batchable finalize accounting, and nullify
-  and finalize bookkeeping, 2026-11-19); its 3 panicking cases are not ported (below).
-- [x] Panicking tests are not ported: Zig test runners cannot catch a panic in process.
-  These are commonware's `#[should_panic]` cases in elector.rs (3), types.rs
-  (`issue_2944_regression_*_new`, 2), vrf.rs (12 constructor and certificate-verifier
-  checks), mocks/twins.rs (`route_with_groups_panics_when_sender_is_missing`,
-  `cases_panic_on_scenario_overflow`, `cases_reject_more_than_64_participants`,
-  `route_panics_when_sender_is_missing_from_participants`), voter/round.rs (the 2
-  replay-conflict cases), and batcher verifier.rs (3). Each guarded path asserts or panics
-  in the Zig code. mocks/twins.rs `route_with_groups_covers_reachable_split_targets`
+  and finalize bookkeeping, 2026-11-19); its 3 panicking cases are death tests (below).
+- [x] Panicking tests are death tests (2026-11-19): every commonware `#[should_panic]` case
+  runs through `utils.death.expect_panic`, with a plant removing each panic caught. They
+  are elector.rs (3, elector_test.zig), types.rs (`issue_2944_regression_*_new`, 2,
+  types_test.zig), vrf.rs (12 constructor and certificate-verifier checks, vrf_test.zig),
+  mocks/twins.rs (`route_with_groups_panics_when_sender_is_missing`, as a `view_route` sender
+  outside every partition, `cases_panic_on_scenario_overflow`,
+  `cases_reject_more_than_64_participants`, and
+  `route_panics_when_sender_is_missing_from_participants`, twins_test.zig), voter/round.rs
+  (the 2 replay-conflict cases, round_test.zig), and batcher verifier.rs (3,
+  verifier_test.zig). mocks/twins.rs `route_with_groups_covers_reachable_split_targets`
   has no counterpart because routing here takes participant-index masks
   (`route_masks`, covered by the route tests).
 - [x] Not-portable review (2026-11-19, coding lane): before 28, after 27. Every panic case
@@ -344,6 +346,9 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `counts[0]` instead of `counts[remaining - 1]` in `count` would fail it from two rounds. The
   same enumerator lets `compressed_unranking_matches_reference_space` check set equality.
   Done 2026-11-19 (simplex): both are in mocks/twins_reference_test.zig.
+  Death tests (2026-11-19, simplex): not portable went from 27 to 1. The 26 panic cases
+  are ported on `utils.death`; only `route_with_groups_covers_reachable_split_targets`
+  (mask routing) is left.
 - [x] Tracing: actor events are done (voter, batcher, resolver, engine). The voter opens
   commonware's `simplex.voter.start`, `.timeout`, `.process`, and `.notify` spans, and
   events inside them carry them. Each view's root `simplex.voter.view` span opens on entry

@@ -203,6 +203,27 @@ test "issue 2944 regression: conflicting evidence decode" {
     });
 }
 
+// commonware issue_2944_regression_conflicting_notarize_new (should_panic "proposals must
+// differ"): conflicting evidence over one proposal twice is refused at construction.
+test "issue 2944 regression: conflicting notarize init" {
+    try utils.death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            const vote = notarize(0, Proposal.init(round(0, 10), .new(5), .fill(1)));
+            _ = ConflictingNotarize.init(vote, vote);
+        }
+    }.body);
+}
+
+// commonware issue_2944_regression_conflicting_finalize_new: the same for finalize votes.
+test "issue 2944 regression: conflicting finalize init" {
+    try utils.death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            const vote = finalize(0, Proposal.init(round(0, 10), .new(5), .fill(1)));
+            _ = ConflictingFinalize.init(vote, vote);
+        }
+    }.body);
+}
+
 /// Encodes `value` (built without `init`'s checks) and expects decoding to reject it.
 fn expect_invalid(comptime T: type, value: T) !void {
     const bytes = try codec.encode(T, testing.allocator, value);

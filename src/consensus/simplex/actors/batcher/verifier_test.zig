@@ -13,6 +13,7 @@ const multisig = @import("../../scheme/bls12381_multisig.zig");
 const threshold = @import("../../scheme/bls12381_threshold/standard.zig");
 const secp256r1 = @import("../../scheme/secp256r1.zig");
 const verifier_mod = @import("verifier.zig");
+const wrapped = @import("../../mocks/wrapped.zig");
 
 const Digest = cryptography.Sha256.Digest;
 const MinSig = cryptography.bls12381.primitives.MinSig;
@@ -455,4 +456,67 @@ fn expect_counts(certification: anytype, pending: usize, verified: usize) !void 
 // commonware `test_add_nullify` and `test_add_finalize`.
 test "add nullify and finalize" {
     inline for (cases) |C| try add_nullify_and_finalize(C);
+}
+
+const Ed25519 = ed25519.Scheme(Digest);
+
+/// Sets leader 0 on a three-validator verifier, then calls `set_leader(second, &vote)` where
+/// `vote` is validator `signer`'s notarize; both contract breaks below assert.
+fn set_leader_twice(second: u32, signer: usize, first_set: bool) !void {
+    const gpa = testing.allocator;
+    var rng = utils.rng.test_rng();
+    var fixture = try ed25519_fixture(Ed25519, gpa, &rng, namespace, 3);
+    const schemes = fixture.schemes;
+    var verifier = verifier_mod.Verifier(Ed25519, Digest).init(round_one, &schemes[0], 3);
+    if (first_set) verifier.set_leader(.init(0), null);
+    const vote = try notarize(Ed25519, &schemes[signer], round_one, 0, 10);
+    verifier.set_leader(.init(second), &vote);
+    verifier.deinit(gpa);
+    fixture.deinit(gpa);
+}
+
+// commonware test_set_leader_change_panics (should_panic "leader changed within round").
+test "set leader panics when the leader changes within a round" {
+    try utils.death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            try set_leader_twice(1, 1, true);
+        }
+    }.body);
+}
+
+// commonware test_set_leader_rejects_foreign_notarize (should_panic "notarize must be from
+// leader"): the notarize handed to set_leader must come from the elected leader.
+test "set leader panics on a notarize from another validator" {
+    try utils.death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            try set_leader_twice(0, 1, false);
+        }
+    }.body);
+}
+
+// commonware test_construct_panics_on_recovery_failure (should_panic "verified quorum must
+// assemble"): a verified quorum whose certificate cannot assemble is a scheme bug.
+test "construct panics when a verified quorum fails to assemble" {
+    try utils.death.expect_panic(@src(), "verified quorum must assemble", struct {
+        fn body() !void {
+            const gpa = testing.allocator;
+            const Wrapped = wrapped.Scheme(Ed25519);
+            var rng = utils.rng.test_rng();
+            var fixture = try ed25519_fixture(Ed25519, gpa, &rng, namespace, 5);
+            var schemes: [5]Wrapped = undefined;
+            for (&schemes, fixture.schemes) |*s, inner| s.* = .init(inner, .recovery_failure);
+            const quorum = utils.N3f1.quorum(@as(u32, 5));
+            const WrappedVerifier = verifier_mod.Verifier(Wrapped, Digest);
+            var verifier = WrappedVerifier.init(round_one, &schemes[0], quorum);
+            const leader_vote = try notarize(Wrapped, &schemes[0], round_one, 0, 1);
+            verifier.set_leader(leader_vote.signer(), &leader_vote);
+            for (schemes[0..quorum]) |*scheme| {
+                const vote = try notarize(Wrapped, scheme, round_one, 0, 1);
+                try verifier.add(gpa, .{ .notarize = vote }, true);
+            }
+            _ = try verifier.try_construct_notarization(gpa, &rng, sequential);
+            verifier.deinit(gpa);
+            fixture.deinit(gpa);
+        }
+    }.body);
 }

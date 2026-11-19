@@ -1,5 +1,5 @@
 //! commonware `actors/voter/round.rs` tests (the two `should_panic` replay conflicts are
-//! asserts here and are not exercised).
+//! asserts here, checked with `utils.death`).
 
 const std = @import("std");
 const testing = std.testing;
@@ -479,4 +479,40 @@ test "voter round replay notarize after certificate" {
     try testing.expectEqual(.unverified, round.slot.status());
     try testing.expect(round.broadcast_notarize());
     try testing.expectEqual(.send, round.request_verify());
+}
+
+/// Replays our nullify and our finalize for one view, in `order`; the second one asserts.
+fn replay_conflict(comptime order: [2]enum { nullify, finalize }) !void {
+    var f = try fixture();
+    const info = rnd(5, 2);
+    const value = proposal(info, 0, 40);
+    const nullify = (try Nullify.sign(gpa, &f.schemes[0], info)).?;
+    const finalize = (try Finalize.sign(gpa, &f.schemes[0], value)).?;
+    var round = Round.init(&f.schemes[0], info);
+    inline for (order) |kind| switch (kind) {
+        .nullify => round.replay(&.{ .nullify = nullify }),
+        .finalize => round.replay(&.{ .finalize = finalize }),
+    };
+    round.deinit(gpa);
+    f.deinit(gpa);
+}
+
+// commonware replay_finalize_conflicts_with_local_nullify (should_panic): a journal holding
+// our finalize after our nullify for one view is rejected on recovery.
+test "voter round replayed finalize conflicts with local nullify" {
+    try utils.death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            try replay_conflict(.{ .nullify, .finalize });
+        }
+    }.body);
+}
+
+// commonware replay_nullify_conflicts_with_local_finalize (should_panic): a journal holding
+// our nullify after our finalize for one view is rejected on recovery.
+test "voter round replayed nullify conflicts with local finalize" {
+    try utils.death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            try replay_conflict(.{ .finalize, .nullify });
+        }
+    }.body);
 }

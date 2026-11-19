@@ -513,3 +513,166 @@ test "vrf: a verifier without a share verifies signers' votes" {
         try testing.expect(!try verifier.verify_attestation(a, &rng, other, &vote, sequential));
     }
 }
+
+const MinPk = primitives.MinPk;
+const MinSig = primitives.MinSig;
+const deal_anonymous = cryptography.bls12381.dkg.feldman_desmedt.deal_anonymous;
+
+/// Builds a scheme over `n` participants from a dealing of `dealt` shares with faults model
+/// `M`: a signer from share 0 (its index replaced by `share_index` when set), or a verifier.
+/// Every misfit below panics inside `signer` or `verifier`.
+fn build_misfit(
+    comptime V: type,
+    comptime M: type,
+    n: u32,
+    dealt: u32,
+    role: enum { signer, verifier },
+    share_index: ?u32,
+) !void {
+    const gpa = testing.allocator;
+    const S = SchemeOf(V);
+    var fixture = try setup(V, n, 11);
+    var rng = utils.rng.test_rng();
+    const dealing = try deal_anonymous(V, M, gpa, &rng, .non_zero_counter, dealt);
+    const set = try S.Participants.init(gpa, fixture.participants);
+    var share = dealing.shares[0];
+    if (share_index) |index| share.index = .init(index);
+    var scheme = switch (role) {
+        .signer => (try S.signer(gpa, namespace, set, dealing.sharing, share)).?,
+        .verifier => try S.verifier(gpa, namespace, set, dealing.sharing),
+    };
+    scheme.deinit(gpa);
+    gpa.free(dealing.shares);
+    fixture.deinit(gpa);
+}
+
+/// commonware certificate_verifier_panics_on_vote: a certificate verifier has no committee,
+/// so verifying a vote panics.
+fn certificate_verifier_on_vote(comptime V: type) !void {
+    const gpa = testing.allocator;
+    const S = SchemeOf(V);
+    var fixture = try setup(V, 4, 37);
+    var verifier = try S.certificate_verifier(gpa, namespace, fixture.schemes[0].identity());
+    const proposal = sample_proposal(0, 15, 8);
+    const subject: S.Subject = .{ .finalize = &proposal };
+    const vote = (try fixture.schemes[1].sign(gpa, subject)).?;
+    var rng = utils.rng.test_rng();
+    _ = try verifier.verify_attestation(gpa, &rng, subject, &vote, sequential);
+    verifier.deinit(gpa);
+    fixture.deinit(gpa);
+}
+
+const share_index_panic = "share index must match participant indices";
+const total_panic = "polynomial total must equal participant len";
+const threshold_panic = "polynomial threshold must equal quorum";
+const committee_panic = "can only be called for signer and verifier";
+
+// commonware test_signer_shares_must_match_participant_indices_min_pk (should_panic).
+test "vrf: a signer panics on a share index outside the participants (min_pk)" {
+    try utils.death.expect_panic(@src(), share_index_panic, struct {
+        fn body() !void {
+            try build_misfit(MinPk, N3f1, 4, 4, .signer, 999);
+        }
+    }.body);
+}
+
+// commonware test_signer_shares_must_match_participant_indices_min_sig (should_panic).
+test "vrf: a signer panics on a share index outside the participants (min_sig)" {
+    try utils.death.expect_panic(@src(), share_index_panic, struct {
+        fn body() !void {
+            try build_misfit(MinSig, N3f1, 4, 4, .signer, 999);
+        }
+    }.body);
+}
+
+// commonware test_scheme_polynomial_threshold_must_equal_quorum_min_pk (should_panic): five
+// participants, a polynomial dealt to four.
+test "vrf: a signer panics when the polynomial total differs (min_pk)" {
+    try utils.death.expect_panic(@src(), total_panic, struct {
+        fn body() !void {
+            try build_misfit(MinPk, N3f1, 5, 4, .signer, null);
+        }
+    }.body);
+}
+
+// commonware test_scheme_polynomial_threshold_must_equal_quorum_min_sig (should_panic).
+test "vrf: a signer panics when the polynomial total differs (min_sig)" {
+    try utils.death.expect_panic(@src(), total_panic, struct {
+        fn body() !void {
+            try build_misfit(MinSig, N3f1, 5, 4, .signer, null);
+        }
+    }.body);
+}
+
+// commonware test_verifier_polynomial_threshold_must_equal_quorum_min_pk (should_panic).
+test "vrf: a verifier panics when the polynomial total differs (min_pk)" {
+    try utils.death.expect_panic(@src(), total_panic, struct {
+        fn body() !void {
+            try build_misfit(MinPk, N3f1, 5, 4, .verifier, null);
+        }
+    }.body);
+}
+
+// commonware test_verifier_polynomial_threshold_must_equal_quorum_min_sig (should_panic).
+test "vrf: a verifier panics when the polynomial total differs (min_sig)" {
+    try utils.death.expect_panic(@src(), total_panic, struct {
+        fn body() !void {
+            try build_misfit(MinSig, N3f1, 5, 4, .verifier, null);
+        }
+    }.body);
+}
+
+// commonware test_signer_validates_polynomial_degree_min_pk (should_panic): for four
+// participants N5f1 deals a degree-3 polynomial where this N3f1 scheme needs degree 2.
+test "vrf: a signer panics when the polynomial threshold differs (min_pk)" {
+    try utils.death.expect_panic(@src(), threshold_panic, struct {
+        fn body() !void {
+            try build_misfit(MinPk, utils.N5f1, 4, 4, .signer, null);
+        }
+    }.body);
+}
+
+// commonware test_signer_validates_polynomial_degree_min_sig (should_panic).
+test "vrf: a signer panics when the polynomial threshold differs (min_sig)" {
+    try utils.death.expect_panic(@src(), threshold_panic, struct {
+        fn body() !void {
+            try build_misfit(MinSig, utils.N5f1, 4, 4, .signer, null);
+        }
+    }.body);
+}
+
+// commonware test_verifier_validates_polynomial_degree_min_pk (should_panic).
+test "vrf: a verifier panics when the polynomial threshold differs (min_pk)" {
+    try utils.death.expect_panic(@src(), threshold_panic, struct {
+        fn body() !void {
+            try build_misfit(MinPk, utils.N5f1, 4, 4, .verifier, null);
+        }
+    }.body);
+}
+
+// commonware test_verifier_validates_polynomial_degree_min_sig (should_panic).
+test "vrf: a verifier panics when the polynomial threshold differs (min_sig)" {
+    try utils.death.expect_panic(@src(), threshold_panic, struct {
+        fn body() !void {
+            try build_misfit(MinSig, utils.N5f1, 4, 4, .verifier, null);
+        }
+    }.body);
+}
+
+// commonware test_certificate_verifier_panics_on_vote_min_pk (should_panic).
+test "vrf: a certificate verifier panics on a vote (min_pk)" {
+    try utils.death.expect_panic(@src(), committee_panic, struct {
+        fn body() !void {
+            try certificate_verifier_on_vote(MinPk);
+        }
+    }.body);
+}
+
+// commonware test_certificate_verifier_panics_on_vote_min_sig (should_panic).
+test "vrf: a certificate verifier panics on a vote (min_sig)" {
+    try utils.death.expect_panic(@src(), committee_panic, struct {
+        fn body() !void {
+            try certificate_verifier_on_vote(MinSig);
+        }
+    }.body);
+}
