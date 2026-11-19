@@ -158,6 +158,10 @@ Read this whole file before you change anything. These rules are not optional.
   byte, so a bench that sinks a `[32]u8` by value spends most of its time on barriers
   (`journal::fixed_replay` read 1.19× commonware instead of 0.76×, c12261bd). In benches,
   sink a pointer: `std.mem.doNotOptimizeAway(&item)`, as commonware's `black_box` is one use.
+- `std.mem.eql` on slices longer than 32 bytes lowers badly on native AVX-512 targets (its
+  64-byte bool-vector reduce): 96 bytes cost about 120 ns, against 4 to 14 ns on x86_64_v3.
+  On a hot path, compare fixed-size values by XOR-ORing 32-byte vectors, as
+  `certificate.Deferred.eql` does (beaf4df5, attestation_eq 4.68× to 0.28× commonware).
 - The build runner prints `run test test-X stderr` and a `failed command: ...` line for any
   test step that wrote to stderr, even when every test in it passed. That alone is not a
   failure: look for a step line with `fail`, `crash`, `timeout`, or `leaks`, an `error:`
