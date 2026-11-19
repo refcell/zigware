@@ -317,6 +317,43 @@ test "stateful p2p actor: produce rejects a request above max_serve_ops" {
     try testing.expectEqual(@as(u64, 0), fixture.actor.metrics.serve_requests.get(.success));
 }
 
+test "stateful p2p actor: concurrent serves complete once the database is available" {
+    // commonware `concurrent_serves_complete_after_database_is_available`.
+    const database = try mock_db(3, null);
+    defer database.deinit();
+    var fixture: Fixture = undefined;
+    try fixture.init(database);
+    defer fixture.deinit();
+    // Hold the database so the second request arrives while the first read is pending.
+    var slot = try database.write();
+    const requests = [2]Request{
+        request_at(3),
+        .{ .operations = .{ .size = 3, .start = 0, .max_ops = 2 } },
+    };
+    var responses: [2]oneshot.Receiver(Produced) = undefined;
+    for (requests, &responses) |request, *response| response.* = try produce(&fixture, request);
+    defer for (&responses) |*response| response.deinit();
+    try io.sleep(.fromMilliseconds(20), .awake);
+    // Restore access before asserting, so a failure cannot leave the reads blocked.
+    // A reply that arrived or was dropped means a pending read blocked another serve.
+    var replies_pending = true;
+    for (&responses) |*response| {
+        if (response.try_recv()) |produced| {
+            produced.deinit();
+            replies_pending = false;
+        } else |err| replies_pending = replies_pending and err == error.Empty;
+    }
+    slot.put();
+    try testing.expect(replies_pending);
+    for (requests) |_| try fixture.next_work();
+    for (&responses) |*response| {
+        const produced = try response.recv();
+        defer produced.deinit();
+        try testing.expectEqualSlices(u8, database.cell.database.?.encoded, produced.bytes);
+    }
+    try testing.expectEqual(@as(u64, 2), fixture.actor.metrics.serve_requests.get(.success));
+}
+
 test "stateful p2p actor: a failed serve does not block another request" {
     const database = try mock_db(3, null);
     defer database.deinit();
