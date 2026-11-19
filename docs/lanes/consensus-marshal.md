@@ -396,3 +396,7 @@ ports its range's tests and the helpers defined in it, into
   (`tests/propose_validation.zig`). The four sync-failure panic tests (5932-6150) have no Zig
   counterpart (a Zig test cannot catch a panic). `mocks.GatedStrategy` is deferred: it needs
   an async `Strategy.spawn`, and its only user is outside this range.
+- 2026-11-19: `marshal/conformance.zig` ports StandardStorageConformance's workload. Its audit
+  is deterministic per seed, but commonware's hash (e22663c9) is unreachable: the workload's
+  block count and timestamps come from the runtime RNG the scheduler shuffles with, and
+  zigware's actor runs a different task set, so the streams diverge (checked: hash differs).

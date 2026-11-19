@@ -11,6 +11,7 @@ const std = @import("std");
 pub const ancestry = @import("ancestry.zig");
 pub const application = @import("application/root.zig");
 pub const coding = @import("coding/root.zig");
+pub const conformance = @import("conformance.zig");
 pub const config = @import("config.zig");
 pub const Config = config.Config;
 pub const Start = config.Start;
