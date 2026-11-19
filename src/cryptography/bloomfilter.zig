@@ -172,8 +172,11 @@ pub fn BloomFilter(comptime H: type) type {
             var buffer: [std.math.maxInt(u8)]u64 = undefined;
             const out = buffer[0..self.hashers];
             self.indices(item, out);
-            for (out) |index| self.bits.set(index, true);
-            assert(self.contains(item));
+            // Check the bits, not `contains`: rehashing `item` would double the cost of an insert.
+            for (out) |index| {
+                self.bits.set(index, true);
+                assert(self.bits.get(index));
+            }
         }
 
         /// Whether `item` is possibly in the filter: false means it certainly is not.
