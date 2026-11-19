@@ -333,9 +333,12 @@ fn consecutive_finalizations(request: Managed) !void {
     var descendant = try Descendant.send(&fixture, request, &.{ child, second, first, genesis });
     defer descendant.deinit();
     try replay_started.recv();
-    // An independent verification of the first block joins its replay.
+    // An independent verification of the first block joins its replay. Wait for the join:
+    // an acquisition still running when finalization pauses admission restarts once `first`
+    // is applied, and then waits for its canonical digest instead of joining.
     var verify_first = try fixture.verify(&.{ first, genesis });
     defer verify_first.deinit();
+    try fixture.await_joiners(first.digest(), 2);
     try testing.expect(!verify_first.is_ready());
     try finalize_across(&fixture, &probe, &descendant, &replay_release, &verify_first, .{
         first,
