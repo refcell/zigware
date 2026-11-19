@@ -1337,6 +1337,79 @@ test "standard failed certify barrier sync stops the actor" {
     }.body);
 }
 
+fn verified_call(mailbox: Started.A.Mailbox, round: Round, block: common.Block) !bool {
+    return mailbox.verified(round, block);
+}
+
+/// What a failing sync test drives once startup is quiet.
+const SyncFailure = enum { verified, notarization };
+
+/// A verified block's or a notarization's failed sync ends the actor with the storage error
+/// (commonware panics in `test_mailbox_verified_sync_failure_panics` and
+/// `test_notarization_sync_failure_panics`); `verified` reports the block not durable.
+fn sync_failure_body(ctx: Ctx, comptime which: SyncFailure) anyerror!void {
+    var pending: runtime.storage.mocks.DelayedSync = .init(gpa, ctx.io());
+    defer pending.deinit();
+    var delayed: runtime.storage.mocks.DelayedSynced = .init(gpa, ctx.storage, &pending);
+    var actor_ctx = ctx;
+    actor_ctx.storage = delayed.storage();
+    const io = ctx.io();
+    var stop = false;
+    var releaser = try io.concurrent(release_until, .{ ctx, &pending, &stop });
+    defer if (!stop) releaser.cancel(io);
+    var env: Env = undefined;
+    try env.init(actor_ctx, "sync-failure");
+    var ended = false;
+    defer if (!ended) {
+        pending.unblock();
+        env.deinit();
+    };
+    const round = round_at(1);
+    _ = try env.started.mailbox.get_verified(round);
+    stop = true;
+    releaser.cancel(io);
+    pending.release_all();
+    try testing.expectEqual(0, pending.parked());
+    const block = try block_one(100);
+    switch (which) {
+        .verified => {
+            var call = try io.concurrent(verified_call, .{
+                env.started.mailbox,
+                round,
+                try ready(block),
+            });
+            defer _ = call.cancel(io) catch {};
+            while (pending.parked() == 0) try ctx.sleep(.fromMilliseconds(1));
+            pending.fail_all();
+            try testing.expect(!try call.await(io));
+        },
+        .notarization => {
+            try notarize(&env, 1, 0, block.digest());
+            while (pending.parked() == 0) try ctx.sleep(.fromMilliseconds(1));
+            pending.fail_all();
+        },
+    }
+    ended = true;
+    defer env.fixture.deinit(gpa);
+    try testing.expectError(error.Io, env.started.join());
+}
+
+test "standard failed verified sync stops the actor" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            return sync_failure_body(ctx, .verified);
+        }
+    }.body);
+}
+
+test "standard failed notarization sync stops the actor" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            return sync_failure_body(ctx, .notarization);
+        }
+    }.body);
+}
+
 fn processed_is_one(ctx: Ctx) bool {
     const text = ctx.encode(gpa) catch return false;
     defer gpa.free(text);
