@@ -273,7 +273,22 @@ variants need `runtime` storage; do them after its interface lands.
     blobs. Planted bug (publication skips data repair) fails four of them. A planted anchor
     that accepts a watermark past the data end is not caught by design: inspection's
     contiguity check rejects the lost blob first.
-  - [ ] variable.rs: read_many, compression, replay, and the rest.
+  - [x] variable.rs batch 7 (`variable_reads_test.zig`): compressed `append_many`,
+    compressed frames across pages after a cold reopen (replay, read, `read_many`),
+    `append_many` past the write buffer, append and replay at the maximum size, and
+    `try_read_many_sync` against `read_many`, probe completion, consecutive, scattered, and
+    cold-offset reads, and a blob's last frame after a capped reopen. Also lost offsets
+    after a prune, lost data aligned to empty, replay stopping at a corrupt blob, single-item
+    prune-all and reuse, a backward `clear_to_size` with no mutation, and journal metrics.
+    Planted bug (cached frames decode one byte short) fails three of them. zigware's
+    `read_many` reads item by item, so the scattered-read hit/miss split is asserted as a sum
+    (a miss can warm its neighbor). Not ported: the batched-read accounting, probe-reuse,
+    recorded-read, and tampered-offset tests (they test commonware's batched `read_many`
+    pass), replay read options (zigware's replay takes none), `View` ownership, should-panic,
+    snapshot, and the parked or dropped sync-handle tests (start_sync staging, deferred
+    failures, destroy after an unobserved failed sync).
+  - [ ] variable.rs: start_sync flush failure and the init data-before-offsets sync check
+    (need a partition-scoped sync fault).
 - [ ] journal/zstd: byte-exact libzstd level 3 (coordinator, correcting the earlier "byte
   identity not required"). commonware's storage conformance hashes four `<true>` journal
   workloads written with `compression: Some(3)`, so compressed journals must emit exactly
