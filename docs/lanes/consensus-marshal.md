@@ -279,6 +279,8 @@ ports its range's tests and the helpers defined in it, into
   (storage, floors, repair, dispatch) to keep files and functions within TigerStyle.
 
 ## Backlog
+- [ ] Marshal fuzz outside coding/ (`marshal/fuzz.zig`: handler Key/Annotation, standard
+  decode_block, DispatchGate, PendingAcks, staged, mailbox overflow, ancestry): bls-math.
 - [x] Pool the finalized-archive sync (`actor_finalize.start_finalized_sync` runs inline;
   commonware pools it). Then flip `pooled_finalized_sync` in `standard/tests/dispatch.zig`
   (3 skipped tests: mailbox not blocked by a sync, per-batch release, stale floor anchor).
@@ -366,3 +368,5 @@ ports its range's tests and the helpers defined in it, into
   Debug without `-Dslow-tests`). My 169-1218/1600-1986/2544-2591 range: digest-once (176),
   block-provider parent fetch (378), and the recoverable/certify family (514-562) went to
   runtime; sync_height_floor and reject_stale (563, 569, 2586) are bls-math's queries slice.
+- 2026-11-19: bls-math finished harness.rs 3442-end (20 scenarios, `tests/queries.zig`);
+  reject_stale's retired fetch matches commonware's set_floor retain. bls-math takes fuzz.
