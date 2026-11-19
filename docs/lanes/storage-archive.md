@@ -115,9 +115,11 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
   replays unsynced writes with their retention. `Faults.faulted_recovery` ports commonware's
   chain of one to four reopens, each under one drawn mutation fault and crashing into the
   next. Rates and the chain are drawn by a ChaCha test RNG instead of commonware's
-  `Entropy`-driven rng, so inputs do not replay commonware's corpus byte for byte. Delayed
-  and out-of-order syncs (`PendingSyncs`, abandoned `start_sync`) have no counterpart:
-  zigware's `sync` is synchronous, so there are no pending syncs to reorder.
+  `Entropy`-driven rng, so inputs do not replay commonware's corpus byte for byte. The
+  prunable recovery target pipelines `start_sync` on `runtime.storage.mocks.DelayedSync` as
+  commonware's `PendingSyncs`: parked syncs released or failed oldest or newest, completions
+  held, awaited, or abandoned, and the parked ones failed at the crash. A blocking `sync` or
+  `prune` runs with syncs passing through (commonware drives them with `drive_pending_syncs`).
 - Commonware's `slow` group (`many_keys_{prunable,immutable}_large` at 50,000 keys,
   `archive_many_keys_and_restart` at 100,000, and `archive_keys_and_restart_determinism` at
   5,000) runs at those sizes only with `-Dslow-tests`; every `zig build test` runs the same

@@ -7,8 +7,11 @@
 //!   that tears unsynced writes, then commonware's chain of one to four faulted reopens.
 //!   Recovery on reliable storage must keep every synced entry, keep each section's journal
 //!   as a prefix of what was appended, report ranges that match the retained entries, and
-//!   keep the same view across a second reopen. Commonware's target also abandons pipelined
-//!   `start_sync` requests, which this target does not model yet.
+//!   keep the same view across a second reopen. As commonware's, the op phase also pipelines
+//!   `start_sync` requests on the delayed-sync mock: each started sync parks until an op
+//!   releases or fails it, and its completion is held and awaited, or abandoned (released
+//!   without waiting). Only an awaited success makes its entries durable; the crash fails the
+//!   syncs still parked.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -27,6 +30,8 @@ const Key = [16]u8;
 const Value = [32]u8;
 const FuzzArchive = prunable.Archive(translator.EightCap, Key, Value);
 const operations_max = 64;
+const Completion = runtime.storage.Completion;
+const held_max = 4;
 
 fn open(harness: *tests.Harness, items_per_section: u64) !FuzzArchive {
     return open_on(harness, harness.storage.interface(), items_per_section);
@@ -249,11 +254,122 @@ const Recovery = struct {
     }
 };
 
+/// Pipelined `start_sync` requests (commonware's `PendingSyncs` over `DelayedSyncContext`):
+/// the archive's syncs park in `syncs` until an op releases them, and `held` keeps the
+/// completions not yet awaited or abandoned, each with the count of appends it covers.
+const Pipeline = struct {
+    syncs: runtime.storage.mocks.DelayedSync,
+    wrapper: runtime.storage.mocks.DelayedSynced,
+    held: [held_max]Held = undefined,
+    held_count: usize = 0,
+    /// Whether an op failed a parked sync, an injected fault the archive must report.
+    failed_sync: bool = false,
+
+    const Held = struct { completion: Completion, covered: usize };
+
+    /// Must not move after `init`.
+    fn init(pipeline: *Pipeline, inner: runtime.storage.Storage) void {
+        pipeline.* = .{ .syncs = .init(gpa, testing.io), .wrapper = undefined };
+        pipeline.wrapper = .init(gpa, inner, &pipeline.syncs);
+    }
+
+    /// The crash: the syncs still parked never complete, and the held completions are
+    /// abandoned.
+    fn abandon_all(pipeline: *Pipeline) void {
+        pipeline.syncs.fail_all();
+        for (pipeline.held[0..pipeline.held_count]) |held| held.completion.release();
+        pipeline.held_count = 0;
+    }
+
+    /// Whether started syncs park. A blocking `sync` or `prune` starts its syncs and waits on
+    /// them in one call, so it runs with them passing through, as commonware drives the
+    /// parked syncs while it awaits one (`drive_pending_syncs`).
+    fn park(pipeline: *Pipeline, parks: bool) void {
+        // Nothing else touches the mock here: no sync is parked and no task runs.
+        assert(pipeline.syncs.parked() == 0);
+        pipeline.syncs.unblocked = !parks;
+    }
+
+    fn deinit(pipeline: *Pipeline) void {
+        assert(pipeline.held_count == 0);
+        pipeline.syncs.deinit();
+    }
+};
+
 /// Applies one fuzzed operation, recording appends before they are attempted so a failed
-/// append still counts as possibly stored.
-fn recovery_step(reader: *fuzz_bytes.Reader, archive: *FuzzArchive, model: *Recovery) !void {
+/// append still counts as possibly stored. Every archive call first releases the parked
+/// syncs, since a write to a section waits for that section's sync in flight.
+fn recovery_step(
+    reader: *fuzz_bytes.Reader,
+    archive: *FuzzArchive,
+    model: *Recovery,
+    pipeline: *Pipeline,
+) !void {
+    const operation = reader.below(11);
+    if (operation < 8) pipeline.syncs.release_all();
+    if (operation < 8) pipeline.park(operation < 3 or operation >= 6);
+    switch (operation) {
+        0...5 => try recovery_archive_step(reader, archive, model, operation),
+        6, 7 => {
+            const completion = try archive.start_sync();
+            if (pipeline.held_count == held_max) return completion.release();
+            pipeline.held[pipeline.held_count] = .{
+                .completion = completion,
+                .covered = model.appended.items.len,
+            };
+            pipeline.held_count += 1;
+        },
+        8, 9 => pipeline_step(reader, pipeline),
+        10 => try await_held(model, pipeline),
+        else => unreachable,
+    }
+}
+
+/// Releases or fails one parked sync, oldest or newest, without observing it; or abandons a
+/// held completion.
+fn pipeline_step(reader: *fuzz_bytes.Reader, pipeline: *Pipeline) void {
+    if (reader.boolean()) {
+        if (pipeline.held_count == 0) return;
+        const index = reader.below(pipeline.held_count);
+        pipeline.held[index].completion.release();
+        pipeline.held_count -= 1;
+        pipeline.held[index] = pipeline.held[pipeline.held_count];
+        return;
+    }
+    if (pipeline.syncs.parked() == 0) return;
+    const parked = if (reader.boolean()) pipeline.syncs.next() else pipeline.syncs.last();
+    if (reader.boolean()) return parked.release({});
+    pipeline.failed_sync = true;
+    parked.release(error.Io);
+}
+
+/// Awaits every held completion, oldest first; each success makes the appends it covers
+/// that are still above the floor durable.
+fn await_held(model: *Recovery, pipeline: *Pipeline) !void {
+    pipeline.syncs.release_all();
+    while (pipeline.held_count > 0) {
+        const held = pipeline.held[0];
+        pipeline.held_count -= 1;
+        std.mem.copyForwards(
+            Pipeline.Held,
+            pipeline.held[0..pipeline.held_count],
+            pipeline.held[1 .. pipeline.held_count + 1],
+        );
+        try held.completion.wait_release();
+        for (model.appended.items[0..held.covered]) |*entry| {
+            if (entry.section >= model.oldest_allowed) entry.synced = true;
+        }
+    }
+}
+
+fn recovery_archive_step(
+    reader: *fuzz_bytes.Reader,
+    archive: *FuzzArchive,
+    model: *Recovery,
+    operation: u64,
+) !void {
     const items_per_section = model.items_per_section;
-    switch (reader.below(6)) {
+    switch (operation) {
         0, 1, 2 => |kind| {
             const unique = kind != 2;
             const index = reader.below(3 * items_per_section);
@@ -345,19 +461,23 @@ fn recovery_run(input: []const u8) anyerror!void {
     var model: Recovery = .{ .items_per_section = 1 + reader.below(4) };
     defer model.deinit();
     const faulted = reader.boolean();
+    var pipeline: Pipeline = undefined;
+    pipeline.init(storage);
+    defer pipeline.deinit();
     {
-        var archive = try open_on(&harness, storage, model.items_per_section);
+        var archive = try open_on(&harness, pipeline.wrapper.storage(), model.items_per_section);
         defer archive.deinit();
         if (faulted) faults.arm(&reader);
         var operations: u32 = 0;
         while (!reader.done() and operations < operations_max) : (operations += 1) {
-            recovery_step(&reader, &archive, &model) catch |err| {
-                // Only an injected storage fault may fail an operation.
-                try testing.expect(faulted);
+            recovery_step(&reader, &archive, &model, &pipeline) catch |err| {
+                // Only an injected storage or sync fault may fail an operation.
+                try testing.expect(faulted or pipeline.failed_sync);
                 try testing.expect(err != error.OutOfMemory);
                 break;
             };
         }
+        pipeline.abandon_all();
         try faults.crash();
     }
     const context: Recover = .{
