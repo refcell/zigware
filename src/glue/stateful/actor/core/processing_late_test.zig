@@ -250,3 +250,145 @@ test "stateful processing: finalization reuses a shared parent recovery" {
     try testing.expect(try second.recv());
     try testing.expectEqual(1, probe.calls);
 }
+
+const Managed = enum { verify, propose };
+
+/// A descendant request in flight: a verification's verdict, or a proposal running on its
+/// own task (the mailbox's propose blocks until it answers).
+const Descendant = union(Managed) {
+    verify: utils.channel.oneshot.Receiver(bool),
+    propose: std.Io.Future(anyerror!bool),
+
+    fn send(fixture: *Fixture, request: Managed, blocks: []const TestBlock) !Descendant {
+        std.debug.assert(blocks.len >= 2);
+        return switch (request) {
+            .verify => .{ .verify = try fixture.verify(blocks) },
+            .propose => .{ .propose = try io.concurrent(propose_on, .{ fixture, blocks }) },
+        };
+    }
+
+    fn propose_on(fixture: *Fixture, blocks: []const TestBlock) anyerror!bool {
+        const context: TestBlock.Context = .{ .round = harness.round(0xff) };
+        const ancestry = try fixture.harness.ancestry(blocks);
+        var built = try fixture.mailbox.?.propose({}, context, ancestry, {}) orelse return false;
+        defer built.deinit();
+        return built.inner().parent().eql(blocks[0].digest());
+    }
+
+    fn pending(descendant: *Descendant) bool {
+        return switch (descendant.*) {
+            .verify => |*verdict| !verdict.is_ready(),
+            .propose => true, // Checked by the caller's later await.
+        };
+    }
+
+    fn wait(descendant: *Descendant) !bool {
+        return switch (descendant.*) {
+            .verify => |*verdict| verdict.recv(),
+            .propose => |*future| future.await(io),
+        };
+    }
+
+    fn deinit(descendant: *Descendant) void {
+        switch (descendant.*) {
+            .verify => |*verdict| verdict.deinit(),
+            .propose => |*future| _ = future.cancel(io) catch {},
+        }
+    }
+};
+
+/// Genesis, then blocks at views 1, 2, and 3, each on the last, built in a scratch harness
+/// so the fixture holds none of their state.
+fn uncached_chain() !struct { TestBlock, TestBlock, TestBlock } {
+    var scratch: harness.Harness = undefined;
+    try scratch.init();
+    defer scratch.deinit();
+    const genesis = TestBlock.genesis();
+    const first = try scratch.stage_pending_child(&genesis, 1);
+    const second = try scratch.stage_pending_child(&first, 2);
+    const child, var batch = try scratch.build_child(&second, 3);
+    batch.deinit();
+    return .{ first, second, child };
+}
+
+fn consecutive_finalizations(request: Managed) !void {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer deinit_fixture(&fixture);
+    const genesis = TestBlock.genesis();
+    const first, const second, const child = try uncached_chain();
+    // The replay path comes from the provider (commonware's marshal holds these blocks).
+    try fixture.harness.provider_state.insert(first);
+    try fixture.harness.provider_state.insert(second);
+    // Null target: gates apply to processed blocks in call order (first, second, child).
+    var probe: harness.Probe = .{ .target = null };
+    defer probe.deinit();
+    const replay = try probe.add_gate();
+    var replay_started = replay.started;
+    defer replay_started.deinit();
+    var replay_release = replay.release;
+    fixture.processing.verifications.verifier.app.probe = &probe;
+    fixture.processing.processor.app.probe = &probe;
+
+    var descendant = try Descendant.send(&fixture, request, &.{ child, second, first, genesis });
+    defer descendant.deinit();
+    try replay_started.recv();
+    // An independent verification of the first block joins its replay.
+    var verify_first = try fixture.verify(&.{ first, genesis });
+    defer verify_first.deinit();
+    try testing.expect(!verify_first.is_ready());
+    try finalize_across(&fixture, &probe, &descendant, &replay_release, .{ first, second });
+    try testing.expect(try verify_first.recv());
+    // Each block ran once: the finalizations reused the request's executions.
+    try testing.expectEqual(3, probe.calls);
+}
+
+/// Finalizes `blocks[0]` while its replay is held, then `blocks[1]` while the descendant's
+/// own processing is held, and checks the descendant completes valid.
+fn finalize_across(
+    fixture: *Fixture,
+    probe: *harness.Probe,
+    descendant: *Descendant,
+    replay_release: *utils.channel.oneshot.Sender(void),
+    blocks: [2]TestBlock,
+) !void {
+    const second_gate = try probe.add_gate();
+    var second_started = second_gate.started;
+    defer second_started.deinit();
+    var second_release = second_gate.release;
+    const own = try probe.add_gate();
+    var own_started = own.started;
+    defer own_started.deinit();
+    var own_release = own.release;
+
+    var first_waiter = try fixture.finalize(blocks[0]);
+    defer first_waiter.deinit();
+    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expectEqual(null, first_waiter.poll());
+    try replay_release.send({});
+    try first_waiter.wait();
+    try second_started.recv();
+    try second_release.send({});
+    try own_started.recv();
+    try testing.expect(descendant.pending());
+    // The second finalization keeps the descendant's processing running.
+    var second_waiter = try fixture.finalize(blocks[1]);
+    defer second_waiter.deinit();
+    try second_waiter.wait();
+    try own_release.send({});
+    try testing.expect(try descendant.wait());
+}
+
+// commonware `consecutive_finalizations_preserve_descendant_replay` (verify case): a
+// descendant's verification advances across consecutive finalizations of its ancestors
+// without re-running their completed executions. Adapted: the ancestry is passed whole
+// (commonware fetches the first block from marshal), and per-block call counts are a total.
+test "stateful processing: consecutive finalizations preserve a descendant verification" {
+    try consecutive_finalizations(.verify);
+}
+
+// commonware `consecutive_finalizations_preserve_descendant_replay` (propose case): the same
+// with a build on the descendant.
+test "stateful processing: consecutive finalizations preserve a descendant proposal" {
+    try consecutive_finalizations(.propose);
+}
