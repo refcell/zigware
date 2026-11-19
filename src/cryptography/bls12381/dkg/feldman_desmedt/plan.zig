@@ -9,6 +9,7 @@ const assert = std.debug.assert;
 const testing = std.testing;
 const codec = @import("codec");
 const utils = @import("utils");
+const parallel = @import("parallel");
 const math = @import("math");
 const primitives = @import("../../primitives/root.zig");
 const transcript_mod = @import("../../../transcript.zig");
@@ -792,7 +793,13 @@ fn Runner(comptime V: type) type {
                 try threshold.verify_message(V, output.public, namespace, message, partial.*);
             }
             const quorum = output.quorum(N3f1);
-            const signature = try threshold.recover(V, gpa, output.public, partials[0..quorum]);
+            const signature = try threshold.recover(
+                V,
+                gpa,
+                output.public,
+                partials[0..quorum],
+                parallel.sequential,
+            );
             try ops.verify_message(V, self.threshold_public_key.?, namespace, message, signature);
         }
     };

@@ -638,6 +638,76 @@ fn Point(comptime kind: PointKind) type {
             return .{ .point = result };
         }
 
+        /// `msm` through `strategy` (commonware's `Space::msm(points, scalars, strategy)`).
+        /// A few points run `msm` on the calling thread; where the strategy takes the parallel
+        /// shape, zero points and scalars are dropped and the rest are summed in tiles cut by
+        /// the strategy (`arithmetic.msm.msm_tiled`). Every shape returns the same point.
+        pub fn msm_strategy(
+            gpa: Allocator,
+            points: []const Self,
+            scalars: anytype,
+            strategy: anytype,
+        ) Allocator.Error!Self {
+            assert(points.len == scalars.len);
+            const Run = struct {
+                gpa: Allocator,
+                points: []const Self,
+                scalars: @TypeOf(scalars),
+                strategy: @TypeOf(strategy),
+
+                pub fn serial(run: @This()) Allocator.Error!Self {
+                    return msm(run.points, run.scalars);
+                }
+
+                pub fn parallel(run: @This()) Allocator.Error!Self {
+                    return msm_parallel(run.gpa, run.points, run.scalars, run.strategy);
+                }
+            };
+            const run: Run = .{
+                .gpa = gpa,
+                .points = points,
+                .scalars = scalars,
+                .strategy = strategy,
+            };
+            if (points.len < 2) return run.serial();
+            return strategy.run(points.len, run);
+        }
+
+        fn msm_parallel(
+            gpa: Allocator,
+            points: []const Self,
+            scalars: anytype,
+            strategy: anytype,
+        ) Allocator.Error!Self {
+            const Element = std.meta.Elem(@TypeOf(scalars));
+            const nbits: u32 = if (Element == SmallScalar) small_scalar_length * 8 else 255;
+            var count: usize = 0;
+            for (points, scalars) |point, scalar| {
+                if (!point.point.is_identity() and scalar_int(scalar) != 0) count += 1;
+            }
+            if (count < 2) return msm(points, scalars);
+            const jacobian = try gpa.alloc(Jacobian, count);
+            defer gpa.free(jacobian);
+            const values = try gpa.alloc(u256, count);
+            defer gpa.free(values);
+            var index: usize = 0;
+            for (points, scalars) |point, scalar| {
+                if (point.point.is_identity() or scalar_int(scalar) == 0) continue;
+                jacobian[index] = point.point;
+                values[index] = scalar_int(scalar);
+                index += 1;
+            }
+            assert(index == count);
+            const affine = try gpa.alloc(Affine, count);
+            defer gpa.free(affine);
+            const scratch = try gpa.alloc(Jacobian.Field, count);
+            defer gpa.free(scratch);
+            Jacobian.batch_to_affine(jacobian, affine, scratch);
+            const tiled = arithmetic.msm.msm_tiled;
+            const sum = try tiled(Jacobian, gpa, affine, values, nbits, strategy);
+            return .{ .point = sum };
+        }
+
         /// RFC 9380 hash_to_curve (SSWU, random oracle) with domain separation tag `dst`
         /// of at most 255 bytes.
         pub fn hash_to_group(dst: []const u8, message: []const u8) Self {
@@ -701,4 +771,5 @@ fn Point(comptime kind: PointKind) type {
 
 test {
     _ = @import("group_tests.zig");
+    _ = @import("group_msm_tests.zig");
 }

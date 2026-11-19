@@ -2,9 +2,9 @@
 //! verification against a `Sharing`, batch verification of partials, and recovery of the
 //! group signature from at least `sharing.required()` partials.
 //!
-//! Batch verification and multi-set recovery take commonware's `parallel` Strategy, which
-//! may run their independent work on several threads; results never depend on it. A single
-//! recovery's interpolation sum runs serially (commonware tiles its MSM).
+//! Batch verification and recovery take commonware's `parallel` Strategy, which may run their
+//! independent work on several threads; results never depend on it. A single recovery's
+//! interpolation sum runs through the strategy's tiled MSM (`G.msm_strategy`).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -201,13 +201,21 @@ pub fn recover(
     gpa: Allocator,
     sharing: Sharing(V),
     partials: []const PartialSignature(V),
+    strategy: anytype,
 ) (Error || Allocator.Error)!V.Signature {
     var evals = try Evaluations(V).prepare(gpa, sharing.required(), partials);
     defer evals.deinit(gpa);
     var interpolator = try sharing.interpolator(gpa, evals.keys);
     defer interpolator.deinit(gpa);
-    return interpolator.interpolate(V.Signature, evals.keys, evals.values) orelse
-        error.InvalidRecovery;
+    const keys = evals.keys;
+    const signature = try interpolator.interpolate_strategy(
+        V.Signature,
+        gpa,
+        keys,
+        evals.values,
+        strategy,
+    );
+    return signature orelse error.InvalidRecovery;
 }
 
 /// Recovers one signature per set of partials into `out`. Every set must select the same

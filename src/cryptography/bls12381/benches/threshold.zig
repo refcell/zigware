@@ -73,7 +73,13 @@ const Recover = struct {
     partials: []const Partial,
 
     pub fn iter(workload: *Recover) !MinSig.Signature {
-        return threshold.recover(MinSig, workload.gpa, workload.sharing, workload.partials);
+        return threshold.recover(
+            MinSig,
+            workload.gpa,
+            workload.sharing,
+            workload.partials,
+            parallel.sequential,
+        );
     }
 };
 

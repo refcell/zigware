@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const parallel = @import("parallel");
+const sequential = parallel.sequential;
 const testing = std.testing;
 const codec = @import("codec");
 const utils = @import("utils");
@@ -49,7 +50,7 @@ test "threshold: proof of possession" {
             partial.* = threshold.sign_proof_of_possession(V, dealing.sharing, share, "test");
             try threshold.verify_proof_of_possession(V, dealing.sharing, "test", partial.*);
         }
-        const signature = try threshold.recover(V, gpa, dealing.sharing, &partials);
+        const signature = try threshold.recover(V, gpa, dealing.sharing, &partials, sequential);
         try ops.verify_proof_of_possession(V, dealing.sharing.public(), "test", signature);
     }
 }
@@ -65,7 +66,7 @@ test "threshold: message" {
         for (partials) |partial| {
             try threshold.verify_message(V, dealing.sharing, "test", &message, partial);
         }
-        const signature = try threshold.recover(V, gpa, dealing.sharing, partials);
+        const signature = try threshold.recover(V, gpa, dealing.sharing, partials, sequential);
         try ops.verify_message(V, dealing.sharing.public(), "test", &message, signature);
     }
 }
@@ -78,7 +79,7 @@ test "threshold: recover from exactly a quorum" {
         const t = utils.N3f1.quorum(@as(u32, 6));
         const partials = try sign_all(V, dealing.shares[0..t], "test", "payload");
         defer gpa.free(partials);
-        const signature = try threshold.recover(V, gpa, dealing.sharing, partials);
+        const signature = try threshold.recover(V, gpa, dealing.sharing, partials, sequential);
         try ops.verify_message(V, dealing.sharing.public(), "test", "payload", signature);
     }
 }
@@ -128,7 +129,7 @@ test "threshold: recover rejects a bad namespace" {
                 threshold.verify_message(V, dealing.sharing, "bad", "hello", partial),
             );
         }
-        const signature = try threshold.recover(V, gpa, dealing.sharing, partials);
+        const signature = try threshold.recover(V, gpa, dealing.sharing, partials, sequential);
         try testing.expectError(
             error.InvalidSignature,
             ops.verify_message(V, dealing.sharing.public(), "bad", "hello", signature),
@@ -149,7 +150,7 @@ test "threshold: recover needs a quorum of distinct indices" {
         }
         try testing.expectError(
             error.NotEnoughPartialSignatures,
-            threshold.recover(V, gpa, dealing.sharing, partials),
+            threshold.recover(V, gpa, dealing.sharing, partials, sequential),
         );
         // A repeated index does not count twice.
         const repeated = [_]PartialSignature(V){
@@ -157,7 +158,7 @@ test "threshold: recover needs a quorum of distinct indices" {
         };
         try testing.expectError(
             error.NotEnoughPartialSignatures,
-            threshold.recover(V, gpa, dealing.sharing, &repeated),
+            threshold.recover(V, gpa, dealing.sharing, &repeated, sequential),
         );
     }
 }
@@ -177,7 +178,7 @@ test "threshold: a bad share fails verification" {
             } else try result;
         }
         // Recovery uses the lowest four indices, including the bad share.
-        const signature = try threshold.recover(V, gpa, dealing.sharing, partials);
+        const signature = try threshold.recover(V, gpa, dealing.sharing, partials, sequential);
         try testing.expectError(
             error.InvalidSignature,
             ops.verify_message(V, dealing.sharing.public(), "test", "hello", signature),
@@ -587,7 +588,7 @@ fn expect_dealing_vector(
     try expect_hex(share0, share_bytes);
     const partials = try sign_all(V, dealing.shares, "test", "hello");
     defer gpa.free(partials);
-    const recovered = try threshold.recover(V, gpa, dealing.sharing, partials);
+    const recovered = try threshold.recover(V, gpa, dealing.sharing, partials, sequential);
     try expect_hex(signature, &recovered.to_bytes());
 }
 

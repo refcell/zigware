@@ -276,6 +276,186 @@ fn sum_buckets(comptime C: type, buckets: []const C) C {
     return total;
 }
 
+/// The narrowest scalar window the tiled MSM offers the strategy (commonware `MIN_WINDOW`).
+const tiled_window_min = 2;
+/// Rows of the narrowest grid over a full scalar: the most window sums a run combines.
+const tiled_rows_max = scalar_bits / tiled_window_min + 1;
+
+/// Tiled Pippenger over strategy-supplied tiles (commonware `msm_tiled`), generic over the
+/// tile kernel so the cut can be checked apart from the curve arithmetic.
+///
+/// The strategy picks the scalar window from one grid offered per window, from
+/// `tiled_window_min` to the narrower of `kernel.window_max` and the bit length of `npoints`.
+/// A `window`-bit grid has one row per window of `nbits`-bit scalars, from the lowest bits,
+/// and one column per point; a tile finishes by folding its `2^(window - 1)` buckets at about
+/// two additions per bucket. `kernel.tile(&state, row, window, columns)` sums one window over
+/// a contiguous range of points; the tiles of a row are added, and the rows are combined from
+/// the highest with `window` doublings between them. `kernel.init()` makes the scratch a
+/// worker reuses across its tiles. `npoints` must be at least two.
+pub fn run_tiled(
+    comptime P: type,
+    gpa: std.mem.Allocator,
+    npoints: usize,
+    nbits: u32,
+    strategy: anytype,
+    kernel: anytype,
+) std.mem.Allocator.Error!P {
+    assert(npoints >= 2);
+    assert(nbits >= 1 and nbits <= scalar_bits);
+    const Kernel = @TypeOf(kernel);
+    comptime assert(Kernel.window_max >= tiled_window_min and Kernel.window_max <= 24);
+    // A wider window folds more buckets than a pass over the points costs, so the serial
+    // estimate never picks it.
+    const bit_length: u32 = @intCast(@bitSizeOf(usize) - @clz(npoints));
+    const widest = @min(Kernel.window_max, bit_length);
+    assert(widest >= tiled_window_min);
+    var grids: [Kernel.window_max - tiled_window_min + 1]parallel.Grid = undefined;
+    const count = widest - tiled_window_min + 1;
+    for (grids[0..count], tiled_window_min..) |*grid, window| {
+        // The windows end past the top bit, so the highest one absorbs the carry out of the
+        // signed digits below it.
+        grid.* = .{ .rows = nbits / window + 1, .tile_cost = @as(usize, 1) << @intCast(window) };
+    }
+    const run: TiledRun(P, Kernel) = .{ .gpa = gpa, .nbits = nbits, .kernel = kernel };
+    return strategy.run_tiles(npoints, grids[0..count], 1, run);
+}
+
+fn TiledRun(comptime P: type, comptime Kernel: type) type {
+    return struct {
+        gpa: std.mem.Allocator,
+        nbits: u32,
+        kernel: Kernel,
+
+        const Partial = struct { row: usize, sum: P };
+
+        /// A worker's scratch and the points of its open tile. A tile's pieces arrive in
+        /// column order, so each extends the tile's one range.
+        const State = struct { scratch: Kernel.State, columns: ?parallel.Range = null };
+
+        const TileOp = struct {
+            kernel: Kernel,
+            window: u32,
+
+            pub fn init(op: TileOp) State {
+                return .{ .scratch = op.kernel.init() };
+            }
+
+            pub fn fill(_: TileOp, state: *State, _: usize, piece: parallel.Range) void {
+                assert(!piece.is_empty());
+                const start = if (state.columns) |columns| columns.start else piece.start;
+                if (state.columns) |columns| assert(columns.end == piece.start);
+                state.columns = parallel.Range.init(start, piece.end);
+            }
+
+            pub fn finish(op: TileOp, state: *State, row: usize) Partial {
+                const columns = state.columns orelse unreachable; // A tile has a piece.
+                state.columns = null;
+                const sum = op.kernel.tile(&state.scratch, @intCast(row), op.window, columns);
+                return .{ .row = row, .sum = sum };
+            }
+        };
+
+        pub fn run(self: @This(), tiles: anytype) std.mem.Allocator.Error!P {
+            const window: u32 = @intCast(tiled_window_min + tiles.grid());
+            const rows = self.nbits / window + 1;
+            assert(rows <= tiled_rows_max);
+            const op: TileOp = .{ .kernel = self.kernel, .window = window };
+            const partials = try tiles.fill_collect(self.gpa, op);
+            defer self.gpa.free(partials);
+            // Sum each window's tiles, then combine the windows from the highest.
+            var sums: [tiled_rows_max]?P = @splat(null);
+            for (partials) |partial| {
+                assert(partial.row < rows);
+                const slot = &sums[partial.row];
+                slot.* = if (slot.*) |sum| self.kernel.add(sum, partial.sum) else partial.sum;
+            }
+            var result = Kernel.zero;
+            var row = rows;
+            while (row > 0) {
+                row -= 1;
+                if (sums[row]) |sum| result = self.kernel.add(result, sum);
+                if (row > 0) {
+                    for (0..window) |_| result = self.kernel.double(result);
+                }
+            }
+            return result;
+        }
+    };
+}
+
+/// The curve kernel of `msm_tiled`: one window's Booth digits of a range of points summed in
+/// Jacobian buckets.
+fn CurveKernel(comptime C: type) type {
+    return struct {
+        points: []const C.Affine,
+        scalars: []const u256,
+
+        const Self = @This();
+        pub const window_max = window_bits_max(C);
+        pub const zero = C.identity;
+        pub const State = struct { buckets: [1 << (window_max - 1)]C };
+
+        pub fn init(_: Self) State {
+            return .{ .buckets = undefined };
+        }
+
+        pub fn tile(
+            self: Self,
+            state: *State,
+            row: u32,
+            window: u32,
+            columns: parallel.Range,
+        ) C {
+            assert(window >= tiled_window_min and window <= window_max);
+            assert(columns.end <= self.points.len and !columns.is_empty());
+            const bucket_count = @as(usize, 1) << @intCast(window - 1);
+            const buckets = state.buckets[0..bucket_count];
+            @memset(buckets, C.identity);
+            const points = self.points[columns.start..columns.end];
+            const scalars = self.scalars[columns.start..columns.end];
+            for (points, scalars) |point, scalar| {
+                if (point.infinity) continue;
+                const digit = digit_at(scalar, row, window);
+                if (digit > 0) {
+                    const slot: usize = @intCast(digit - 1);
+                    buckets[slot] = buckets[slot].add_affine(point);
+                } else if (digit < 0) {
+                    const slot: usize = @intCast(-digit - 1);
+                    buckets[slot] = buckets[slot].add_affine(point.neg());
+                }
+            }
+            return sum_buckets(C, buckets);
+        }
+
+        pub fn add(_: Self, a: C, b: C) C {
+            return a.add(b);
+        }
+
+        pub fn double(_: Self, a: C) C {
+            return a.double();
+        }
+    };
+}
+
+/// sum_i [scalars[i]] points[i] in tiles cut by `strategy` (commonware's `msm_parallel`), for
+/// at least two points with scalars below 2^`nbits`. Equal to `msm` for every cut.
+pub fn msm_tiled(
+    comptime C: type,
+    gpa: std.mem.Allocator,
+    points: []const C.Affine,
+    scalars: []const u256,
+    nbits: u32,
+    strategy: anytype,
+) std.mem.Allocator.Error!C {
+    assert(points.len == scalars.len and points.len >= 2);
+    if (nbits < scalar_bits) {
+        for (scalars) |scalar| assert(scalar >> @intCast(nbits) == 0);
+    }
+    const kernel: CurveKernel(C) = .{ .points = points, .scalars = scalars };
+    return run_tiled(C, gpa, points.len, nbits, strategy, kernel);
+}
+
+const parallel = @import("parallel");
 const testing = std.testing;
 const Draws = @import("codec").fuzz.Draws;
 const Prng = @import("prng.zig").Prng;

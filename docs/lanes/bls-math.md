@@ -194,6 +194,15 @@ each test-generating macro expansion counted separately, matched to a zigware te
 reading both bodies (a zigware test may cover several). 288 tests: 267 ported, 5 open, 16 not
 portable.
 
+Since ported (actor-stream lane, strategy-tiled msm): `test_msm_parallel_g1`,
+`test_msm_parallel_g2`,
+`test_msm_parallel_edge_cases_g1`, `test_msm_parallel_edge_cases_g2`,
+`msm_tiled_covers_every_window_of_every_point`, and
+`msm_matches_naive_sum_through_cut_and_padded_tiles`, in
+src/cryptography/bls12381/primitives/group_msm_tests.zig. That makes 273 ported, 2 open, and 13 not
+portable. The Zig tile kernel reads only its own range, so one-point tiles are not padded; the
+coverage test checks a twelve-worker cut of 64 points still reaches a one-point tile.
+
 | commonware file | tests | ported | open | not portable |
 |---|---|---|---|---|
 | `bls12381/scheme.rs` | 8 | 8 | 0 | 0 |
@@ -204,7 +213,7 @@ portable.
 | `bls12381/dkg/golden/mod.rs` | 32 | 32 | 0 | 0 |
 | `bls12381/dkg/golden/evrf/banderwagon.rs` | 8 | 7 | 0 | 1 |
 | `bls12381/dkg/golden/evrf/mod.rs` | 5 | 5 | 0 | 0 |
-| `bls12381/primitives/group.rs` | 34 | 27 | 4 | 3 |
+| `bls12381/primitives/group.rs` | 34 | 33 | 1 | 0 |
 | `bls12381/primitives/sharing.rs` | 5 | 5 | 0 | 0 |
 | `bls12381/primitives/variant.rs` | 4 | 4 | 0 | 0 |
 | `bls12381/primitives/ops/aggregate.rs` | 5 | 5 | 0 | 0 |
@@ -218,21 +227,6 @@ Open:
   at 1 and 10 points (random, identity point, zero scalar, all-zero scalars/points, single) but not
   G2 empty input or the 50,000-point G2 case (large-window path); add both to group_tests.zig (big
   case behind -Dslow-tests)
-- [ ] `bls12381/primitives/group.rs` `test_msm_parallel_g2`: parallel shapes are not portable (per
-  docs/lanes/bls-math.md decision 'Strategy parameters are omitted (sequential) in math and bls12381
-  ops') but the sequential content is missing for G2: msm over SmallScalar on G2 is never checked
-  ("group: msm over small scalars" is G1 only) and G2 Scalar msm only at 1/10 points; add a G2
-  SmallScalar and multi-size msm vs naive check to group_tests.zig
-- [ ] `bls12381/primitives/group.rs` `test_msm_parallel_edge_cases_g1`: Rayon part not portable (per
-  docs/lanes/bls-math.md decision 'Strategy parameters are omitted (sequential) in math and bls12381
-  ops'); all-zero scalars and all-identity points are covered by
-  src/cryptography/bls12381/primitives/group_tests.zig check_msm, but a single nonzero point/scalar
-  among 49 zero entries (result == point*scalar) is not checked; add to group_tests.zig
-- [ ] `bls12381/primitives/group.rs` `test_msm_parallel_edge_cases_g2`: Rayon part not portable (per
-  docs/lanes/bls-math.md decision 'Strategy parameters are omitted (sequential) in math and bls12381
-  ops'); all-zero cases covered by src/cryptography/bls12381/primitives/group_tests.zig
-  check_msm(G2,10), but the single nonzero point/scalar among zero entries for G2 is not checked;
-  add to group_tests.zig
 - [ ] `bls12381/primitives/ops/batch.rs` `test_rejects_malleability`: batch::verify_same_signer
   malleability: for MinPk and MinSig sign two messages with one key, forge sig1-delta and
   sig2+delta, check each fails verify_message, the aggregates are equal and naive aggregate verify
@@ -305,19 +299,3 @@ Not portable:
   diagnostic that only eprintln!s circuit sizes and asserts nothing; no behavior to port (circuit
   capacity exactness is asserted in src/cryptography/bls12381/dkg/golden/evrf/banderwagon_tests.zig
   build helper)
-- `bls12381/primitives/group.rs` `msm_tiled_covers_every_window_of_every_point`: tests the
-  blst-backed msm_tiled tile grid under parallel Strategy cuts (explore, cutting_strategies, padded
-  one-point tiles); zigware msm is its own sequential Pippenger with no tiles or strategy, per
-  docs/lanes/bls-math.md decision 'Strategy parameters are omitted (sequential) in math and bls12381
-  ops'
-- `bls12381/primitives/group.rs` `msm_matches_naive_sum_through_cut_and_padded_tiles`: checks msm
-  through 3/7/12-worker strategy cuts of blst tiles; no strategy or tiles in zigware msm (per
-  docs/lanes/bls-math.md decision 'Strategy parameters are omitted (sequential) in math and bls12381
-  ops'); the strategy-free naive-sum check is in
-  src/cryptography/bls12381/primitives/group_tests.zig "group: msm matches the naive sum" (300
-  points)
-- `bls12381/primitives/group.rs` `test_msm_parallel_g1`: runs msm under explore() shapes and an
-  oversubscribed pooled Explorer; per docs/lanes/bls-math.md decision 'Strategy parameters are
-  omitted (sequential) in math and bls12381 ops'; the sequential equality (G1 Scalar and SmallScalar
-  msm vs naive sum) is in src/cryptography/bls12381/primitives/group_tests.zig "group: msm matches
-  the naive sum" and "group: msm over small scalars"

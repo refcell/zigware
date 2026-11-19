@@ -497,7 +497,8 @@ fn threshold_recover(
         .recover => {
             const partials = try arbitrary_partials(V, gpa, u, 20, false);
             defer gpa.free(partials);
-            _ = threshold.recover(V, gpa, sharing, partials) catch |err| switch (err) {
+            const strategy = parallel.sequential;
+            _ = threshold.recover(V, gpa, sharing, partials, strategy) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => {},
             };

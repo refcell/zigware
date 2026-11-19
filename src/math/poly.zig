@@ -440,11 +440,33 @@ pub fn Interpolator(comptime I: type, comptime F: type) type {
             evals: []const K,
         ) ?K {
             assert(keys.len == evals.len);
-            if (keys.len != self.keys.len) return null;
-            for (keys, self.keys) |a, b| {
-                if (index_order(I, a, b) != .eq) return null;
-            }
+            if (!self.keys_match(keys)) return null;
             return algebra.msm(K, F, evals, self.weights);
+        }
+
+        fn keys_match(self: Self, keys: []const I) bool {
+            if (keys.len != self.keys.len) return false;
+            for (keys, self.keys) |a, b| {
+                if (index_order(I, a, b) != .eq) return false;
+            }
+            return true;
+        }
+
+        /// `interpolate` with its sum run through `strategy` (commonware's
+        /// `interpolate(evals, strategy)`): `K.msm_strategy(allocator, ..)` when `K` provides
+        /// one, else `interpolate`. Every strategy shape recovers the same constant.
+        pub fn interpolate_strategy(
+            self: Self,
+            comptime K: type,
+            allocator: Allocator,
+            keys: []const I,
+            evals: []const K,
+            strategy: anytype,
+        ) Allocator.Error!?K {
+            if (comptime !@hasDecl(K, "msm_strategy")) return self.interpolate(K, keys, evals);
+            assert(keys.len == evals.len);
+            if (!self.keys_match(keys)) return null;
+            return try K.msm_strategy(allocator, evals, self.weights, strategy);
         }
     };
 }

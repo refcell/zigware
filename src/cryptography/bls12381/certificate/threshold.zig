@@ -375,7 +375,6 @@ pub fn Scheme(comptime Sub: type, comptime F: type, comptime P: type, comptime V
             attestations: []const Attestation,
             strategy: anytype,
         ) (base.AssemblyError || Allocator.Error)!Self.Certificate {
-            _ = strategy;
             assert(attestations.len > 0);
             const polynomial = self.committee_or_panic().polynomial;
             const partials = try gpa.alloc(PartialSignature(V), attestations.len);
@@ -390,7 +389,7 @@ pub fn Scheme(comptime Sub: type, comptime F: type, comptime P: type, comptime V
             var signers = try base.Signers.init(gpa, polynomial.total, indices);
             defer signers.deinit(gpa);
             try signers.require(polynomial.required());
-            const signature = threshold.recover(V, gpa, polynomial, partials) catch |err|
+            const signature = threshold.recover(V, gpa, polynomial, partials, strategy) catch |err|
                 switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.RecoveryFailed,

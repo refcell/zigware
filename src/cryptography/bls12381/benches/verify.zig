@@ -271,20 +271,29 @@ fn bench_scheme_same_signer(runner: *bench.Runner) !void {
 
 fn Msm(comptime P: type) type {
     return struct {
+        gpa: Allocator,
         points: []const P,
         scalars: []const Scalar,
+        strategy: parallel.Rayon,
 
-        pub fn iter(workload: *@This()) P {
-            return P.msm(workload.points, workload.scalars);
+        pub fn iter(workload: *@This()) !P {
+            const gpa = workload.gpa;
+            return P.msm_strategy(gpa, workload.points, workload.scalars, workload.strategy);
         }
     };
 }
 
-fn bench_msm_group(runner: *bench.Runner, comptime P: type, n: usize) !void {
+fn bench_msm_group(
+    runner: *bench.Runner,
+    comptime P: type,
+    n: usize,
+    threads: *parallel.ThreadPool,
+    conc: usize,
+) !void {
     const gpa = runner.allocator;
     const name = bench.Benchmark.init("bls12381::msm")
         .with_param("group", if (P == G1) "g1" else "g2")
-        .with_param("n", n).with_param("conc", 1);
+        .with_param("n", n).with_param("conc", conc);
     if (try skip(runner, name)) return;
     var rng = utils.test_rng();
     const points = try gpa.alloc(P, n);
@@ -293,14 +302,22 @@ fn bench_msm_group(runner: *bench.Runner, comptime P: type, n: usize) !void {
     const scalars = try gpa.alloc(Scalar, n);
     defer gpa.free(scalars);
     for (scalars) |*scalar| scalar.* = Scalar.random(&rng);
-    var workload: Msm(P) = .{ .points = points, .scalars = scalars };
+    var workload: Msm(P) = .{
+        .gpa = gpa,
+        .points = points,
+        .scalars = scalars,
+        .strategy = common.strategy(threads, conc),
+    };
     try runner.run(name, &workload);
 }
 
 fn bench_msm(runner: *bench.Runner) !void {
+    const threads = try common.pool(runner);
+    defer threads.destroy();
     for (cases(runner, usize, &.{ 10, 50, 100, 200, 1000, 5000 })) |n| {
-        try bench_msm_group(runner, G1, n);
-        try bench_msm_group(runner, G2, n);
+        inline for (.{ G1, G2 }) |P| for (common.concurrencies) |conc| {
+            try bench_msm_group(runner, P, n, threads, conc);
+        };
     }
 }
 
