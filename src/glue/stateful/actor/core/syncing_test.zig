@@ -775,3 +775,88 @@ test "stateful syncing: an aborted handoff flush cancels the ack and keeps sync 
     }
     return error.TestFlushNeverAborted;
 }
+
+/// Finalizes block `index` with a fresh acknowledgement while the window has room.
+fn finalize_retained(h: *TestHarness, index: usize) !Exact.Waiter {
+    const handle = try Exact.handle(gpa, io);
+    const block = try harness_mod.digested(h.blocks[index]);
+    try testing.expect(try h.syncing.finalized(block, handle.acknowledgement) == null);
+    try testing.expect(handle.waiter.poll() == null);
+    try testing.expectError(error.Empty, h.syncer_receiver.try_recv());
+    return handle.waiter;
+}
+
+/// Commonware's `live_floor_redelivery_applies_once_and_holds_receipts_until_durability`,
+/// with marshal's side replayed: installing a live floor at block 2 keeps marshal at block 1
+/// and redelivers blocks 2 and 3 with fresh receipts (syncer/actor_marshal_test.zig checks
+/// that against a real marshal). The handoff applies each block once; with `budget` storage
+/// writes allowed, it returns true once only the flush failed, keeping all four receipts.
+fn live_floor_redelivery(budget: ?u64) !bool {
+    var h: TestHarness = undefined;
+    try h.init(4);
+    defer h.deinit();
+    var finalizations: harness_mod.Probe = .{ .target = null };
+    defer finalizations.deinit();
+    h.syncing.config.app.finalized_probe = &finalizations;
+    var waiters: [4]Exact.Waiter = undefined;
+    var made: usize = 0;
+    defer for (waiters[0..made]) |*waiter| waiter.deinit();
+    // Blocks 2 and 3, then block 2 redelivered: the window is not full.
+    for ([_]usize{ 1, 2, 1 }) |index| {
+        waiters[made] = try finalize_retained(&h, index);
+        made += 1;
+    }
+    // The redelivered block 3 is the fourth receipt: it fills the window and retargets.
+    const handle = try Exact.handle(gpa, io);
+    waiters[made] = handle.waiter;
+    made += 1;
+    var task: FinalizedTask = .{
+        .syncing = &h.syncing,
+        .block = try harness_mod.digested(h.blocks[2]),
+        .acknowledgement = handle.acknowledgement,
+    };
+    var future = try io.concurrent(FinalizedTask.run, .{&task});
+    var retarget = try next_retarget(&h.syncer_receiver);
+    try retarget.response.send(try h.artifact(0));
+    retarget.update.discard();
+    future.await(io);
+    const artifact = (try task.result).?;
+    try testing.expectEqual(@as(usize, 4), h.syncing.pending.items.len);
+
+    if (budget) |allowed| h.source.storage.allow_mutations(allowed);
+    const outcome = h.syncing.transition(artifact);
+    h.source.storage.mutations_allowed = null;
+    if (outcome) |ready| {
+        var owned = ready;
+        defer release_ready(&owned);
+        if (budget != null) return error.TestHandoffBecameDurable;
+        // The flush releases every receipt; blocks 2 and 3 applied once each.
+        for (&waiters) |*waiter| try waiter.wait();
+        try testing.expectEqual(@as(u32, 2), finalizations.calls);
+        try testing.expectEqual(@as(u64, 3), h.plan.completed.?.get());
+        return true;
+    } else |err| {
+        if (budget == null) return err;
+        // Failed before the flush, or before both blocks applied.
+        if (err != error.DatabaseSyncFailed or finalizations.calls < 2) return false;
+    }
+    // A failed flush stops the handoff: no receipt is released and sync stays incomplete.
+    try testing.expectEqual(@as(u32, 2), finalizations.calls);
+    for (&waiters) |*waiter| try testing.expect(waiter.poll() == null);
+    try testing.expectEqual(@as(?Height, null), h.plan.completed);
+    h.syncing.deinit();
+    h.syncing_alive = false;
+    for (&waiters) |*waiter| try testing.expectError(error.AcknowledgementCanceled, waiter.wait());
+    return true;
+}
+
+test "stateful syncing: a live floor redelivery applies once and releases receipts after flush" {
+    try testing.expect(try live_floor_redelivery(null));
+}
+
+test "stateful syncing: a live floor redelivery holds every receipt when its flush fails" {
+    for (0..256) |budget| {
+        if (try live_floor_redelivery(budget)) return;
+    }
+    return error.TestFlushNeverAborted;
+}

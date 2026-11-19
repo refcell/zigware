@@ -368,11 +368,11 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/syncer/mod.rs (conformance) | 1 | 1 | 0 | 0 | |
 | stateful/actor/core/mailbox.rs | 2 | 2 | 0 | 0 | |
 | stateful/actor/core/mod.rs | 4 | 4 | 0 | 0 | |
-| stateful/actor/core/syncing.rs | 16 | 13 | 2 | 1 | d |
+| stateful/actor/core/syncing.rs | 16 | 15 | 0 | 1 | |
 | stateful/actor/core/processing.rs | 86 | 0 | 86 | 0 | u |
 | stateful/actor/processor/mod.rs | 44 | 22 | 22 | 0 | u |
 | stateful/tests/mod.rs, floor.rs | 28 | 17 | 11 | 0 | j |
-| **total** | **469** | **324** | **121** | **24** | |
+| **total** | **469** | **326** | **119** | **24** | |
 
 - Not portable (db/mod.rs, 22): zigware's `Barrier` is synchronous (databases persist inside
   `finalize`), so `barrier_waits_for_every_handle` (8), `barrier_cancellation_releases_handles`
@@ -403,8 +403,10 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
     retarget, and shutdown (2) tests are in core/syncing_test.zig, on commonware's
     `TestHarness` (`Syncing.assemble` around a syncer mailbox the test answers as the
     coordinator), with the aborted-flush case (the mock storage's write budget raised until
-    only the handoff barrier fails). Open: the live-floor redelivery rstest (2, a real marshal
-    reporting into the stateful mailbox). Not portable:
+    only the handoff barrier fails), and the live-floor redelivery rstest (2). That one replays
+    marshal's redeliveries (blocks 2 and 3 again, with fresh receipts) into `finalized`:
+    the marshal fixture runs marshal's mock block, not the processor harness's, and
+    syncer/actor_marshal_test.zig checks the redelivery against a real marshal. Not portable:
     `transition_coalesces_handoff_durability_before_completion` gates an asynchronous flush;
     zigware's barrier is synchronous, and the partial-window test checks the
     ack-before-completion order it also covers.
