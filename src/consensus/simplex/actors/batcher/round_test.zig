@@ -421,3 +421,63 @@ test "a finalization or our own finalize establishes the proposal" {
         try testing.expect(round.try_forward_proposal(.init(0)).?.eql(proposal(3)));
     }
 }
+
+// commonware `test_skipped_round_reports_without_retaining`: a skipped view's round reports
+// and deduplicates votes but keeps none, so a full quorum assembles nothing there.
+test "a skipped round reports votes once without retaining them" {
+    const gpa = testing.allocator;
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const log = &h.log;
+    var round = Round.skipped(at, &h.fixture.schemes[0], .{ .log = log }, .{ .log = log });
+    defer round.deinit(gpa);
+    round.set_leader(.init(0));
+    for (0..5) |index| {
+        const vote = try h.notarize(index, 1);
+        try testing.expect(try round.add_network(gpa, h.peer(index), vote));
+        try testing.expect(!try round.add_network(gpa, h.peer(index), vote));
+    }
+    try testing.expectEqual(5, h.log.activities.items.len);
+    var rng = utils.rng.test_rng();
+    try testing.expectEqual(null, try round.try_construct(gpa, &rng, sequential));
+    try testing.expectEqual(null, round.try_forward_proposal(.init(4)));
+}
+
+// commonware `test_skipped_round_redelivery_across_certificate_is_not_conflict`: a vote
+// remembered before the proposal was known is a duplicate when redelivered after a
+// certificate, while a vote for another proposal is then a conflict.
+test "a skipped round's redelivered vote across a certificate is a duplicate" {
+    const gpa = testing.allocator;
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const log = &h.log;
+    var round = Round.skipped(at, &h.fixture.schemes[0], .{ .log = log }, .{ .log = log });
+    defer round.deinit(gpa);
+    const vote = try h.notarize(1, 1);
+    try testing.expect(try round.add_network(gpa, h.peer(1), vote));
+    var notarization = try build_certificate(&h.fixture, .notarization, 1, 4);
+    defer notarization.deinit(gpa);
+    _ = try round.record_certificate(gpa, &notarization);
+    try testing.expect(!try round.add_network(gpa, h.peer(1), vote));
+    try testing.expectEqual(0, h.log.blocked.items.len);
+    try testing.expect(!try round.add_network(gpa, h.peer(1), try h.notarize(1, 2)));
+    try testing.expectEqual(1, h.log.blocked.items.len);
+    try testing.expect(h.log.blocked.items[0].eql(h.peer(1)));
+}
+
+// commonware `test_conflicting_finalize_creates_evidence` (round level): finalizes for two
+// proposals from one signer are reported as a fault and block it.
+test "round reports conflicting finalizes as evidence" {
+    const gpa = testing.allocator;
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var round = h.round(0);
+    defer round.deinit(gpa);
+    try testing.expect(try round.add_network(gpa, h.peer(1), try h.finalize(1, 1)));
+    try testing.expect(!try round.add_network(gpa, h.peer(1), try h.finalize(1, 2)));
+    try testing.expectEqual(1, count_activities(&h.log, .conflicting_finalize));
+    try testing.expectEqual(1, h.log.blocked.items.len);
+}
