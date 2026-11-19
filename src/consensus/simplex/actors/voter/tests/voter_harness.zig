@@ -866,6 +866,62 @@ pub fn Harness(comptime F: type) type {
             return application_mod.genesis(Sha256, epoch);
         }
 
+        /// One expected labeled counter value.
+        pub const Sample = struct { []const u8, u64 };
+
+        /// Expects the nonzero series of counter `family` (`<scope>_<family>_total{label="v"}`)
+        /// to be exactly `expected` (commonware `labeled_metric_snapshot`).
+        pub fn expect_counters(
+            ctx: Ctx,
+            family: []const u8,
+            label: []const u8,
+            expected: []const Sample,
+        ) !void {
+            const gpa = ctx.gpa();
+            const encoded = try ctx.scope.encode(gpa);
+            defer gpa.free(encoded);
+            var pattern_buffer: [96]u8 = undefined;
+            const pattern = try std.fmt.bufPrint(&pattern_buffer, "_{s}_total{{{s}=\"", .{
+                family,
+                label,
+            });
+            var matched: usize = 0;
+            var lines = std.mem.splitScalar(u8, encoded, '\n');
+            // Bounded by the encoded text.
+            while (lines.next()) |line| {
+                const at = std.mem.indexOf(u8, line, pattern) orelse continue;
+                const rest = line[at + pattern.len ..];
+                const quote = std.mem.indexOfScalar(u8, rest, '"') orelse continue;
+                const space = std.mem.lastIndexOfScalar(u8, line, ' ') orelse continue;
+                const count = try std.fmt.parseInt(u64, line[space + 1 ..], 10);
+                if (count == 0) continue;
+                const value = rest[0..quote];
+                for (expected) |sample| {
+                    if (!std.mem.eql(u8, sample[0], value)) continue;
+                    try std.testing.expectEqual(sample[1], count);
+                    matched += 1;
+                    break;
+                } else {
+                    std.debug.print(
+                        "unexpected {s} {s}={s}: {d}\n",
+                        .{ family, label, value, count },
+                    );
+                    return error.UnexpectedCounter;
+                }
+            }
+            try std.testing.expectEqual(expected.len, matched);
+        }
+
+        /// commonware `assert_handoff_metrics`.
+        pub fn expect_handoff_metrics(
+            ctx: Ctx,
+            events: []const Sample,
+            abandoned: []const Sample,
+        ) !void {
+            try expect_counters(ctx, "handoff_events", "event", events);
+            try expect_counters(ctx, "handoff_abandoned", "reason", abandoned);
+        }
+
         /// The position among debug events of the first `content` event whose innermost span is
         /// `span_name` at `view` (commonware `trace_position`).
         pub fn trace_position(
