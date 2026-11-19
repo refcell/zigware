@@ -17,7 +17,11 @@ pub const conformance = @import("conformance.zig");
 pub const buffer = @import("buffer/mod.zig");
 pub const telemetry = @import("telemetry/mod.zig");
 pub const production = @import("production/mod.zig");
+pub const process = struct {
+    pub const metered = @import("process/metered.zig");
+};
 
 test {
     std.testing.refAllDecls(@This());
+    _ = process.metered;
 }

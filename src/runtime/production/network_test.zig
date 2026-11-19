@@ -229,3 +229,170 @@ test "an io_uring recv of partial data times out (test_read_timeout_with_partial
     var accepted = try reader.await(io);
     defer accepted.deinit();
 }
+
+/// A network with `config`, over the shared test ring when `ring` is set.
+fn network_with(config: production.Config, ring: bool) Network {
+    var with_ring = config;
+    if (ring) with_ring.ring = &test_ring;
+    return .init(testing.allocator, testing.io, with_ring);
+}
+
+/// One loopback connection: a dial completes into the accept queue, so one task drives both
+/// ends and controls what each of the stream's fills sees.
+const Pair = struct {
+    listener: *Network.Listener,
+    connection: Network.Connection,
+    accepted: Network.Accepted,
+
+    fn init(tcp: *Network) !Pair {
+        const listener = try tcp.bind(any_port);
+        errdefer listener.deinit();
+        var connection = try tcp.dial(listener.local_addr());
+        errdefer connection.deinit();
+        const accepted = try listener.accept();
+        return .{ .listener = listener, .connection = connection, .accepted = accepted };
+    }
+
+    fn deinit(pair: *Pair) void {
+        pair.accepted.deinit();
+        pair.connection.deinit();
+        pair.listener.deinit();
+    }
+};
+
+/// Runs `body(ring)` on std.Io, then over io_uring where the kernel gives a ring.
+fn on_both(comptime body: fn (bool) anyerror!void) !void {
+    try body(false);
+    init_test_ring() catch return; // Skipped: the kernel gives no ring.
+    defer test_ring.deinit();
+    try body(true);
+}
+
+fn empty_operations(ring: bool) !void {
+    var tcp = network_with(.{}, ring);
+    defer tcp.deinit();
+    var pair = try Pair.init(&tcp);
+    defer pair.deinit();
+    try testing.expectEqual(@as(usize, 0), pair.accepted.stream.peek(1).len);
+    try pair.accepted.sink.send(&.{});
+    try pair.accepted.sink.send(&.{""});
+    try pair.accepted.stream.recv(&.{});
+}
+
+test "empty sends, recv(0), and peek on a fresh accept succeed" {
+    // commonware `test_queued_accept_and_empty_operations_without_worker`.
+    try on_both(empty_operations);
+}
+
+fn unbuffered(ring: bool) !void {
+    var tcp = network_with(.{ .read_buffer_size = 0 }, ring);
+    defer tcp.deinit();
+    var pair = try Pair.init(&tcp);
+    defer pair.deinit();
+    const stream = &pair.accepted.stream;
+    for ([_][5]u8{ .{ 1, 2, 3, 4, 5 }, .{ 6, 7, 8, 9, 10 } }) |message| {
+        try pair.connection.sink.send(&.{&message});
+        try testing.expectEqual(@as(usize, 0), stream.peek(100).len);
+        var received: [5]u8 = undefined;
+        try stream.recv(&received);
+        try testing.expectEqualSlices(u8, &message, &received);
+        try testing.expectEqual(@as(usize, 0), stream.peek(100).len);
+    }
+}
+
+test "a zero read buffer reads unbuffered, also over io_uring (iouring.rs test_unbuffered_mode)" {
+    try on_both(unbuffered);
+}
+
+fn expect_recv(stream: *production.Stream, comptime expected: []const u8) !void {
+    var received: [expected.len]u8 = undefined;
+    try stream.recv(&received);
+    try testing.expectEqualStrings(expected, &received);
+}
+
+fn buffered_peek(ring: bool) !void {
+    var tcp = network_with(.{ .read_buffer_size = 64 }, ring);
+    defer tcp.deinit();
+    var pair = try Pair.init(&tcp);
+    defer pair.deinit();
+    const sink = &pair.connection.sink;
+    const stream = &pair.accepted.stream;
+    try testing.expectEqual(@as(usize, 0), stream.peek(100).len);
+    try sink.send(&.{"hello world"});
+    try expect_recv(stream, "hello");
+    // Peeking does not consume bytes and respects the requested limit.
+    try testing.expectEqualStrings(" world", stream.peek(100));
+    try testing.expectEqualStrings(" wo", stream.peek(3));
+    try testing.expectEqual(@as(usize, 0), stream.peek(0).len);
+    // A shorter refill replaces the previous readable extent.
+    try sink.send(&.{"xy"});
+    try expect_recv(stream, " worldx");
+    try testing.expectEqualStrings("y", stream.peek(100));
+    // A buffered prefix survives the direct path.
+    const direct: [64]u8 = @splat('z');
+    try sink.send(&.{&direct});
+    try expect_recv(stream, "y" ++ direct);
+    try testing.expectEqual(@as(usize, 0), stream.peek(100).len);
+    try sink.send(&.{"next"});
+    try expect_recv(stream, "ne");
+    try testing.expectEqualStrings("xt", stream.peek(100));
+    try expect_recv(stream, "xt");
+    try testing.expectEqual(@as(usize, 0), stream.peek(100).len);
+}
+
+test "buffered peek, a shorter refill, and the direct path keep their prefix" {
+    // commonware iouring.rs `test_peek_with_buffered_data`.
+    try on_both(buffered_peek);
+}
+
+fn large_recv(ring: bool) !void {
+    var tcp = network_with(.{ .read_buffer_size = 8 }, ring);
+    defer tcp.deinit();
+    var pair = try Pair.init(&tcp);
+    defer pair.deinit();
+    try pair.connection.sink.send(&.{"abcdefgh"});
+    try expect_recv(&pair.accepted.stream, "abcdefgh");
+    try testing.expectEqual(@as(usize, 0), pair.accepted.stream.peek(1).len);
+}
+
+test "a recv of the read buffer's size skips it (test_large_recv_skips_internal_buffer)" {
+    try on_both(large_recv);
+}
+
+const linux = std.os.linux;
+
+/// TCP_NODELAY and whether SO_LINGER is on with a zero timeout.
+fn socket_options(fd: linux.fd_t) !struct { bool, bool } {
+    var nodelay: i32 = 0;
+    var nodelay_len: linux.socklen_t = @sizeOf(i32);
+    const level_tcp: i32 = linux.IPPROTO.TCP;
+    var rc = linux.getsockopt(fd, level_tcp, linux.TCP.NODELAY, @ptrCast(&nodelay), &nodelay_len);
+    try testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
+    var linger: extern struct { on: i32, seconds: i32 } = undefined;
+    var linger_len: linux.socklen_t = @sizeOf(@TypeOf(linger));
+    rc = linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.LINGER, @ptrCast(&linger), &linger_len);
+    try testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
+    return .{ nodelay != 0, linger.on != 0 and linger.seconds == 0 };
+}
+
+fn socket_policy(ring: bool) !void {
+    const cases = [_]struct { ?bool, bool }{ .{ true, true }, .{ false, false }, .{ null, false } };
+    for (cases) |case| {
+        const nodelay, const zero_linger = case;
+        var tcp = network_with(.{ .tcp_nodelay = nodelay, .zero_linger = zero_linger }, ring);
+        defer tcp.deinit();
+        var pair = try Pair.init(&tcp);
+        defer pair.deinit();
+        // Unconfigured sockets keep Nagle on and lingering off.
+        const expected = .{ nodelay orelse false, zero_linger };
+        for ([_]*production.Sink{ &pair.connection.sink, &pair.accepted.sink }) |sink| {
+            const options = try socket_options(sink.shared.stream.socket.handle);
+            try testing.expectEqual(expected, options);
+        }
+    }
+}
+
+test "socket options apply on accept and dial (test_socket_options_on_accept_and_dial)" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    try on_both(socket_policy);
+}

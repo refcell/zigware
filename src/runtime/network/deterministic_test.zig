@@ -256,3 +256,57 @@ test "metered network passes the network suite (test_trait)" {
     try testing.expect(received > 0 and received <= sent);
     try testing.expect(suite_metrics.outbound_connections.metric().get() > 0);
 }
+
+/// The auditor `new_audited_network` records into; set by the test that uses it.
+var suite_auditor: runtime_deterministic.Auditor = .{};
+
+fn new_audited_network(io: Io) Network {
+    var net = new_network(io);
+    net.auditor = &suite_auditor;
+    return net;
+}
+
+fn audited_suite(io: Io) !void {
+    try network.tests.run_network_tests(io, Network, new_audited_network);
+}
+
+fn audited_stress(io: Io) !void {
+    try network.tests.run_network_stress_tests(io, Network, new_audited_network);
+}
+
+fn metered_stress(io: Io) !void {
+    try network.tests.run_network_stress_tests(io, Network, new_metered_network);
+}
+
+/// Runs `body` over audited networks and checks they recorded events.
+fn expect_audited(body: fn (Io) anyerror!void) !void {
+    suite_auditor = .{};
+    const before = suite_auditor.state();
+    var runner = try runtime_deterministic.Runner.init(testing.allocator, .{});
+    defer runner.deinit();
+    try (try runner.start(body, .{runner.io()}));
+    try testing.expect(!std.mem.eql(u8, &before, &suite_auditor.state()));
+}
+
+test "audited network passes the network suite (test_trait)" {
+    try expect_audited(audited_suite);
+}
+
+test "audited network stress (test_stress_trait, slow)" {
+    if (!build_options.slow_tests) return error.SkipZigTest;
+    try expect_audited(audited_stress);
+}
+
+test "metered network stress (test_stress_trait, slow)" {
+    if (!build_options.slow_tests) return error.SkipZigTest;
+    const metrics = @import("../telemetry/metrics/mod.zig");
+    var registry: metrics.Registry = .init(testing.allocator);
+    defer registry.deinit();
+    const scope: metrics.Scope = .init(&registry);
+    suite_metrics = try .init(&scope);
+    defer suite_metrics.deinit();
+    var runner = try runtime_deterministic.Runner.init(testing.allocator, .{});
+    defer runner.deinit();
+    try (try runner.start(metered_stress, .{runner.io()}));
+    try testing.expect(suite_metrics.inbound_bandwidth.metric().get() > 0);
+}

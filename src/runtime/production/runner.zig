@@ -18,6 +18,7 @@ const tcp_network = @import("network.zig");
 const ring_mod = @import("ring.zig");
 const system_resolver_mod = @import("resolver.zig");
 const context_mod = @import("../context.zig");
+const process = @import("../process/metered.zig");
 
 pub const Error = iface.Error;
 
@@ -59,6 +60,9 @@ pub const Runner = struct {
     tcp: tcp_network.Network,
     /// The metrics registry. Release every handle before `deinit`.
     metrics_registry: telemetry.metrics.Registry,
+    /// `runtime_process_rss` and `runtime_process_virtual_memory`, refreshed while `start` or
+    /// `start_context` runs (commonware spawns the collector for the runtime's life).
+    process_metrics: process.Metrics,
     /// What every `Context` shares, created by the first `start_context`.
     context_runtime: ?context_mod.Runtime,
     max_contexts: u32,
@@ -76,6 +80,10 @@ pub const Runner = struct {
             .async_limit = if (config.worker_threads) |count| .limited(count) else null,
         });
         errdefer runner.threaded.deinit();
+        runner.metrics_registry = .init(gpa);
+        errdefer runner.metrics_registry.deinit();
+        runner.process_metrics = try .init(&runner.metrics().sub_registry("runtime"));
+        errdefer runner.process_metrics.deinit();
         const runner_io = runner.threaded.io();
         var storage_config = config.storage;
         var network_config = config.network;
@@ -91,7 +99,6 @@ pub const Runner = struct {
         errdefer root.close(runner_io);
         runner.file_storage = try .init(runner_io, gpa, root, storage_config);
         runner.tcp = .init(gpa, runner_io, network_config);
-        runner.metrics_registry = .init(gpa);
         runner.context_runtime = null;
         runner.max_contexts = config.max_contexts;
         runner.subscriber = config.subscriber;
@@ -103,6 +110,7 @@ pub const Runner = struct {
     /// Every blob, listener, and connection must be closed first.
     pub fn deinit(runner: *Runner) void {
         if (runner.context_runtime) |*runtime| runtime.deinit();
+        runner.process_metrics.deinit();
         runner.metrics_registry.deinit();
         runner.tcp.deinit();
         runner.file_storage.deinit();
@@ -140,7 +148,27 @@ pub const Runner = struct {
     ) @typeInfo(@TypeOf(function)).@"fn".return_type.? {
         // The runner has not moved since `init`.
         assert(runner.tcp.io.userdata == @as(?*anyopaque, &runner.threaded));
+        var collector = runner.collector_start();
+        defer runner.collector_stop(&collector);
         return @call(.auto, function, args);
+    }
+
+    const Collector = ?Io.Future(Io.Cancelable!void);
+
+    /// Refreshes the process metrics now, then every tick on a task of their own (none when
+    /// no thread is free: they then hold the first reading).
+    fn collector_start(runner: *Runner) Collector {
+        const io_ = runner.io();
+        // A cancel arriving here belongs to the caller: re-arm it for the body to see.
+        runner.process_metrics.update(io_) catch io_.recancel();
+        return io_.concurrent(process.Metrics.collect, .{ &runner.process_metrics, io_ }) catch
+            null;
+    }
+
+    fn collector_stop(runner: *Runner, collector: *Collector) void {
+        const future = &(collector.* orelse return);
+        future.cancel(runner.io()) catch |err| assert(err == error.Canceled);
+        collector.* = null;
     }
 
     /// Runs `function(ctx, args...)` on the calling thread with a root `Context` over this
@@ -161,6 +189,8 @@ pub const Runner = struct {
         }
         const runtime = &runner.context_runtime.?;
         const ctx: Context = .root(runtime, runner.storage(), runner.network(), runner.metrics());
+        var collector = runner.collector_start();
+        defer runner.collector_stop(&collector);
         return ctx.run_root(function, args);
     }
 };

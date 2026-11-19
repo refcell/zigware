@@ -259,26 +259,26 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 Open (none are in runtime/src/telemetry/, the runtime-telemetry lane's directory):
 - [ ] `deterministic.rs:1742` `test_logical_open_releases_retained_mutations`: unsynced fragments of
   a closed open are not replayed after reopen
-- [ ] `network/audited.rs:233` `test_trait`: network suite over the audited deterministic network
+- [x] `network/audited.rs:233` `test_trait`: network suite over the audited deterministic network
   (auditor set)
-- [ ] `network/audited.rs:252` `test_stress_trait`: stress suite over the audited deterministic
+- [x] `network/audited.rs:252` `test_stress_trait`: stress suite over the audited deterministic
   network (slow)
-- [ ] `network/iouring.rs:608` `test_queued_accept_and_empty_operations_without_worker`: io_uring
+- [x] `network/iouring.rs:608` `test_queued_accept_and_empty_operations_without_worker`: io_uring
   network: empty sends, recv(0), peek on fresh accept succeed
-- [ ] `network/iouring.rs:810` `test_unbuffered_mode`: io_uring network with read_buffer_size 0
+- [x] `network/iouring.rs:810` `test_unbuffered_mode`: io_uring network with read_buffer_size 0
   leaves nothing buffered
-- [ ] `network/iouring.rs:884` `test_peek_with_buffered_data`: io_uring buffered peek, shorter
+- [x] `network/iouring.rs:884` `test_peek_with_buffered_data`: io_uring buffered peek, shorter
   refill, and direct path keep prefix
-- [ ] `network/iouring.rs:947` `test_large_recv_skips_internal_buffer`: recv of exactly
+- [x] `network/iouring.rs:947` `test_large_recv_skips_internal_buffer`: recv of exactly
   read_buffer_size bypasses the buffer (io_uring)
-- [ ] `network/iouring.rs:975` `test_socket_options_on_accept_and_dial`: tcp_nodelay and zero_linger
+- [x] `network/iouring.rs:975` `test_socket_options_on_accept_and_dial`: tcp_nodelay and zero_linger
   applied on accept and dial
-- [ ] `network/metered.rs:201` `test_stress_trait`: stress suite over the metered network (slow)
-- [ ] `process/metered.rs:116` `test_process_metrics_init`: process metrics report RSS above 1 MiB
+- [x] `network/metered.rs:201` `test_stress_trait`: stress suite over the metered network (slow)
+- [x] `process/metered.rs:116` `test_process_metrics_init`: process metrics report RSS above 1 MiB
   and virtual memory >= RSS
-- [ ] `tokio/runtime.rs:1027` `test_storage_blob_layout_restriction`: runner storage layout policy:
+- [x] `tokio/runtime.rs:1027` `test_storage_blob_layout_restriction`: runner storage layout policy:
   reject other layouts untouched, create allowed one
-- [ ] `tokio/runtime.rs:1620` `test_process_rss_metric`: production runner publishes a positive
+- [x] `tokio/runtime.rs:1620` `test_process_rss_metric`: production runner publishes a positive
   runtime_process_rss gauge
 - [x] `utils/buffer/mod.rs:891` `test_read_resize_to_zero`: Read.resize(0) truncates the blob; a
   reopened reader's read fails

@@ -47,13 +47,16 @@ fn first_run(runner: *Runner) !void {
     echoes.metric().inc();
     const encoded = try runner.metrics().encode(testing.allocator);
     defer testing.allocator.free(encoded);
-    try testing.expectEqualStrings(
+    // The runner's own `runtime_process_*` gauges are encoded too.
+    const echoes_family =
         \\# HELP node_echoes Echoes served.
         \\# TYPE node_echoes counter
         \\node_echoes_total 1
-        \\# EOF
         \\
-    , encoded);
+    ;
+    try testing.expect(std.mem.startsWith(u8, encoded, echoes_family));
+    try testing.expect(std.mem.endsWith(u8, encoded, "# EOF\n"));
+    try testing.expect(std.mem.indexOf(u8, encoded, "\nruntime_process_rss ") != null);
 }
 
 fn second_run(runner: *Runner) !void {
@@ -151,4 +154,113 @@ test "the production runner runs a supervised Context root (start_context)" {
     defer runner.deinit();
     var started: std.Io.Event = .unset;
     try (try runner.start_context(context_root, .{&started}));
+}
+
+const iface = @import("../storage.zig");
+const header = @import("../storage/header.zig");
+
+/// Opens a runner over `path` whose storage accepts and creates only `layouts`.
+fn layout_runner(runner: *Runner, path: []const u8, layout: ?iface.BlobLayout) !void {
+    const storage: @import("storage.zig").Config = if (layout) |only|
+        .{ .layouts = .only(only), .layout = only }
+    else
+        .{};
+    try runner.init(testing.allocator, .{ .storage_directory = path, .storage = storage });
+}
+
+fn read_file(tmp: *testing.TmpDir, path: []const u8) ![]u8 {
+    return tmp.dir.readFileAlloc(testing.io, path, testing.allocator, .unlimited);
+}
+
+test "the runner's storage layout policy (test_storage_blob_layout_restriction)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [64]u8 = undefined;
+    const path = storage_directory(&path_buffer, &tmp);
+    const v0_bytes = try header.blob_bytes(testing.allocator, .v0, 0, "payload");
+    defer testing.allocator.free(v0_bytes);
+    // hex("v0"), hex("v1"), hex("rollback").
+    const v0_path = "runner/layout_restriction/7630";
+    const v1_path = "runner/layout_restriction/7631";
+    const rollback_path = "runner/layout_restriction/726f6c6c6261636b";
+    try tmp.dir.createDirPath(testing.io, "runner/layout_restriction");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = v0_path, .data = v0_bytes });
+    var runner: Runner = undefined;
+
+    // The default policy reads legacy V0 blobs.
+    try layout_runner(&runner, path, null);
+    {
+        defer runner.deinit();
+        const opened = try runner.storage().open("layout_restriction", "v0");
+        defer opened.blob.close();
+        try testing.expectEqual(@as(u64, 7), opened.len);
+        try iface.tests.expect_read(opened.blob, 0, "payload");
+    }
+
+    // A V1-only policy rejects V0 untouched and creates new blobs as V1.
+    try layout_runner(&runner, path, .v1);
+    {
+        defer runner.deinit();
+        const v0 = runner.storage().open("layout_restriction", "v0");
+        try testing.expectError(error.BlobLayoutMismatch, v0);
+        (try runner.storage().open("layout_restriction", "v1")).blob.close();
+    }
+    const v0_after = try read_file(&tmp, v0_path);
+    defer testing.allocator.free(v0_after);
+    try testing.expectEqualSlices(u8, v0_bytes, v0_after);
+    const v1 = try read_file(&tmp, v1_path);
+    defer testing.allocator.free(v1);
+    try testing.expectEqualSlices(u8, &header.magic(.v1), v1[0..header.magic_length]);
+
+    // A V0-only policy rejects the header-only V1 blob without healing it and creates V0.
+    try layout_runner(&runner, path, .v0);
+    {
+        defer runner.deinit();
+        const v1_open = runner.storage().open("layout_restriction", "v1");
+        try testing.expectError(error.BlobLayoutMismatch, v1_open);
+        const created = try runner.storage().open("layout_restriction", "rollback");
+        try testing.expectEqual(@as(u64, 0), created.len);
+        try created.blob.write_at(0, "rollback!", .{ .sync = true });
+        created.blob.close();
+        const reopened = try runner.storage().open("layout_restriction", "rollback");
+        defer reopened.blob.close();
+        try testing.expectEqual(@as(u64, 9), reopened.len);
+        try iface.tests.expect_read(reopened.blob, 0, "rollback!");
+    }
+    const v1_after = try read_file(&tmp, v1_path);
+    defer testing.allocator.free(v1_after);
+    try testing.expectEqualSlices(u8, v1, v1_after);
+    const rollback = try read_file(&tmp, rollback_path);
+    defer testing.allocator.free(rollback);
+    try testing.expectEqualSlices(u8, &header.magic(.v0), rollback[0..header.magic_length]);
+    try testing.expectEqualStrings("rollback!", rollback[header.prelude_size..]);
+}
+
+fn expect_rss_published(runner: *Runner) !void {
+    const text = try runner.metrics_registry.encode(testing.allocator);
+    defer testing.allocator.free(text);
+    // The sample line, not its `# HELP` or `# TYPE` line.
+    const prefix = "\nruntime_process_rss ";
+    const start = std.mem.indexOf(u8, text, prefix) orelse return error.TestUnexpectedResult;
+    const rest = text[start + prefix.len ..];
+    const end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+    try testing.expect(try std.fmt.parseInt(i64, rest[0..end], 10) > 0);
+}
+
+fn rss_root(ctx: Context, runner: *Runner) anyerror!void {
+    _ = ctx;
+    try expect_rss_published(runner);
+}
+
+test "the production runner publishes runtime_process_rss (test_process_rss_metric)" {
+    if (!@import("../process/metered.zig").supported) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [64]u8 = undefined;
+    const path = storage_directory(&path_buffer, &tmp);
+    var runner: Runner = undefined;
+    try runner.init(testing.allocator, .{ .storage_directory = path });
+    defer runner.deinit();
+    try runner.start(expect_rss_published, .{&runner});
+    try (try runner.start_context(rss_root, .{&runner}));
 }
