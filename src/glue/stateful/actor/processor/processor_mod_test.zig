@@ -241,3 +241,127 @@ test "stateful processor: finalized hooks see cached and reconstructed captures"
     };
     try testing.expectEqualSlices(TestApp.Observation, &expected, observations.items);
 }
+
+// commonware `execution_rejects_late_losing_fork_publication`: work on a losing fork that
+// completes after the winner's finalization is not published to the pending cache.
+test "stateful processor: a late losing fork publication is rejected" {
+    var harness: Harness = undefined;
+    try harness.init();
+    defer harness.deinit();
+    const genesis = TestBlock.genesis();
+    const block1 = try harness.stage_pending_child(&genesis, 1);
+    try harness.finalize(&block1);
+    const loser = try harness.stage_pending_child(&block1, 2);
+    const winner = try harness.stage_pending_child(&block1, 3);
+    const late_child, const merkleized = try harness.build_child(&loser, 4);
+    try harness.finalize(&winner);
+    const entry: harness_mod.Execution.Entry = .{
+        .round = late_child.round,
+        .parent = loser.digest(),
+        .merkleized = merkleized,
+    };
+    try testing.expect(!try harness.execution.cache_pending(late_child.digest(), entry));
+    try testing.expect(!harness.execution.pending_contains(late_child.digest()));
+}
+
+var fork_done: std.atomic.Value(bool) = .init(false);
+
+fn fork_task(harness: *Harness, parent: harness_mod.TestBlock.Digest) anyerror!void {
+    defer fork_done.store(true, .release);
+    var forked = try harness.execution.fork_batches(parent);
+    forked.deinit();
+}
+
+fn finalize_task(harness: *Harness, block: TestBlock) anyerror!void {
+    return harness.finalize(&block);
+}
+
+// commonware `execution_forks_from_finalizing_winner_before_database_apply`: while a
+// finalization waits to apply (a reader holds the database), its block stays forkable.
+test "stateful processor: a finalizing winner stays forkable before the apply" {
+    var harness: Harness = undefined;
+    try harness.init();
+    defer harness.deinit();
+    const genesis = TestBlock.genesis();
+    const winner = try harness.stage_pending_child(&genesis, 1);
+    fork_done.store(false, .release);
+    var guard = try harness.databases.readers().read();
+    var guard_held = true;
+    errdefer if (guard_held) guard.deinit();
+    var finalizing = try testing.io.concurrent(finalize_task, .{ &harness, winner });
+    // On failure, release the reader before stopping the finalization that waits on it.
+    var finalizing_live = true;
+    errdefer if (finalizing_live) {
+        if (guard_held) guard.deinit();
+        guard_held = false;
+        _ = finalizing.cancel(testing.io) catch {};
+    };
+    try testing.io.sleep(.fromMilliseconds(20), .awake); // The apply waits for the reader.
+    // Not applied yet (read through the held guard: a new read would queue behind the apply).
+    try testing.expectEqual(null, try guard.get().inner.get(&harness_mod.counter_key()));
+    // commonware polls the fork once: it must answer without waiting for the apply.
+    var fork = try testing.io.concurrent(fork_task, .{ &harness, winner.digest() });
+    var answered = false;
+    for (0..200) |_| {
+        if (fork_done.load(.acquire)) {
+            answered = true;
+            break;
+        }
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    guard_held = false;
+    guard.deinit(); // Unblocks a fork waiting behind the apply, so the test ends either way.
+    const forked = fork.await(testing.io);
+    finalizing_live = false;
+    try finalizing.await(testing.io);
+    try testing.expect(answered);
+    try forked;
+    try testing.expectEqual(1, try counter(&harness));
+}
+
+fn expect_record(
+    record: TestApp.ProcessRecord,
+    finality: @import("execution.zig").Finality,
+    blocks: []const TestBlock,
+) !void {
+    try testing.expectEqual(finality, record.finality);
+    try testing.expectEqual(blocks.len, record.len);
+    for (blocks, record.digests[0..blocks.len]) |block, digest| {
+        try testing.expect(block.digest().eql(digest));
+    }
+}
+
+// commonware `execution_process_ancestry_survives_recovery_and_finalization`: recovery
+// processes an uncached block as a candidate with ancestry reaching past its parent; the
+// cached result answers a later request without processing again; and finalizing the block
+// once uncached processes it as finalized with the same ancestry.
+test "stateful processor: process ancestry survives recovery and finalization" {
+    var harness: Harness = undefined;
+    try harness.init();
+    defer harness.deinit();
+    var log: std.ArrayList(TestApp.ProcessRecord) = .empty;
+    defer log.deinit(gpa);
+    const genesis = TestBlock.genesis();
+    const block1 = try harness.stage_pending_child(&genesis, 1);
+    try harness.finalize(&block1);
+    const block2 = try harness.stage_pending_child(&block1, 2);
+    try harness.finalize(&block2);
+    const block3 = try harness.stage_pending_child(&block2, 3);
+    harness.execution.state.clear();
+    harness.app.process_log = &log;
+    harness.processor.app.process_log = &log;
+
+    try rebuild(&harness, block3);
+    const expected = [_]TestBlock{ block3, block2, block1 };
+    try testing.expectEqual(1, log.items.len);
+    try expect_record(log.items[0], .candidate, &expected);
+    try testing.expect(harness.execution.pending_contains(block3.digest()));
+    // The cached state answers a later request without processing block3 again.
+    try harness.execution.process_shared(harness.app, try harness.ancestry(&.{block3}));
+    try testing.expectEqual(1, log.items.len);
+    harness.execution.state.clear();
+    try harness.finalize(&block3);
+    try testing.expectEqual(2, log.items.len);
+    try expect_record(log.items[1], .finalized, &expected);
+    try testing.expectEqual(3, try counter(&harness));
+}

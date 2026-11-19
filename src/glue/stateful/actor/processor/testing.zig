@@ -232,7 +232,17 @@ pub const TestApp = struct {
     finalized_probe: ?*Probe = null,
     /// Gates each build on the parent's digest (commonware's proposal gate).
     propose_probe: ?*Probe = null,
+    /// Records each `process` call's finality and first ancestry digests (commonware
+    /// `process_ancestry`).
+    process_log: ?*std.ArrayList(ProcessRecord) = null,
     observations: ?*std.ArrayList(Observation) = null,
+
+    /// One `process` call: its finality and up to three ancestry digests, newest first.
+    pub const ProcessRecord = struct {
+        finality: execution_mod.Finality,
+        digests: [3]Sha256.Digest,
+        len: u32,
+    };
 
     /// Pre-apply reads (commonware `Captured`).
     pub const Captured = struct { prior_counter: ?u64, batch_counter: u64, batch_view: u64 };
@@ -264,9 +274,13 @@ pub const TestApp = struct {
         context: TestBlock.Context,
         ancestry: *Execution.Ancestry,
         batches: Any.Unmerkleized,
-        _: execution_mod.Finality,
+        finality: execution_mod.Finality,
     ) !?Any.Merkleized {
         var owned = batches;
+        if (app.process_log) |log| record_process(log, ancestry, finality) catch |err| {
+            owned.deinit();
+            return err;
+        };
         var block = (ancestry.next() catch |err| {
             owned.deinit();
             return err;
@@ -280,6 +294,23 @@ pub const TestApp = struct {
             return err;
         };
         return try execute(owned, block.inner().height(), context.round.view.get());
+    }
+
+    /// Appends `ancestry`'s first three digests, read from a clone, to `log`.
+    fn record_process(
+        log: *std.ArrayList(ProcessRecord),
+        ancestry: *const Execution.Ancestry,
+        finality: execution_mod.Finality,
+    ) !void {
+        var record: ProcessRecord = .{ .finality = finality, .digests = undefined, .len = 0 };
+        var copy = try ancestry.clone();
+        defer copy.deinit();
+        while (record.len < record.digests.len) : (record.len += 1) {
+            var block = (copy.next() catch break) orelse break;
+            defer block.deinit();
+            record.digests[record.len] = block.digest();
+        }
+        try log.append(gpa, record);
     }
 
     /// Builds the next block on the parent at the head of `ancestry` (commonware
