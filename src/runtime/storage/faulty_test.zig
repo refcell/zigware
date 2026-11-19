@@ -9,6 +9,7 @@ const iface = @import("../storage.zig");
 const memory = @import("memory.zig");
 const header = @import("header.zig");
 const faulty = @import("faulty.zig");
+const mocks = @import("mocks.zig");
 const suite = @import("tests.zig");
 const deterministic = @import("../deterministic.zig");
 
@@ -741,4 +742,28 @@ test "partial resize disabled, same size, or one byte away leaves the size" {
         try h.storage.crash();
         try testing.expectEqual(@as(u64, 0), try h.durable_len("test"));
     }
+}
+
+test "a fault-free faulty blob forwards read options" {
+    // commonware `test_faulty_blob_forwards_read_options_without_faults`: both reads keep
+    // DONT_CACHE. A recording blob under the handle shows what the wrapper forwarded.
+    var h: Seeded = undefined;
+    h.init(.init(42), .{});
+    defer h.deinit();
+    const blob = try h.open("blob");
+    defer blob.close();
+    try blob.write_at(0, "data", .{});
+    const handle: *faulty.Storage(utils.rng.TestRng).Blob = @ptrCast(@alignCast(blob.ptr));
+    var recording: mocks.RecordingBlob = .{ .inner = handle.inner };
+    handle.inner = recording.blob();
+    var buffer: [4]u8 = undefined;
+    for (0..2) |_| {
+        try blob.read_at_options(0, &buffer, .{ .dont_cache = true });
+        try testing.expectEqualStrings("data", &buffer);
+    }
+    try testing.expectEqualSlices(
+        iface.ReadOptions,
+        &.{ .{ .dont_cache = true }, .{ .dont_cache = true } },
+        recording.reads(),
+    );
 }

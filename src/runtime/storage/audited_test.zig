@@ -5,6 +5,7 @@ const testing = std.testing;
 const iface = @import("../storage.zig");
 const memory = @import("memory.zig");
 const audited = @import("audited.zig");
+const mocks = @import("mocks.zig");
 const suite = @import("tests.zig");
 const deterministic = @import("../deterministic.zig");
 
@@ -134,4 +135,60 @@ test "every operation is audited, failed or not" {
     try Step.changed(&h.auditor, &previous);
     try testing.expectError(error.PartitionMissing, s.remove("missing", null));
     try Step.changed(&h.auditor, &previous);
+}
+
+/// An audited blob over memory whose inner handle records what the wrapper forwards.
+const Recorded = struct {
+    blob: iface.Blob,
+    recording: mocks.RecordingBlob,
+
+    fn init(r: *Recorded, h: *Harness) !void {
+        r.blob = (try h.storage.storage().open("partition", "blob")).blob;
+        const handle: *audited.Storage.Blob = @ptrCast(@alignCast(r.blob.ptr));
+        r.recording = .{ .inner = handle.inner };
+        handle.inner = r.recording.blob();
+    }
+};
+
+test "audited blobs forward read options (test_audited_blob_forwards_read_options)" {
+    var h: Harness = undefined;
+    h.init();
+    defer h.deinit();
+    var r: Recorded = undefined;
+    try r.init(&h);
+    defer r.blob.close();
+    try r.blob.write_at(0, "data", .{});
+    var buffer: [4]u8 = undefined;
+    try r.blob.read_at_options(0, &buffer, .{ .dont_cache = true });
+    try r.blob.read_at_options(0, &buffer, .{});
+    try testing.expectEqualStrings("data", &buffer);
+    try testing.expectEqualSlices(
+        iface.ReadOptions,
+        &.{ .{ .dont_cache = true }, .{} },
+        r.recording.reads(),
+    );
+}
+
+test "audited writes keep their chunking and options" {
+    // commonware `test_audited_blob_writes_preserve_chunking_and_options`.
+    var h: Harness = undefined;
+    h.init();
+    defer h.deinit();
+    var r: Recorded = undefined;
+    try r.init(&h);
+    defer r.blob.close();
+    const chunked: []const []const u8 = &.{ "a", "b", "c", "d" };
+    try r.blob.write_at_vectored(0, chunked, .{});
+    try r.blob.write_at_vectored(0, chunked, .{ .sync = true });
+    const both: iface.WriteOptions = .{ .sync = true, .dont_cache = true };
+    try r.blob.write_at(0, "e", both);
+    const Write = mocks.RecordingBlob.Write;
+    try testing.expectEqualSlices(Write, &.{
+        .{ .chunks = 4, .options = .{} },
+        .{ .chunks = 4, .options = .{ .sync = true } },
+        .{ .chunks = 1, .options = both },
+    }, r.recording.writes());
+    var buffer: [4]u8 = undefined;
+    try r.blob.read_at(0, &buffer);
+    try testing.expectEqualStrings("ebcd", &buffer);
 }

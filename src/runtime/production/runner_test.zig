@@ -96,6 +96,21 @@ test "the production runner does the same over io_uring" {
     try run_twice(.{});
 }
 
+test "a file as storage root fails runner init (test_acquire_fails_on_unusable_root)" {
+    // commonware's `Hold::acquire` fails on such a root; here `Runner.init` creates the root
+    // before the storage takes its hold, and both steps fail on a file.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [64]u8 = undefined;
+    const path = storage_directory(&path_buffer, &tmp);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "runner", .data = "not a directory" });
+    var runner: Runner = undefined;
+    try testing.expectError(
+        error.Io,
+        runner.init(testing.allocator, .{ .storage_directory = path }),
+    );
+}
+
 const Context = production.Context;
 
 fn store(ctx: Context, name: []const u8) anyerror!u64 {

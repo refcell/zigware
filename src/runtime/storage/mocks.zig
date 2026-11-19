@@ -654,6 +654,77 @@ pub const SyncGates = struct {
 
 pub const SyncGated = Wrapper(SyncGates);
 
+/// A blob that records each read's options and each write's chunk count and options before
+/// forwarding to `inner` (commonware's test-local `RecordingBlob`s). A test swaps it in as a
+/// wrapper handle's `inner` to see exactly what the wrapper forwarded; it closes `inner`.
+pub const RecordingBlob = struct {
+    pub const capacity = 8;
+    pub const Write = struct { chunks: usize, options: iface.WriteOptions };
+
+    inner: iface.Blob,
+    read_options: [capacity]iface.ReadOptions = undefined,
+    read_count: usize = 0,
+    write_records: [capacity]Write = undefined,
+    write_count: usize = 0,
+
+    pub fn reads(self: *const RecordingBlob) []const iface.ReadOptions {
+        return self.read_options[0..self.read_count];
+    }
+
+    pub fn writes(self: *const RecordingBlob) []const Write {
+        return self.write_records[0..self.write_count];
+    }
+
+    pub fn blob(self: *RecordingBlob) iface.Blob {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable: iface.Blob.VTable = .{
+        .read_at = read_at,
+        .write_at = write_at,
+        .resize = resize,
+        .sync = sync,
+        .close = close,
+    };
+
+    fn of(ptr: *anyopaque) *RecordingBlob {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn read_at(ptr: *anyopaque, offset: u64, buffer: []u8, options: iface.ReadOptions) Error!void {
+        const self = of(ptr);
+        assert(self.read_count < capacity);
+        self.read_options[self.read_count] = options;
+        self.read_count += 1;
+        return self.inner.read_at_options(offset, buffer, options);
+    }
+
+    fn write_at(
+        ptr: *anyopaque,
+        offset: u64,
+        chunks: []const []const u8,
+        options: iface.WriteOptions,
+    ) Error!void {
+        const self = of(ptr);
+        assert(self.write_count < capacity);
+        self.write_records[self.write_count] = .{ .chunks = chunks.len, .options = options };
+        self.write_count += 1;
+        return self.inner.write_at_vectored(offset, chunks, options);
+    }
+
+    fn resize(ptr: *anyopaque, length: u64) Error!void {
+        return of(ptr).inner.resize(length);
+    }
+
+    fn sync(ptr: *anyopaque) Error!void {
+        return of(ptr).inner.sync();
+    }
+
+    fn close(ptr: *anyopaque) void {
+        of(ptr).inner.close();
+    }
+};
+
 test {
     _ = @import("mocks_test.zig");
 }

@@ -273,6 +273,8 @@ pub const Storage = struct {
         var iterator = partition_dir.iterate();
         while (iterator.next(self.io) catch return error.ReadFailed) |entry| {
             if (entry.kind != .file) return error.PartitionCorrupt;
+            // Like commonware, names that are not UTF-8 are skipped, not corrupt.
+            if (!std.unicode.utf8ValidateSlice(entry.name)) continue;
             const decoded = try gpa.alloc(u8, entry.name.len / 2);
             errdefer gpa.free(decoded);
             if (!hex_decode(decoded, entry.name)) return error.PartitionCorrupt;
@@ -494,6 +496,9 @@ pub const Blob = struct {
         _ = options; // `dont_cache` is a hint; std.Io has no per-read cache control.
         const start = try self.raw_offset(offset, buffer.len);
         if (buffer.len == 0) return;
+        // The kernel rejects offsets past the signed file extent (commonware's "read failed");
+        // std.Io would report that EINVAL as a bug.
+        if (start > std.math.maxInt(i64)) return error.ReadFailed;
         const read = try file_read(self.storage, self.file, buffer, start);
         if (read < buffer.len) return error.BlobInsufficientLength;
         assert(read == buffer.len);
@@ -509,6 +514,9 @@ pub const Blob = struct {
         for (chunks) |chunk| total += chunk.len;
         var position = try self.raw_offset(offset, total);
         if (total == 0) return;
+        // Like commonware, the write must end within the signed file extent, checked before
+        // any I/O.
+        if (position + total > std.math.maxInt(i64)) return error.OffsetOverflow;
         for (chunks) |chunk| {
             try file_write(self.storage, self.file, chunk, position);
             position += chunk.len;

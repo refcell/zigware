@@ -523,53 +523,45 @@ Not portable:
 | Total | 450 | 171 | 40 | 239 |
 
 Open:
-- [ ] `storage/audited.rs:266` `test_audited_blob_forwards_read_options`: audited blob passes each
+- [x] `storage/audited.rs:266` `test_audited_blob_forwards_read_options`: audited blob passes each
   read's options unchanged to the inner blob
-- [ ] `storage/audited.rs:485` `test_audited_blob_writes_preserve_chunking_and_options`: inner
+- [x] `storage/audited.rs:485` `test_audited_blob_writes_preserve_chunking_and_options`: inner
   blob sees the original chunk count and write options
-- [ ] `storage/faulty.rs:1942` `test_faulty_blob_forwards_read_options_without_faults`: fault-free
+- [x] `storage/faulty.rs:1942` `test_faulty_blob_forwards_read_options_without_faults`: fault-free
   faulty blob forwards dont_cache reads to the inner blob
-- [ ] `storage/hold.rs:120` `test_hold_name_rejected_as_partition`: `.hold` is rejected as a
+- [x] `storage/hold.rs:120` `test_hold_name_rejected_as_partition`: `.hold` is rejected as a
   partition name
-- [ ] `storage/hold.rs:125` `test_acquire_fails_on_unusable_root`: storage init fails when the
+- [x] `storage/hold.rs:125` `test_acquire_fails_on_unusable_root`: storage init fails when the
   root path is a regular file
-- [ ] `storage/iouring.rs:1155` `test_large_contiguous_write_returns_kernel_error`: huge write to
+- [x] `storage/iouring.rs:1155` `test_large_contiguous_write_returns_kernel_error`: huge write to
   /dev/full returns the kernel error
-- [ ] `storage/iouring.rs:1386` `test_v1_paged_alignment`: paged writer on a V1 blob keeps each
+- [x] `storage/iouring.rs:1386` `test_v1_paged_alignment`: paged writer on a V1 blob keeps each
   page on one aligned 4 KiB disk page
-- [ ] `storage/iouring.rs:1737` `test_scan_rejects_non_file_entries`: scanning a partition holding
+- [x] `storage/iouring.rs:1737` `test_scan_rejects_non_file_entries`: scanning a partition holding
   a subdirectory fails PartitionCorrupt
-- [ ] `storage/iouring.rs:1755` `test_remove_reports_missing_targets`: remove reports
+- [x] `storage/iouring.rs:1755` `test_remove_reports_missing_targets`: remove reports
   PartitionMissing, then BlobMissing in an existing partition
-- [ ] `storage/iouring.rs:1778` `test_scan_ignores_non_utf8_file_names`: scan skips non-UTF-8 file
+- [x] `storage/iouring.rs:1778` `test_scan_ignores_non_utf8_file_names`: scan skips non-UTF-8 file
   names instead of failing
-- [ ] `storage/iouring.rs:1848` `test_open_reports_partition_creation_failure`: open fails when the
+- [x] `storage/iouring.rs:1848` `test_open_reports_partition_creation_failure`: open fails when the
   partition path is a regular file
-- [ ] `storage/iouring.rs:1874` `test_open_reports_blob_open_failure_for_directory_path`: open
+- [x] `storage/iouring.rs:1874` `test_open_reports_blob_open_failure_for_directory_path`: open
   fails when the blob path is a directory
-- [ ] `storage/iouring.rs:1906` `test_write_range_overflow_before_registration`: writes whose
+- [x] `storage/iouring.rs:1906` `test_write_range_overflow_before_registration`: writes whose
   physical end overflows u64 fail OffsetOverflow
-- [ ] `storage/iouring.rs:1957` `test_read_range_overflow_before_registration`: reads at
+- [x] `storage/iouring.rs:1957` `test_read_range_overflow_before_registration`: reads at
   overflowing physical offsets fail OffsetOverflow; empty reads succeed
-- [ ] `storage/iouring.rs:2000` `test_blob_offset_overflow_guards`: read/write/resize at logical
+- [x] `storage/iouring.rs:2000` `test_blob_offset_overflow_guards`: read/write/resize at logical
   u64::MAX fail OffsetOverflow before any I/O
-- [ ] `storage/iouring.rs:2047` `test_sync_dir_reports_missing_directory`: directory fsync of a
-  missing path reports an open failure
-- [ ] `storage/iouring.rs:2064` `test_resize_reports_kernel_error`: resize on a socket descriptor
+- [x] `storage/iouring.rs:2064` `test_resize_reports_kernel_error`: resize on a socket descriptor
   reports BlobResizeFailed
-- [ ] `storage/iouring.rs:2174` `test_blob_sync_reports_kernel_error`: sync on a socket descriptor
+- [x] `storage/iouring.rs:2174` `test_blob_sync_reports_kernel_error`: sync on a socket descriptor
   reports BlobSyncFailed
 - [ ] `storage/iouring.rs:2769` `test_clean_sync_is_skipped`: sync with no mutation since the last
   sync skips the fsync
-- [ ] `storage/iouring.rs:2797` `test_dirty_sync_waits_without_blocking_other_io`: a pending durable
-  write does not block another blob's I/O
-- [ ] `storage/iouring.rs:2857` `test_recreated_blob_does_not_wait_for_removed_opens_gate`: a
-  recreated blob's sync ignores the removed handle's gate
-- [ ] `storage/tokio/blob.rs:1264` `test_header_read_after_payload_shrink`: V0 header resolves from
-  a stale length after the payload shrinks
-- [ ] `storage/tokio/blob.rs:2017` `test_invalid_write_range_leaves_open_clean`: overflowing write
+- [x] `storage/tokio/blob.rs:2017` `test_invalid_write_range_leaves_open_clean`: overflowing write
   ranges fail OffsetOverflow and mutate nothing
-- [ ] `storage/tokio/mod.rs:669` `test_v1_paged_alignment`: paged writer on a V1 blob keeps each
+- [x] `storage/tokio/mod.rs:669` `test_v1_paged_alignment`: paged writer on a V1 blob keeps each
   page on one aligned 4 KiB disk page
 - [ ] `storage/tokio/mod.rs:1102` `test_partition_scan_waits_for_sync`: scanning an inherited
   partition waits for its directory fsync
@@ -581,9 +573,9 @@ Open:
   partition creation, inheritance, and removal
 - [ ] `storage/tokio/mod.rs:1279` `test_blob_remove_sync_failure_retires_partition`: failed fsync
   after blob removal is redone by the next scan
-- [ ] `storage/tokio/mod.rs:1364` `test_first_open_flushes_existing_blob`: first open of an existing
+- [x] `storage/tokio/mod.rs:1364` `test_first_open_flushes_existing_blob`: first open of an existing
   blob per instance fsyncs it once
-- [ ] `storage/tokio/mod.rs:1441` `test_remove_forgets_first_open_names`: removing a blob or
+- [x] `storage/tokio/mod.rs:1441` `test_remove_forgets_first_open_names`: removing a blob or
   partition forgets its first-open flushed names
 - [ ] `storage/tokio/mod.rs:1669` `test_clean_sync_is_skipped`: sync with no mutation since the last
   sync skips the fsync
@@ -604,7 +596,19 @@ Open:
 - [x] `iobuf/bufs.rs:4281` `test_non_empty_range_encode_iobufs_matches_encode`: encode_iobufs of a
   NonEmptyRange of byte values equals encode
 
+The open storage tests wait on features of production/storage.zig (runtime-telemetry lane): the
+two `test_clean_sync_is_skipped` need a dirty flag that skips a clean blob's fsync, and the five
+tokio/mod.rs partition tests need commonware's non-Linux cache of synced partition directories.
+
 Not portable:
+- `storage/iouring.rs` `test_dirty_sync_waits_without_blocking_other_io`,
+  `test_recreated_blob_does_not_wait_for_removed_opens_gate`: zigware's file storage has no
+  per-open durability permit and no `start_sync`; each sync runs on its caller
+- `storage/iouring.rs` `test_sync_dir_reports_missing_directory`: zigware's `sync_dir` takes an
+  open `Dir`, so there is no missing path to report
+- `storage/tokio/blob.rs` `test_header_read_after_payload_shrink`: open reads the header under
+  the storage mutex while no handle of the blob can be open (`BlobAlreadyOpen`), so its length
+  cannot go stale; `header.resolve` asserts the read covers it
 - `storage/audited.rs` `test_audited_start_sync`; `storage/faulty.rs`
   `test_start_sync_returns_before_backing_completion`,
   `test_dropped_completed_start_sync_clears_the_crash_epoch`,
