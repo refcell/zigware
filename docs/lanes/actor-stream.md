@@ -146,6 +146,28 @@ Not portable:
   frame limit and reads usize lengths, so the path does not exist; recorded in
   docs/lanes/actor-stream.md Decisions
 
+### Upstream drift (commonware 43b357a41..a9ffc25f3, 2026-11-19)
+
+26 upstream commits since the audit base. None changes actor or stream behavior or tests:
+- `actor/Cargo.toml`, `stream/Cargo.toml`, `stream/fuzz/Cargo.toml`: `rust-version.workspace`
+  and `[lints.cargo] unused_dependencies` (162216038). Build metadata; not portable.
+- 883eae27e (proptest to minifuzz) touches no actor or stream file.
+
+qmdb parallel snapshot init (this lane's ce3e897), over `storage/src/qmdb/snapshot.rs`,
+`storage/src/index/partitioned`, and the any/current init paths:
+- 42898af31: `build_snapshot` keys the index by `key.as_ref()`. zigware's index already takes
+  key bytes (`value_mod.bytes`), so no change.
+- a9ffc25f3: `op.inactivity_floor().is_some()` became `op.is_commit()`. `Committable::is_commit`
+  defaults to the former, and the only override (immutable `Operation`) is true exactly for
+  `Commit`, which always carries a floor, so snapshot.zig's check is equivalent. The same commit
+  renumbers every qmdb operation tag (commit 0, update 1, delete 2, set 3, append 4) and
+  regenerates `storage/conformance.toml`; that is the storage-qmdb lane's codec and was reported
+  to it.
+- 102430409, 90960d81c, 8bf364011 (store strategy, immutable floor-bounded reads and
+  `commit_floor_at` init, unified sync targets) change storage-qmdb and storage-qmdb-sync code
+  outside snapshot building; reported to those lanes.
+- No upstream change to init concurrency (`SnapshotBuild::Concurrency`) or partitioned index.
+
 ## Log
 - 2026-11-13: actor `Feedback`, `Unreliable`, and `mailbox` with commonware's tests.
 - 2026-11-13: stream framing codec, mock sink/stream channel, framing fuzz.

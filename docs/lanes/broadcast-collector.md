@@ -184,6 +184,14 @@ open, 0 not portable.
 |---|---|---|---|---|
 | `buffered/mod.rs` | 30 | 30 | 0 | 0 |
 
+### Upstream drift (commonware 43b357a41..a9ffc25f3, 2026-11-19)
+
+No behavior or test changes in `broadcast` or `collector`:
+- `broadcast/src/buffered/mod.rs` tests: two `peer.clone()` became `peer` (clippy
+  redundant-clone). Same test; nothing to port.
+- `Cargo.toml` and `fuzz/Cargo.toml`: `rust-version.workspace`, `[lints.cargo]` (162216038).
+  Build metadata; not portable.
+
 ## Log
 - 2026-11-13: broadcast lib.rs and buffered (engine, mailbox, overflow policy, metrics,
   mocks) with all 27 mod.rs tests; `broadcast.Digested`.
