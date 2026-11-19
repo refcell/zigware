@@ -186,6 +186,10 @@ pub fn Node(comptime T: type) type {
             self.gpa = ctx.gpa();
             self.io = ctx.io();
             self.actor = null;
+            // `genesis` and `start` are taken on every path: released here until marshal's
+            // actor takes them.
+            var owned = true;
+            errdefer if (owned) release_start(self.gpa, config);
             try self.name_partitions(config.partition_prefix);
             errdefer for (self.names) |name| self.gpa.free(name);
             try self.open_archives(ctx, config);
@@ -194,8 +198,19 @@ pub fn Node(comptime T: type) type {
             errdefer self.stop_resolver();
             try self.start_broadcast(ctx, config, broadcast_channel);
             errdefer self.stop_broadcast();
-            try self.init_actor(ctx, config);
+            try self.init_actor(ctx, config, &owned);
             assert(self.actor != null);
+            assert(!owned);
+        }
+
+        fn release_start(gpa: Allocator, config: Config) void {
+            var genesis = config.genesis;
+            genesis.deinit();
+            var given = config.start orelse return;
+            switch (given) {
+                .genesis => |*block| block.deinit(),
+                .floor => |*finalization| finalization.deinit(gpa),
+            }
         }
 
         fn name_partitions(self: *Self, prefix: []const u8) !void {
@@ -316,7 +331,10 @@ pub fn Node(comptime T: type) type {
             _ = self.broadcast_future.cancel(self.io) catch {};
         }
 
-        fn init_actor(self: *Self, ctx: T.Context, config: Config) !void {
+        /// Hands `genesis` and `start` to marshal's actor, clearing `owned` (marshal's `init`
+        /// takes `start` even when it fails).
+        fn init_actor(self: *Self, ctx: T.Context, config: Config, owned: *bool) !void {
+            assert(owned.*);
             const length = utils.NonZero(u64).init(config.blocks_per_epoch) orelse
                 return error.InvalidEpochLength;
             const actor_config: Actor.Config = .{
@@ -341,6 +359,7 @@ pub fn Node(comptime T: type) type {
                 .max_pending_acks = 1,
                 .strategy = config.strategy,
             };
+            owned.* = false;
             const initialized = try Actor.init(
                 ctx.child("marshal"),
                 .{ .archive = &self.finalizations },

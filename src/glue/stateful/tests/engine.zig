@@ -667,18 +667,17 @@ pub fn StatefulEngine(comptime S: type) type {
             fn init_node(self: *Validator, ctx: Context, started: Started) !void {
                 const raw = S.Block.genesis();
                 var genesis = try Digested.precomputed(self.gpa, raw, raw.digest());
-                errdefer genesis.deinit();
-                var start_genesis = try Digested.precomputed(self.gpa, raw, raw.digest());
-                const planned = self.plan.marshal_start(Digested, start_genesis);
-                var marshal_start: ?Node.Start = planned catch |err| {
-                    start_genesis.deinit();
+                var start_genesis = Digested.precomputed(self.gpa, raw, raw.digest()) catch |err| {
+                    genesis.deinit();
                     return err;
                 };
-                if (marshal_start.? == .floor) start_genesis.deinit();
-                errdefer if (marshal_start) |*value| switch (value.*) {
-                    .genesis => |*block| block.deinit(),
-                    .floor => |*finalization| finalization.deinit(self.gpa),
+                const planned = self.plan.marshal_start(Digested, start_genesis);
+                const marshal_start: Node.Start = planned catch |err| {
+                    start_genesis.deinit();
+                    genesis.deinit();
+                    return err;
                 };
+                if (marshal_start == .floor) start_genesis.deinit();
                 const backfill = started.channels[3];
                 const broadcast_channel = started.channels[4];
                 try self.node.init(ctx, .{
@@ -703,7 +702,7 @@ pub fn StatefulEngine(comptime S: type) type {
                     .sender = broadcast_channel.sender,
                     .receiver = broadcast_channel.receiver,
                 });
-                marshal_start = null; // The node took it.
+                // The node took `genesis` and `marshal_start`, even had it failed.
                 assert(self.node.actor != null);
             }
 

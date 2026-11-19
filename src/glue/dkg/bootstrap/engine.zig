@@ -376,8 +376,8 @@ pub fn Engine(comptime T: type) type {
             const leader = config.participants.items[0];
             const raw = try Block.genesis(self.gpa, leader);
             self.genesis_digest = raw.digest();
-            var genesis = try Digested.precomputed(self.gpa, raw, raw.digest());
-            errdefer genesis.deinit();
+            // The node takes `genesis`, even when `init` fails.
+            const genesis = try Digested.precomputed(self.gpa, raw, raw.digest());
             try self.node.init(ctx, .{
                 .public_key = config.signer.public_key(),
                 .peer_provider = config.peer_provider,
