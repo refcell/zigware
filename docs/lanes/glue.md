@@ -534,11 +534,10 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - [x] reshare: the `Application` wrapper with 9 of application.rs's tests (final-block
   proposal and verification, phase gating of dealer logs, reservation release).
 - [ ] reshare: application.rs's prepare and dropped-proposal tests.
-- [ ] reshare actor: resolving the startup from marshal's anchor and the state-sync plan
-  (commonware `start`'s preamble) (store init, mux, state-sync
-  resolution, startup tip); inclusion's remaining window tests (gated and stalled ancestry, scan
-  yielding to finalization, closed verification) and `finalization_error_panics`; the dkg
-  window; the run loop; application.
+- [x] reshare actor: `Runner(T).resolve_start(actor, storage, plan, marshal) !Start`, the
+  startup preamble (marshal's anchor, state-sync plan, synced floor block), with 3 tests.
+- [ ] reshare actor: inclusion's remaining window tests (gated and stalled ancestry, scan
+  yielding to finalization, closed verification) and `finalization_error_panics`.
 - [x] orchestrator: limits (`max_payload_size`) with `prefixes_simplex`.
 - [x] orchestrator: the actor, with tests of the epoch transition, catch-up hints, and
   missing schemes.
@@ -577,6 +576,9 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   missing skipped-block check, and an ignored future-epoch hint.
 - 2026-11-19: orchestrator mod.rs's single-node tests (missing boundary, shutdown in the gate
   wait, recovered start); they catch an ignored processed height and an unraced gate wait.
+- 2026-11-19: four slow dkg conformance hashes run only with `-Dslow-tests` (CI time).
+- 2026-11-19: the reshare startup preamble (`resolve_start`); its test catches a tip that
+  ignores the synced floor.
 
 ## dkg probe/bootstrap (owner: p2p lane)
 

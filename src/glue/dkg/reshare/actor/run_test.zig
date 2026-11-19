@@ -59,3 +59,140 @@ test "run: a participating epoch commits the next epoch at its final block" {
         }
     }.body);
 }
+
+const consensus = @import("consensus");
+const runtime = @import("runtime");
+const state_sync_test = @import("../../state_sync_test.zig");
+const state_sync = @import("../../state_sync.zig");
+const oneshot = utils.channel.oneshot;
+const Processed = consensus.marshal.core.floor.Processed;
+const StartPlan = state_sync.Plan(
+    state_sync_test.Scheme,
+    mocks.TestDigest,
+    mocks.TestBlsVariant,
+    utils.sequence.Unit,
+);
+
+/// The part of marshal `resolve_start` reads: an optional processed anchor and the block it
+/// yields for the state-sync floor subscription (dropped when null).
+const StartMarshal = struct {
+    io: Io,
+    anchor: ?struct { processed: Processed, block: *const Digested } = null,
+    floor: ?*const Digested = null,
+
+    const Anchor = struct { processed: Processed, block: Digested };
+
+    pub fn get_anchor(self: StartMarshal) !?Anchor {
+        const anchor = self.anchor orelse return null;
+        return .{ .processed = anchor.processed, .block = anchor.block.clone() };
+    }
+
+    pub fn subscribe_by_commitment(
+        self: StartMarshal,
+        commitment: mocks.TestDigest,
+        fallback: anytype,
+    ) !oneshot.Receiver(Digested) {
+        _ = fallback;
+        var pair = try oneshot.channel(Digested, gpa, self.io);
+        const block = self.floor orelse {
+            pair.sender.deinit();
+            return pair.receiver;
+        };
+        try testing.expect(block.digest().eql(commitment));
+        try pair.sender.send(block.clone());
+        return pair.receiver;
+    }
+};
+
+fn release_start(start: *Runner.Start) void {
+    if (start.state_sync) |*synced| synced.info.deinit(gpa);
+}
+
+// The top of commonware's `run`: without state sync, the actor starts from marshal's
+// processed anchor.
+test "run: resolve_start starts from marshal's processed anchor" {
+    try actor_test.run(struct {
+        fn body(io: Io) anyerror!void {
+            var h: Harness = undefined;
+            try h.init(io, "resolve-anchor", 10);
+            defer h.deinit();
+            var blocks: [3]Digested = undefined;
+            try h.chain(&blocks);
+            defer for (&blocks) |*block| block.deinit();
+            var storage = runtime.buffer.mocks.Storage.init(gpa);
+            defer storage.deinit();
+            var plan = StartPlan.disabled(gpa, io);
+            defer plan.deinit();
+            const marshal: StartMarshal = .{
+                .io = io,
+                .anchor = .{ .processed = .{ .block = .new(2) }, .block = &blocks[2] },
+            };
+            var start = try Runner.resolve_start(&h.actor, storage.interface(), &plan, marshal);
+            defer release_start(&start);
+            try testing.expect(start.state_sync == null);
+            try testing.expectEqual(@as(u64, 2), start.tip.?.height.get());
+            try testing.expect(start.tip.?.digest.eql(blocks[2].digest()));
+        }
+    }.body);
+}
+
+// With state-sync material, the actor starts from the synced epoch at the floor block marshal
+// yields, and the tip is the floor's parent when that is past the anchor.
+test "run: resolve_start starts from the state-synced floor" {
+    try actor_test.run(struct {
+        fn body(io: Io) anyerror!void {
+            var h: Harness = undefined;
+            try h.init(io, "resolve-synced", 10);
+            defer h.deinit();
+            var blocks: [4]Digested = undefined;
+            try h.chain(&blocks);
+            defer for (&blocks) |*block| block.deinit();
+            var schemes = try state_sync_test.fixture();
+            defer schemes.deinit(gpa);
+            const material = try state_sync_test.material_with(&schemes, 0, blocks[3].digest());
+            var storage = runtime.buffer.mocks.Storage.init(gpa);
+            defer storage.deinit();
+            const config = state_sync_test.config("resolve-synced");
+            var plan = try StartPlan.init(gpa, io, storage.interface(), config, material);
+            defer plan.deinit();
+            const marshal: StartMarshal = .{
+                .io = io,
+                .anchor = .{ .processed = .{ .block = .new(1) }, .block = &blocks[1] },
+                .floor = &blocks[3],
+            };
+            var start = try Runner.resolve_start(&h.actor, storage.interface(), &plan, marshal);
+            defer release_start(&start);
+            try testing.expect(start.state_sync != null);
+            try testing.expectEqual(@as(u64, 0), start.state_sync.?.info.epoch.get());
+            try testing.expectEqual(@as(u64, 3), start.state_sync.?.floor.get());
+            try testing.expectEqual(@as(u64, 2), start.tip.?.height.get());
+            try testing.expect(start.tip.?.digest.eql(blocks[2].digest()));
+        }
+    }.body);
+}
+
+// commonware panics with "marshal must yield state sync floor block".
+test "run: resolve_start fails when marshal drops the state-sync floor" {
+    try actor_test.run(struct {
+        fn body(io: Io) anyerror!void {
+            var h: Harness = undefined;
+            try h.init(io, "resolve-dropped", 10);
+            defer h.deinit();
+            var schemes = try state_sync_test.fixture();
+            defer schemes.deinit(gpa);
+            const digest = mocks.genesis_block(h.public_key).digest();
+            const material = try state_sync_test.material_with(&schemes, 0, digest);
+            var storage = runtime.buffer.mocks.Storage.init(gpa);
+            defer storage.deinit();
+            const config = state_sync_test.config("resolve-dropped");
+            var plan = try StartPlan.init(gpa, io, storage.interface(), config, material);
+            defer plan.deinit();
+            const marshal: StartMarshal = .{ .io = io };
+            const storage_handle = storage.interface();
+            try testing.expectError(
+                error.MissingStateSyncFloor,
+                Runner.resolve_start(&h.actor, storage_handle, &plan, marshal),
+            );
+        }
+    }.body);
+}

@@ -8,8 +8,8 @@
 //!
 //! `run` is the actor's task (commonware `Actor::start`'s `run`): it multiplexes the
 //! dealing channel by epoch, applies the resolved startup, and runs DKG mode or the epoch
-//! loop. Resolving the startup from marshal's processed anchor and the state-sync plan is
-//! the caller's (commonware does it at the top of `run`).
+//! loop. `resolve_start` resolves that startup from marshal's processed anchor and the
+//! state-sync plan (commonware does it at the top of `run`); call it before `run`.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -18,6 +18,13 @@ const inclusion_window = @import("inclusion_window.zig");
 const actor_mod = @import("actor.zig");
 const dkg = @import("dkg.zig");
 const p2p = @import("p2p");
+const consensus = @import("consensus");
+const runtime = @import("runtime");
+const setup_mod = @import("setup.zig");
+const sync = @import("../../state_sync.zig");
+
+const Epoch = consensus.Epoch;
+const Processed = consensus.marshal.core.floor.Processed;
 
 /// The epoch-loop functions for `Actor(T)`.
 pub fn Runner(comptime T: type) type {
@@ -32,6 +39,50 @@ pub fn Runner(comptime T: type) type {
             tip: ?Actor.Tip = null,
             state_sync: ?Actor.StateSyncStart = null,
         };
+
+        /// Resolves where the actor starts (the top of commonware's `run`): reads marshal's
+        /// processed anchor, resolves the shared state-sync `plan` against the epoch it
+        /// recovered, and waits for marshal to yield the synced floor block. `marshal`
+        /// provides `get_anchor() !?{ processed, block }` and `subscribe_by_commitment(digest,
+        /// .wait) !oneshot.Receiver(Digested)`; `plan` is a `state_sync.Plan` (borrowed).
+        /// `error.MissingStateSyncFloor` if marshal drops the floor subscription (commonware
+        /// panics).
+        pub fn resolve_start(
+            self: *Actor,
+            storage: runtime.storage.Storage,
+            plan: anytype,
+            marshal: anytype,
+        ) !Start {
+            var anchor = try marshal.get_anchor();
+            defer if (anchor) |*value| value.block.deinit();
+            const processed: ?struct { Processed, *const Actor.Digested } = if (anchor) |*value|
+                .{ value.processed, &value.block }
+            else
+                null;
+            const recovered: ?Epoch = if (anchor) |value|
+                sync.recovered_epoch(value.processed, self.epocher)
+            else
+                null;
+            var material = try plan.resolve(storage, recovered) orelse
+                return .{ .tip = setup_mod.startup(Actor.Digested, processed, null) };
+            defer material.floor.deinit(self.gpa);
+            errdefer material.info.deinit(self.gpa);
+            const commitment = material.floor.proposal.payload;
+            var subscription = try marshal.subscribe_by_commitment(commitment, .wait);
+            defer subscription.deinit();
+            var floor = subscription.recv() catch |err| switch (err) {
+                error.Closed => return error.MissingStateSyncFloor,
+                error.Canceled => return error.Canceled,
+            };
+            defer floor.deinit();
+            assert(floor.digest().eql(commitment));
+            const tip = setup_mod.startup(Actor.Digested, processed, &floor);
+            assert(tip != null or floor.inner().height().get() == 0);
+            return .{
+                .tip = tip,
+                .state_sync = .{ .info = material.info, .floor = floor.inner().height() },
+            };
+        }
 
         /// Runs the actor on its dealing channel (`sender` and `receiver`, taken) until the
         /// mailbox or a dealing channel closes.

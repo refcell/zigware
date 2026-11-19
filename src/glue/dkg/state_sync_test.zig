@@ -35,7 +35,7 @@ const namespace = "_COMMONWARE_GLUE_DKG_TEST";
 const gpa = testing.allocator;
 const io = testing.io;
 
-fn fixture() !Fixture {
+pub fn fixture() !Fixture {
     var rng = utils.rng.TestRng.init(0);
     return certificate_mocks.fixture(Scheme, gpa, &rng, namespace, 4);
 }
@@ -51,6 +51,11 @@ fn trusted_output(epoch: u64, participants: Set(P)) !fd.Output(MinPk, P) {
 
 /// A finalized floor at view 1 of `epoch` and that epoch's info, for `fixture`'s committee.
 fn material(schemes: *const Fixture, epoch: u64) !Material {
+    return material_with(schemes, epoch, Sha256.hash(&.{"state sync floor"}));
+}
+
+/// `material` whose floor proposes `payload`.
+pub fn material_with(schemes: *const Fixture, epoch: u64, payload: Digest) !Material {
     var participants = try Set(P).from_dedup(gpa, schemes.participants);
     defer participants.deinit(gpa);
     var output = try trusted_output(epoch, participants);
@@ -59,7 +64,7 @@ fn material(schemes: *const Fixture, epoch: u64) !Material {
     const proposal = Proposal.init(
         .new(.new(epoch), .new(1)),
         .zero(),
-        Sha256.hash(&.{"state sync floor"}),
+        payload,
     );
     const Finalize = simplex.Finalize(Scheme, Digest);
     var finalizes: [4]Finalize = undefined;
@@ -86,7 +91,7 @@ fn local(port: u16) @import("p2p").Address {
     return .{ .symmetric = .{ .ip = .{ .v4 = .localhost }, .port = port } };
 }
 
-fn config(partition: []const u8) state_sync.Config {
+pub fn config(partition: []const u8) state_sync.Config {
     return .{ .partition_prefix = partition, .max_participants = 16, .max_supported_mode = .v1 };
 }
 
