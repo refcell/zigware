@@ -244,7 +244,7 @@ fn finish(c: Completed) Packed {
 }
 
 /// The negated operand: swaps `Y - X` with `Y + X` and replaces `2 d T` by `2 p - 2 d T`.
-inline fn negate(q: Operand) Operand {
+inline fn negate_operand(q: Operand) Operand {
     const bias = splat(bias_2p);
     var out: Operand = undefined;
     inline for (&out, q, bias) |*o, row, b| {
@@ -332,7 +332,7 @@ inline fn add_digit(step: Completed, table: []const Operand, digit: i8) Complete
     const magnitude: usize = @abs(digit);
     assert(magnitude % 2 == 1 and magnitude / 2 < table.len);
     const operand = table[magnitude / 2];
-    return add(finish(step), if (digit < 0) negate(operand) else operand);
+    return add(finish(step), if (digit < 0) negate_operand(operand) else operand);
 }
 
 /// `[8](base[0] B + base[1] 2^128 B + sum(scalar point))`, every scalar below 2^128, as
@@ -367,6 +367,56 @@ pub fn cofactored_sum(base: [2]u128, terms: [2]verify_msm.Term) [3]Fe {
     assert(coordinates[2].isZero() == false);
     return coordinates[0..3].*;
 }
+
+/// A point on the packed backend, for callers outside single verification (the batch
+/// MSM's buckets): lanes `[X, Y, Z, T]` in extended coordinates. Every operation leaves a
+/// valid `T`, so results chain into further additions and doublings in any order. Compiles
+/// only where `available` holds; other targets use `Point`.
+pub const PackedPoint = struct {
+    rows: Rows,
+
+    pub const identity_element: PackedPoint = .{ .rows = identity };
+
+    pub fn from_point(p: Point) PackedPoint {
+        comptime assert(available);
+        return .{ .rows = load(p) };
+    }
+
+    pub fn to_point(p: PackedPoint) Point {
+        const coordinates = store(p.rows);
+        assert(!coordinates[2].isZero());
+        const x, const y, const z, const t = coordinates;
+        return .{ .x = x, .y = y, .z = z, .t = t };
+    }
+
+    /// `p + q`, or `p - q` when `negate` (two packed multiplications).
+    pub fn add_cached(p: PackedPoint, q: *const PackedCached, negate: bool) PackedPoint {
+        return .{ .rows = finish(add(p.rows, if (negate) negate_operand(q.rows) else q.rows)) };
+    }
+
+    /// `p + q` (three packed multiplications: one caches `q`).
+    pub fn add_point(p: PackedPoint, q: PackedPoint) PackedPoint {
+        return .{ .rows = finish(add(p.rows, cache(q.rows))) };
+    }
+
+    /// `2 p` (one packed squaring and one multiplication).
+    pub fn dbl(p: PackedPoint) PackedPoint {
+        return .{ .rows = finish(double(p.rows)) };
+    }
+};
+
+/// A point prepared as the right operand of repeated `PackedPoint.add_cached` calls.
+pub const PackedCached = struct {
+    rows: Operand,
+
+    pub fn from_packed(p: PackedPoint) PackedCached {
+        return .{ .rows = cache(p.rows) };
+    }
+
+    pub fn from_point(p: Point) PackedCached {
+        return .from_packed(.from_point(p));
+    }
+};
 
 const testing = std.testing;
 
@@ -410,4 +460,43 @@ fn torsion_point() Point {
         0x6d, 0x53, 0xfc, 0x05,
     }) catch unreachable;
     return .{ .x = mixed.x, .y = mixed.y, .z = mixed.z, .t = mixed.t };
+}
+
+test "the packed point type matches std's point arithmetic" {
+    if (comptime !available) return error.SkipZigTest;
+    var prng = std.Random.DefaultPrng.init(0xb0c4);
+    var seed: [32]u8 = undefined;
+    prng.random().bytes(&seed);
+    var expected = try Point.basePoint.mulPublic(Point.scalar.reduce(seed));
+    expected = .{ .x = expected.x, .y = expected.y, .z = expected.z, .t = expected.t };
+    expected = expected.add(torsion_point());
+    var actual = PackedPoint.from_point(expected);
+    const step_point = torsion_point().add(expected.dbl().dbl());
+    const step = PackedCached.from_point(step_point);
+    for (0..64) |round| {
+        switch (round % 4) {
+            0 => {
+                expected = expected.add(step_point);
+                actual = actual.add_cached(&step, false);
+            },
+            1 => {
+                expected = expected.sub(step_point);
+                actual = actual.add_cached(&step, true);
+            },
+            2 => {
+                expected = expected.dbl();
+                actual = actual.dbl();
+            },
+            else => {
+                expected = expected.add(expected.dbl());
+                actual = actual.add_point(actual.dbl());
+            },
+        }
+        const got = actual.to_point();
+        try testing.expectEqualSlices(u8, &expected.toBytes(), &got.toBytes());
+        // `T` stays valid: `X Y = Z T`.
+        try testing.expect(got.x.mul(got.y).equivalent(got.z.mul(got.t)));
+    }
+    const sum = actual.add_point(PackedPoint.identity_element).to_point();
+    try testing.expectEqualSlices(u8, &expected.toBytes(), &sum.toBytes());
 }
