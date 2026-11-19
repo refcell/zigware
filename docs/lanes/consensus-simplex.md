@@ -300,9 +300,9 @@ resolver; those lanes are running, so do the types first and the actors as they 
   certification ordering and replay). None are ported; they need a voter-actor harness
   with a mock batcher, resolver, and automaton on the deterministic runtime. Handed to the
   runtime lane on 2026-11-19 (actors/voter/tests/).
-- [ ] actors/batcher/mod.rs: 29 of its 76 tests still to port (optimistic assembly
-  fallback, construction order, the per-fixture quorum test on the
-  other 7 fixtures). Round-level ones ported in round_test.zig (2026-11-19): forwarding a
+- [ ] actors/batcher/mod.rs: 16 of its 76 tests still to port (Round restore and
+  construction-order cases, the rayon offload test, leader-proposal multi-kind, and the
+  notarization-unlock cases). Round-level ones ported in round_test.zig (2026-11-19): forwarding a
   notarization's proposal without a leader, certificate vote release and retention,
   nullify-finalize conflicts with held and compacted evidence, our own votes reported
   once, finalization- and finalize-established proposals, both skipped-round cases, and
@@ -463,3 +463,9 @@ resolver; those lanes are running, so do the types first and the actors as they 
   leader update. The harness records relay forwards and takes `forward`, `member_only`,
   `view_retention`, and `floor` options. Split: lookup (T-01a1d59c) ports 4935, 6506,
   6513, 6819, 6966, and 7128 in actor_late_test.zig.
+- 2026-11-19: the batcher actor harness is generic (actors/batcher/actor_harness.zig,
+  `Kit(S, make)`); the quorum-to-notarization actor test runs on all 8 schemes, and
+  round_scheme_test.zig ports mixed trusted and pending certification, optimistic assembly
+  fallback (both quorum shapes, every scheme), per-kind fallback isolation, VRF seed-only
+  corruption, the constructed quorum before a leader update, and the constructed leader
+  notarize counted once. BLS cases run outside Debug or with `-Dslow-tests`.
