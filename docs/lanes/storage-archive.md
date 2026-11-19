@@ -87,10 +87,16 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
 - freezer: `get` takes a tagged `Identifier` union; `close` frees the freezer on success.
   The freezer_operations fuzz uses a small key pool so chains collide and keys shadow, and
   checks every key after crash restores against the model at the last checkpoint.
-- prunable archive: methods take `*Self`; an error from `put`, `put_multi`, `sync`, or
-  `prune` leaves the archive failed (only `deinit` may follow). Syncs complete before
-  returning, so `start_sync` is `sync` and the requested-section set is always the pending
-  one; commonware's pipelined start_sync tests have no counterpart. Sections are a sorted
+- prunable archive: methods take `*Self`; an error from `put`, `put_multi`, `sync`,
+  `start_sync`, or `prune`, or a failed `start_sync` completion, leaves the archive failed
+  (only `deinit` may follow). `start_sync`, `put_start_sync`, and `put_multi_start_sync`
+  return a `runtime.storage.Completion` (async start_sync step 4): pending sections move into
+  `requested`, kept until a blocking `sync` and trimmed by `prune`, and
+  `Oversized.start_sync_tracked` starts the journals' syncs and records them in each
+  section's barrier, publishing a marker only once its sync is observed to have succeeded.
+  Markers still persist synchronously, so the 4 marker-pipeline tests wait for metadata's
+  `start_sync` completion (storage-merkle's step 2c). Blocking `sync` stays on the journals'
+  blocking syncs. Marshal waits on the completions at once until its step 6. Sections are a sorted
   list of `(start, slot)`; extra multi-put positions are a hash map pruned by scan. The
   recovery fuzz runs on faulty storage (see the fault model below) and checks retained
   entries against synced ones, per-section prefixes, the range helpers, and a second reopen.
@@ -122,15 +128,20 @@ entries, matched to zigware tests by what they check (zigware folds many into on
 
 | module | tests | ported | partial | open | not portable |
 |---|---|---|---|---|---|
-| archive | 93 | 78 | 0 | 0 | 15 |
+| archive | 93 | 89 | 0 | 4 | 0 |
 | freezer | 33 | 33 | 0 | 0 | 0 |
 | ordinal | 44 | 44 | 0 | 0 | 0 |
 | cache | 14 | 14 | 0 | 0 | 0 |
 | storage `utils.rs` (`bits_for_indices`, in ordinal) | 1 | 1 | 0 | 0 | 0 |
 
-Not portable: archive's 12 pipelined `start_sync` and in-flight sync tests (dropped, see
-Decisions), plus three that need a background marker sync, parked-sync ordering, or partly
-completed syncs (zigware's init and sync are synchronous).
+The 11 pipelined `start_sync` and in-flight sync tests are in
+`archive/prunable/start_sync_test.zig` (2026-11-19).
+
+Open (they need marker syncs in flight, metadata `start_sync` from step 2c):
+- [ ] `test_startup_marker_failure_fails_next_sync`,
+  `test_start_sync_publishes_closed_section_boundary`,
+  `test_sync_publishes_closed_section_boundary`,
+  `test_start_sync_withholds_marker_for_unproven_boundary`.
 
 Open:
 - [x] freezer regressions: `issue_2966_regression` (resize writes no valid epoch-0 slot into
@@ -191,3 +202,6 @@ Partial:
   (clearing lane).
 - 2026-11-19: freezer determinism at 60 keys per push and commonware's 1,000 under
   `-Dslow-tests` (it was the slowest test here at 9.9 s in Debug; clearing lane).
+- 2026-11-19: async start_sync step 4: the prunable archive's pipelined `start_sync` with
+  `requested`, oversized's tracked start_sync on the journals' started syncs, and 11 of the
+  15 pipelined tests (clearing lane).

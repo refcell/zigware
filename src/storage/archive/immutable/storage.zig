@@ -246,9 +246,10 @@ pub fn Archive(comptime K: type, comptime V: type) type {
             assert(self.metadata.get(freezer_key) != null);
         }
 
-        /// commonware's default `start_sync`: syncs complete before returning.
-        pub fn start_sync(self: *Self) Error!void {
-            return self.sync();
+        /// commonware's default `start_sync`: `sync`, then a completed completion.
+        pub fn start_sync(self: *Self) Error!runtime.storage.Completion {
+            try self.sync();
+            return .ok;
         }
 
         pub fn next_gap(self: *const Self, index: u64) rmap.Gap {

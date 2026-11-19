@@ -123,4 +123,5 @@ test {
     _ = @import("tests.zig");
     _ = @import("durability_test.zig");
     _ = @import("fuzz_test.zig");
+    _ = @import("start_sync_test.zig");
 }

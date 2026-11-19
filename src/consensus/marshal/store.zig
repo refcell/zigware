@@ -31,9 +31,10 @@ fn archive_identifier(comptime A: type, comptime D: type, id: *const Identifier(
     };
 }
 
-/// A started sync's durability (commonware's sync `Handle`). zigware's archives are durable
-/// once `start_sync` returns, so a handle carries only the simulated delay before the sync
-/// counts as durable: zero for the archives, a pace for test stores that slow syncs down.
+/// A started sync's durability (commonware's sync `Handle`). Marshal waits on the archives'
+/// `start_sync` completions before returning (until rollout step 6), so a handle carries only
+/// the simulated delay before the sync counts as durable: zero for the archives, a pace for
+/// test stores that slow syncs down.
 pub const Durable = struct {
     delay_ns: u64 = 0,
 
@@ -81,7 +82,8 @@ pub fn Certificates(comptime A: type, comptime S: type, comptime B: type, compti
 
         /// Starts a sync of every write so far; the handle says when it is durable.
         pub fn start_sync(self: Self) Error!Durable {
-            try self.archive.start_sync();
+            // Waited at once until marshal pipelines the archive's sync (rollout step 6).
+            try (try self.archive.start_sync()).wait_release();
             return .done;
         }
 
@@ -132,7 +134,8 @@ pub fn Blocks(comptime A: type, comptime Block: type) type {
 
         /// Starts a sync of every write so far; the handle says when it is durable.
         pub fn start_sync(self: Self) Error!Durable {
-            try self.archive.start_sync();
+            // Waited at once until marshal pipelines the archive's sync (rollout step 6).
+            try (try self.archive.start_sync()).wait_release();
             return .done;
         }
 

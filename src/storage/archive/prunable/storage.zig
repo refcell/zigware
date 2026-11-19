@@ -7,7 +7,8 @@
 //! the handles of the records holding it, so a key lookup reads the index journal only for
 //! records whose translated key matches, and never reads a value it does not return.
 //!
-//! An error from a mutating method (`put`, `put_multi`, `sync`, `prune`) leaves the archive
+//! An error from a mutating method (`put`, `put_multi`, `sync`, `start_sync`, `prune`), or a
+//! failed `start_sync` completion, leaves the archive
 //! failed: only `deinit` may follow (commonware consumes the handle on error). Puts below the
 //! prune floor are satisfied without storing. The floor is not persisted.
 
@@ -44,13 +45,21 @@ pub fn Archive(comptime T: type, comptime K: type, comptime V: type) type {
         const Section = Sections.Section;
         const KeyTable = utils.handles.Table(u64);
         const Extras = std.AutoHashMapUnmanaged(u64, std.ArrayList(u64));
+        const Completion = runtime.storage.Completion;
 
         gpa: Allocator,
         items_per_section: u64,
         /// Combined index + value storage with crash recovery.
         oversized: Oversized,
-        /// Sections with writes not yet included in a sync, ascending and unique.
+        /// Sections with writes not yet included in any sync request, ascending and unique.
+        /// Moved into `requested` by a request; the `syncs` metric counts only this set.
         pending: std.ArrayList(u64) = .empty,
+        /// Sections a `start_sync` requested, retained until a blocking `sync` completes,
+        /// ascending and unique. A `start_sync` completion must cover every earlier accepted
+        /// write, even when its call wrote nothing (a duplicate or below-floor put):
+        /// re-requesting these sections returns their in-flight syncs (a completed one
+        /// resolves at once). Pruned sections leave the set with their data.
+        requested: std.ArrayList(u64) = .empty,
         /// Oldest section allowed to be read or written. Set by `prune`.
         oldest_allowed: ?u64 = null,
         translator: T,
@@ -174,6 +183,7 @@ pub fn Archive(comptime T: type, comptime K: type, comptime V: type) type {
             errdefer self.has_checks.deinit();
             self.syncs = try scope.counter("syncs", "Number of syncs called");
             self.pending = .empty;
+            self.requested = .empty;
             self.oldest_allowed = null;
             self.keys = .empty;
             self.sections = .{};
@@ -194,6 +204,7 @@ pub fn Archive(comptime T: type, comptime K: type, comptime V: type) type {
         fn release(self: *Self) void {
             const gpa = self.gpa;
             self.pending.deinit(gpa);
+            self.requested.deinit(gpa);
             self.keys.deinit(gpa);
             self.sections.deinit(gpa);
             var extras = self.extra_indices.valueIterator();
@@ -290,6 +301,18 @@ pub fn Archive(comptime T: type, comptime K: type, comptime V: type) type {
         pub fn put_multi_sync(self: *Self, index: u64, key: K, value: V) Error!void {
             try self.put_multi(index, key, value);
             try self.sync();
+        }
+
+        /// `put` then `start_sync`: the completion covers this put and every earlier one.
+        pub fn put_start_sync(self: *Self, index: u64, key: K, value: V) Error!Completion {
+            try self.put(index, key, value);
+            return self.start_sync();
+        }
+
+        /// `put_multi` then `start_sync`.
+        pub fn put_multi_start_sync(self: *Self, index: u64, key: K, value: V) Error!Completion {
+            try self.put_multi(index, key, value);
+            return self.start_sync();
         }
 
         fn put_internal(self: *Self, index: u64, key: K, value: V, unique: bool) Error!void {
@@ -446,23 +469,41 @@ pub fn Archive(comptime T: type, comptime K: type, comptime V: type) type {
             return false;
         }
 
-        /// Sync all pending writes, then publish the validation markers of synced sections
-        /// that received no writes since (commonware retains sections requested by
-        /// `start_sync` until a blocking sync; syncs here complete before returning, so the
-        /// requested set is always the pending one).
+        /// Make every accepted write durable, then publish the validation markers of synced
+        /// sections that received no writes since. Also observes every earlier `start_sync`.
         pub fn sync(self: *Self) Error!void {
             assert(!self.failed);
             errdefer self.failed = true;
-            const pending = self.pending.items;
-            self.syncs.metric().inc_by(pending.len);
-            try self.oversized.sync_tracked(pending, pending);
-            self.pending.clearRetainingCapacity();
+            try self.request(.blocking);
+            self.requested.clearRetainingCapacity();
             assert(self.pending.items.len == 0);
         }
 
-        /// commonware's `start_sync`: syncs complete synchronously, so this is `sync`.
-        pub fn start_sync(self: *Self) Error!void {
-            return self.sync();
+        /// Start making every accepted write durable, returning a completion (one reference,
+        /// owned by the caller). Validation markers trail it: a later request publishes them.
+        /// A failed completion leaves the archive failed; the next mutation reports it.
+        pub fn start_sync(self: *Self) Error!Completion {
+            assert(!self.failed);
+            errdefer self.failed = true;
+            return self.request(.started);
+        }
+
+        /// Move `pending` into `requested` and sync all of it, blocking or started; only the
+        /// sections written since the last request are active (their markers wait).
+        fn request(
+            self: *Self,
+            comptime mode: enum { blocking, started },
+        ) Error!if (mode == .started) Completion else void {
+            const pending = self.pending.items;
+            self.syncs.metric().inc_by(pending.len);
+            try self.requested.ensureUnusedCapacity(self.gpa, pending.len);
+            for (pending) |start| insert_sorted(&self.requested, start);
+            defer self.pending.clearRetainingCapacity();
+            const requested = self.requested.items;
+            return switch (mode) {
+                .blocking => self.oversized.sync_tracked(requested, pending),
+                .started => self.oversized.start_sync_tracked(requested, pending),
+            };
         }
 
         /// Prune every section below the one holding `min`. A no-op unless that section is
@@ -477,6 +518,7 @@ pub fn Archive(comptime T: type, comptime K: type, comptime V: type) type {
             // Prune the sections' records, values, and markers together.
             _ = try self.oversized.prune(min);
             retain_at_least(&self.pending, min);
+            retain_at_least(&self.requested, min);
             // Drop the pruned sections and retire their records from the key table, found by
             // the translated keys the sections hold, so nothing is read.
             while (self.sections.pop_below(min)) |popped| {

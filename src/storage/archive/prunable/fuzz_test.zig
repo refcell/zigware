@@ -8,7 +8,7 @@
 //!   Recovery on reliable storage must keep every synced entry, keep each section's journal
 //!   as a prefix of what was appended, report ranges that match the retained entries, and
 //!   keep the same view across a second reopen. Commonware's target also abandons pipelined
-//!   `start_sync` requests, which zigware's synchronous `sync` has no counterpart for.
+//!   `start_sync` requests, which this target does not model yet.
 
 const std = @import("std");
 const assert = std.debug.assert;

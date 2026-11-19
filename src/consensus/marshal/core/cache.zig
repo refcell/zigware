@@ -5,8 +5,9 @@
 //! round (older epochs are destroyed whole), the certified archive by height. A metadata store
 //! records the floor and ceiling epochs that may hold data, so a restart reopens only them.
 //!
-//! The Zig archives' `start_sync` completes the sync before returning, so commonware's sync
-//! handles become plain calls: a returned `put_*` is durable.
+//! Marshal waits on the archives' `start_sync` completions at once (async start_sync rollout
+//! step 6 pipelines them), so commonware's sync handles become plain calls: a returned
+//! `put_*` is durable.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -367,13 +368,13 @@ pub fn Manager(comptime V: type, comptime S: type) type {
         /// nothing to sync.
         pub fn start_sync_verified(self: *Self, round: Round) !void {
             const cache = self.find(round.epoch) orelse return;
-            try cache.verified_blocks.start_sync();
+            try (try cache.verified_blocks.start_sync()).wait_release();
         }
 
         /// Syncs every write the round's notarization archive accepted.
         pub fn start_sync_notarizations(self: *Self, round: Round) !void {
             const cache = self.find(round.epoch) orelse return;
-            try cache.notarizations.start_sync();
+            try (try cache.notarizations.start_sync()).wait_release();
         }
 
         /// Adds a notarization and syncs it.

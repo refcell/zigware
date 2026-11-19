@@ -3,7 +3,7 @@
 //!
 //! Restarts drop the archive (`deinit`) and reopen it on the same storage; `crash()` drops
 //! unsynced data as commonware's `start_and_recover` does. Commonware's pipelined
-//! `start_sync` tests have no counterpart: syncs here complete before returning.
+//! `start_sync` tests are in `start_sync_test.zig`.
 
 const std = @import("std");
 const testing = std.testing;
@@ -641,7 +641,7 @@ test "prunable prune keys" {
     try archive.put(1, test_key("key1-blah"), 1);
     try expect_key(&archive, "key1-blah", null);
     try archive.put(1, test_key("key1-blah"), 1);
-    try archive.start_sync();
+    try (try archive.start_sync()).wait_release();
     try archive.put_sync(2, test_key("key2-blfh"), 2);
     try expect_index(&archive, 1, null);
     try expect_index(&archive, 2, null);
@@ -853,7 +853,7 @@ test "prunable put_multi prune" {
     try archive.put_multi(2, test_key("ddd"), 40);
     try expect_key(&archive, "ddd", null);
     try archive.put_multi(2, test_key("ddd"), 41);
-    try archive.start_sync();
+    try (try archive.start_sync()).wait_release();
     try expect_all(&archive, 2, null);
     try archive.put_multi_sync(2, test_key("ddd"), 42);
     try expect_all(&archive, 2, null);

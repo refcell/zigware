@@ -35,7 +35,8 @@
 //!   its section. Markers trail proven syncs, publishing once a section is durable and idle
 //!   (or on an empty flush).
 //!
-//! Syncs complete synchronously, so marker generations are never in flight.
+//! Data syncs may be in flight (`start_sync_tracked`); marker generations still persist
+//! synchronously, so none is ever in flight.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -104,14 +105,7 @@ pub const Appended = struct {
     size: u32,
 };
 
-/// A sync completion that has already succeeded: syncs complete synchronously.
-const Done = struct {
-    pub fn poll(_: *Done) ?bool {
-        return true;
-    }
-};
-
-const Barrier = durability.Barrier(Done);
+const Barrier = durability.Barrier(durability.Sync);
 const Markers = metadata_mod.Metadata(u64, u64);
 
 /// Durable recovery state of a journal that validates every uncommitted value on replay.
@@ -124,9 +118,42 @@ const Tracking = struct {
     const SectionBarrier = struct { section: u64, barrier: Barrier };
 
     fn deinit(self: *Tracking) void {
-        self.barriers.deinit(self.metadata.gpa);
+        self.drop_barriers();
         self.metadata.deinit();
         self.* = undefined;
+    }
+
+    /// Free every barrier, returning their completions (the syncs themselves continue).
+    fn drop_barriers(self: *Tracking) void {
+        for (self.barriers.items) |*entry| entry.barrier.deinit();
+        self.barriers.deinit(self.metadata.gpa);
+        self.barriers = .empty;
+    }
+
+    /// Drop the barriers of sections below `min`.
+    fn drop_below(self: *Tracking, min: u64) void {
+        var kept: usize = 0;
+        for (self.barriers.items) |*entry| {
+            if (entry.section < min) {
+                entry.barrier.deinit();
+                continue;
+            }
+            self.barriers.items[kept] = entry.*;
+            kept += 1;
+        }
+        self.barriers.items.len = kept;
+        assert(kept == 0 or self.barriers.items[0].section >= min);
+    }
+
+    /// Stage the proven boundaries of barriers whose section is not `active`, then persist
+    /// them. Barriers still awaiting their sync claim only the boundary proven before it.
+    fn publish(self: *Tracking, active: []const u64) Markers.Error!void {
+        var dirty = false;
+        for (self.barriers.items) |*entry| {
+            if (contains(active, entry.section)) continue;
+            dirty = try self.stage_marker(entry.section, entry.barrier.boundary()) or dirty;
+        }
+        if (dirty) try self.persist();
     }
 
     fn marker(self: *const Tracking, section: u64) u64 {
@@ -170,6 +197,8 @@ const Tracking = struct {
             if (entry.barrier.boundary() > published or !entry.barrier.settled()) {
                 self.barriers.items[kept] = entry.*;
                 kept += 1;
+            } else {
+                entry.barrier.deinit();
             }
         }
         self.barriers.items.len = kept;
@@ -353,39 +382,66 @@ pub fn Oversized(comptime I: type, comptime V: type) type {
         pub fn sync_tracked(self: *Self, sections: []const u64, active: []const u64) Error!void {
             assert_ascending(sections);
             assert_ascending(active);
-            const tracking = &self.tracking.?;
-            const gpa = self.index.manager.gpa;
-            const lengths = try gpa.alloc(u64, sections.len);
-            defer gpa.free(lengths);
+            const lengths = try self.section_lengths(sections);
+            defer self.index.manager.gpa.free(lengths);
+            // Blocking syncs observe each buffer's started sync, leaving it clean.
+            try self.index.sync(sections);
+            try self.values.sync(sections);
+            try self.record(sections, lengths, Completion.ok);
+            try self.tracking.?.publish(active);
+        }
+
+        /// The index length of each of `sections` (owned by the caller).
+        fn section_lengths(self: *Self, sections: []const u64) Error![]u64 {
+            const lengths = try self.index.manager.gpa.alloc(u64, sections.len);
+            errdefer self.index.manager.gpa.free(lengths);
             for (sections, lengths) |section, *length| {
                 length.* = try self.index.section_len(section);
             }
-            try self.index.sync(sections);
-            try self.values.sync(sections);
-            // Every selected section's length is now proven durable.
-            for (sections, lengths) |section, length| {
-                (try tracking.barrier(section)).record(length, .{});
-            }
-            // Completed barriers stay as debt until their section is idle, or on an empty flush.
-            var dirty = false;
-            for (tracking.barriers.items) |*entry| {
-                if (contains(active, entry.section)) continue;
-                dirty = try tracking.stage_marker(entry.section, entry.barrier.boundary()) or dirty;
-            }
-            if (dirty) try tracking.persist();
+            return lengths;
         }
 
-        /// commonware's `start_sync_tracked`. Tracked syncs still complete, and publish their
-        /// markers, before returning here (its marker pipeline is not ported yet), so the
-        /// completion is ready.
+        /// Bind each section's length to `completion` in its barrier (borrowed: each barrier
+        /// takes its own reference).
+        fn record(
+            self: *Self,
+            sections: []const u64,
+            lengths: []const u64,
+            completion: Completion,
+        ) Allocator.Error!void {
+            assert(sections.len == lengths.len);
+            const tracking = &self.tracking.?;
+            for (sections, lengths) |section, length| {
+                const barrier = try tracking.barrier(section);
+                barrier.record(length, .{ .completion = completion.retain() });
+            }
+        }
+
+        /// Start a joint data sync of `sections` (ascending) and publish only boundaries
+        /// already proven durable, for tracked sections not `active` (ascending). The returned
+        /// completion (one reference, owned by the caller) covers only the data syncs. Each
+        /// selected section's barrier records it, so a later request publishes its length once
+        /// it is observed to have succeeded.
         pub fn start_sync_tracked(
             self: *Self,
             sections: []const u64,
             active: []const u64,
         ) Error!Completion {
-            assert(self.tracking != null);
-            try self.sync_tracked(sections, active);
-            return Completion.ok;
+            assert_ascending(sections);
+            assert_ascending(active);
+            const tracking = &self.tracking.?;
+            const lengths = try self.section_lengths(sections);
+            defer self.index.manager.gpa.free(lengths);
+            const index = try self.index.start_sync(sections);
+            const values = self.values.start_sync(sections) catch |err| {
+                index.release();
+                return err;
+            };
+            const joint = try Completion.join(index, values);
+            errdefer joint.release();
+            try self.record(sections, lengths, joint);
+            try tracking.publish(active);
+            return joint;
         }
 
         /// Sync both journals for the given `sections` (ascending).
@@ -433,13 +489,7 @@ pub fn Oversized(comptime I: type, comptime V: type) type {
                 const before = tracking.metadata.count();
                 tracking.metadata.retain(min, keep_at_least);
                 if (tracking.metadata.count() != before) try tracking.metadata.sync();
-                var kept: usize = 0;
-                for (tracking.barriers.items) |entry| {
-                    if (entry.section < min) continue;
-                    tracking.barriers.items[kept] = entry;
-                    kept += 1;
-                }
-                tracking.barriers.items.len = kept;
+                tracking.drop_below(min);
             }
             const index_pruned = try self.index.prune(min);
             const value_pruned = try self.values.prune(min);
@@ -482,7 +532,7 @@ pub fn Oversized(comptime I: type, comptime V: type) type {
             // what it owns; on error the journals not yet destroyed are only closed.
             defer self.* = undefined;
             if (self.tracking) |*tracking| {
-                tracking.barriers.deinit(self.index.manager.gpa);
+                tracking.drop_barriers();
                 // Remove the floors first, so an interrupted destroy only forces conservative
                 // recovery of the pair data left behind.
                 tracking.metadata.destroy() catch |err| { // Frees the markers.
