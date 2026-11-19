@@ -514,6 +514,8 @@ pub fn Harness(comptime F: type) type {
             hold_certifications: Hold = .none,
             /// Holds built handoff candidates for the test (commonware `handoff_responses`).
             hold_handoffs: bool = false,
+            /// The voter's metrics scope (commonware's context label, such as `restarted`).
+            scope: []const u8 = "voter",
             /// The voter's tracer (commonware `test_collect_traces`).
             tracer: runtime.telemetry.traces.Tracer = .none,
         };
@@ -800,7 +802,7 @@ pub fn Harness(comptime F: type) type {
                     .write_buffer = 10240,
                     .cache_ref = &self.page_cache,
                     .storage = journal_storage,
-                    .scope = ctx.scope.child("voter"),
+                    .scope = ctx.scope.child(options.scope),
                 });
                 self.voter.tracer = options.tracer;
                 const batcher =
@@ -889,6 +891,25 @@ pub fn Harness(comptime F: type) type {
             /// batcher and resolver mailboxes.
             pub fn restart(self: *VoterStack, ctx: Ctx, net: *Network, options: Options) !void {
                 self.stop_voter();
+                try self.start_voter(ctx, net, options);
+            }
+
+            /// Aborts the voter and starts a replacement over the same journal with a fresh
+            /// recording automaton and `options`' application behavior (commonware's restart
+            /// helpers, which build a new mock application with new observers).
+            pub fn replace(self: *VoterStack, ctx: Ctx, net: *Network, options: Options) !void {
+                self.stop_voter();
+                self.automaton = .{
+                    .application = &self.application,
+                    .io = self.io,
+                    .hold = options.hold_certifications,
+                    .hold_handoffs = options.hold_handoffs,
+                };
+                self.application.should_certify = options.certifier;
+                self.application.stall_proposals = options.stall_proposals;
+                self.application.drop_proposals = options.drop_proposals;
+                self.application.fail_verification = options.fail_verification;
+                self.application.handoff = options.handoff;
                 try self.start_voter(ctx, net, options);
             }
 
@@ -1148,6 +1169,17 @@ pub fn Harness(comptime F: type) type {
             label: []const u8,
             expected: []const Sample,
         ) !void {
+            return expect_counters_in(ctx, "", family, label, expected);
+        }
+
+        /// `expect_counters` over the series of metrics scope `prefix` only (all when empty).
+        pub fn expect_counters_in(
+            ctx: Ctx,
+            prefix: []const u8,
+            family: []const u8,
+            label: []const u8,
+            expected: []const Sample,
+        ) !void {
             const gpa = ctx.gpa();
             const encoded = try ctx.scope.encode(gpa);
             defer gpa.free(encoded);
@@ -1160,6 +1192,7 @@ pub fn Harness(comptime F: type) type {
             var lines = std.mem.splitScalar(u8, encoded, '\n');
             // Bounded by the encoded text.
             while (lines.next()) |line| {
+                if (!std.mem.startsWith(u8, line, prefix)) continue;
                 const at = std.mem.indexOf(u8, line, pattern) orelse continue;
                 const rest = line[at + pattern.len ..];
                 const quote = std.mem.indexOfScalar(u8, rest, '"') orelse continue;
@@ -1231,8 +1264,18 @@ pub fn Harness(comptime F: type) type {
             events: []const Sample,
             abandoned: []const Sample,
         ) !void {
-            try expect_counters(ctx, "handoff_events", "event", events);
-            try expect_counters(ctx, "handoff_abandoned", "reason", abandoned);
+            try expect_handoff_metrics_in(ctx, "", events, abandoned);
+        }
+
+        /// `expect_handoff_metrics` over metrics scope `prefix` only.
+        pub fn expect_handoff_metrics_in(
+            ctx: Ctx,
+            prefix: []const u8,
+            events: []const Sample,
+            abandoned: []const Sample,
+        ) !void {
+            try expect_counters_in(ctx, prefix, "handoff_events", "event", events);
+            try expect_counters_in(ctx, prefix, "handoff_abandoned", "reason", abandoned);
         }
 
         /// The position among debug events of the first `content` event whose innermost span is

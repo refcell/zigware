@@ -20,6 +20,7 @@ test {
             _ = @import("verification_test.zig").Tests(h);
             _ = @import("handoff_cancel.zig").Tests(h);
             _ = @import("handoff_supersede.zig").Tests(h);
+            _ = @import("handoff_restart.zig").Tests(h);
         }
     }
 }

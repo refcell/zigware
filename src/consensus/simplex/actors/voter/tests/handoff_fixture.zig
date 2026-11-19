@@ -74,6 +74,23 @@ pub fn Fixture(comptime h: type) type {
             self.* = undefined;
         }
 
+        /// commonware `HandoffFixture::restart`: aborts the voter and starts its replacement
+        /// over the same journal, under metrics scope `scope` with the fixture's validator,
+        /// elector, and timeouts and the rest of `options`. Drops the taken candidate and
+        /// earlier relays, as the replacement's new relay observer would not see them.
+        pub fn restart(self: *Self, ctx: Ctx, scope: []const u8, options: h.Options) !void {
+            var merged = options;
+            merged.leader_timeout_ms = 10_000;
+            merged.certification_timeout_ms = 10_000;
+            merged.timeout_retry_ms = 30_000;
+            merged.local_index = self.local;
+            merged.elector = h.term_elector(2, 30_000, 1);
+            merged.scope = scope;
+            self.candidate = null;
+            try self.stack.replace(ctx, &self.net, merged);
+            while (self.relayed.try_next()) |_| {}
+        }
+
         /// The taken candidate's payload.
         pub fn digest(self: *const Self) h.Digest {
             return self.candidate.?.digest();
