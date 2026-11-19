@@ -164,3 +164,25 @@ variants (MinPk, MinSig) must match exactly.
   and the FeldmanTranscript conformance hashes.
 - 2026-11-13: feldman_desmedt Logs, observe, Player, deal, the test plan, and 48 tests.
 - 2026-11-13: bls12381 scheme keys and signatures with their 3 conformance hashes.
+
+## Test audit (2026-11-19, against main)
+
+Every commonware `#[test]` in this lane's crates (macro and rstest cases expanded where noted), matched by reading both sides: ported (a Zig test checks the behavior, often one consolidated test), open, or not portable with the reason. Written by the consensus-marshal lane; tick a box when its test lands.
+
+### math
+| File | Tests | Ported | Open | Not portable |
+| --- | --- | --- | --- | --- |
+| algebra.rs | 1 | 1 | 0 | 0 |
+| fields/goldilocks.rs | 7 | 7 | 0 | 0 |
+| ntt.rs | 7 | 7 | 0 | 0 |
+| poly.rs | 4 | 4 | 0 | 0 |
+| synthetic.rs | 3 | 3 | 0 | 0 |
+| test.rs | 2 | 2 | 0 | 0 |
+| Total | 24 | 24 | 0 | 0 |
+
+Open:
+- none
+
+Not portable:
+- none
+

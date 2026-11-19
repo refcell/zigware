@@ -207,3 +207,170 @@ the registry API first and report it.
 - 2026-11-16: io_uring: one worker ring per thread; runtime benches; io_uring stays opt-in.
 - 2026-11-16: traces: `Subscriber`, `Event`, and `Context.tracer` over the runner's subscriber.
 - 2026-11-16: `runtime.resolver`: `Context.resolve` on both runners, deterministic DNS table.
+
+## Test audit (2026-11-19, against main)
+
+Every commonware `#[test]` in this lane's crates (macro and rstest cases expanded where noted), matched by reading both sides: ported (a Zig test checks the behavior, often one consolidated test), open, or not portable with the reason. Written by the consensus-marshal lane; tick a box when its test lands.
+
+### runtime (iouring/)
+| File | Tests | Ported | Open | Not portable |
+| --- | --- | --- | --- | --- |
+| iouring/driver.rs | 40 | 3 | 3 | 34 |
+| iouring/idle.rs | 12 | 0 | 0 | 12 |
+| iouring/mailbox.rs | 5 | 0 | 0 | 5 |
+| iouring/operation.rs | 21 | 0 | 1 | 20 |
+| iouring/pool.rs | 10 | 0 | 0 | 10 |
+| iouring/queue.rs | 34 | 0 | 0 | 34 |
+| iouring/request.rs | 26 | 1 | 8 | 17 |
+| iouring/slab.rs | 5 | 0 | 0 | 5 |
+| iouring/sleep.rs | 13 | 0 | 0 | 13 |
+| iouring/sockaddr.rs | 2 | 0 | 0 | 2 |
+| iouring/spinner.rs | 14 | 0 | 0 | 14 |
+| iouring/task.rs | 32 | 0 | 0 | 32 |
+| iouring/tasks.rs | 13 | 0 | 0 | 13 |
+| iouring/tests.rs | 96 | 2 | 1 | 93 |
+| iouring/timeout.rs | 17 | 0 | 0 | 17 |
+| iouring/waiter.rs | 15 | 2 | 2 | 11 |
+| iouring/waker.rs | 42 | 0 | 0 | 42 |
+| Total | 397 | 8 | 15 | 374 |
+
+Open:
+- [ ] `iouring/driver.rs:1355` `test_expired_registration_never_stages`: an already-expired
+  deadline submits nothing
+- [ ] `iouring/driver.rs:1537` `test_completion_wins_cancellation`: a success CQE after cancel
+  keeps its result
+- [ ] `iouring/driver.rs:2929` `test_enter_distinguishes_timeout_from_failure`: enter treats
+  ETIME as a timeout, other errors as failure
+- [ ] `iouring/operation.rs:369` `test_expired_registration_does_not_consume_ready_data`:
+  expired recv leaves socket data unread
+- [ ] `iouring/request.rs:1439` `test_cqe_result_from_raw_retryable_codes`: EAGAIN, EWOULDBLOCK,
+  and EINTR results retry
+- [ ] `iouring/request.rs:1526` `test_scalar_length_prefix_boundary`: an I/O length above
+  u32::MAX is clamped per SQE
+- [ ] `iouring/request.rs:1537` `test_scalar_builders_preserve_partial_progress`: resubmitted
+  send/recv/read SQEs start after prior progress
+- [ ] `iouring/request.rs:1574` `test_active_send_paths`: send retries EAGAIN, crosses buffers,
+  maps errors to SendFailed
+- [ ] `iouring/request.rs:1613` `test_active_recv_paths`: recv retry, exact vs. partial
+  completion, EOF and error mapping
+- [ ] `iouring/request.rs:1652` `test_active_read_at_paths`: read_at retries, accumulates, short
+  read gives InsufficientLength, EIO ReadFailed
+- [ ] `iouring/request.rs:2125` `test_large_single_write_preserves_progress_and_durability`:
+  write above u32::MAX bytes completes across CQEs
+- [ ] `iouring/request.rs:2167` `test_active_write_at_paths`: write_at retries, keeps its prefix,
+  0/EIO/ECANCELED give WriteFailed
+- [ ] `iouring/tests.rs:1082`
+  `test_nested_same_directory_rejected_before_closure_and_outer_remains_usable`: second runner
+  on a held dir fails first
+- [ ] `iouring/waiter.rs:991` `test_cancellation_preserves_terminal_results`: a result or error
+  that beats cancel wins over Timeout
+- [ ] `iouring/waiter.rs:1026`
+  `test_orphaned_reads_and_sends_stop_before_staging_or_after_partial_completion`: dropped
+  op stops after partial progress
+
+Not portable:
+- [executor] means the lane decision in docs/lanes/runtime-telemetry.md: "Commonware's
+  iouring executor (tasks scheduled on the ring thread) is not ported"; tasks stay on `std.Io`
+- `iouring/mailbox.rs` `test_take_requires_empty_scratch`, `iouring/spinner.rs`
+  `test_new_panics_when_budget_exceeds_max`, `iouring/tasks.rs`
+  `test_drain_of_an_open_set_is_rejected`: #[should_panic], and the type is in the
+  [executor] that was not ported
+- `iouring/task.rs` (all 32), `iouring/tasks.rs` (other 12), `iouring/pool.rs` (all 10),
+  `iouring/queue.rs` (all 34), `iouring/idle.rs` (all 12), `iouring/spinner.rs` (other 13),
+  `iouring/mailbox.rs` (other 4): task cells, task sets, work-stealing run queues, the
+  global queue, idle/search accounting, the idle spinner, and the cross-worker mailbox are
+  all [executor] parts; `std.Io.Threaded` schedules Zig tasks
+- `iouring/waker.rs` (all 42): eventfd/futex parking and wake dedup for ring threads
+  [executor]. A Zig worker blocks only in its own `io_uring_enter` and never takes wakes
+  from other threads
+- `iouring/sleep.rs` (all 13): the executor's timer registry [executor]. Zig sleeps go
+  through `std.Io` (`ctx.sleep`)
+- `iouring/tests.rs` (93; all but 1082, 1114, 3661): end-to-end tests of commonware's
+  iouring Runner as an executor [executor]: root/spawn/dedicated/foreign-context placement,
+  factories and reservations, worker startup failure, panic containment and policy, TLS
+  teardown, shutdown and teardown ordering, work stealing and global-queue intervals,
+  search counts, worker-closure lifetimes of operations and direct/paged reads, the
+  pending-operations gauge, queued writes drained at shutdown, and config validation of
+  executor settings (workers, queue interval, spinner, timeout wheel); includes the
+  rstest cases of `test_worker_closure_wakes_shared_observers_before_forwarding` and
+  `test_paged_replay_survives_the_worker_that_issued_its_reads_closing`
+- `iouring/operation.rs` (20; all but 369): async `Operation` handles registered on a worker,
+  with observer/waker clones, forwarding to other threads, escaping a worker's closure, and
+  queuing behind a full ring. Zig's `perform` is synchronous on the calling thread's ring
+  (one op plus its cancel), so operations never move, queue, or get orphaned [executor]
+- `iouring/driver.rs` (31): `test_unconsumed_results_leave_staging_and_deadline_tracking`,
+  `test_cancelled_backlog_compacts_at_staging_limit`,
+  `test_expired_backlog_compacts_at_staging_limit`,
+  `test_staging_limit_parks_and_preserves_fifo_across_growth`,
+  `test_queued_expiry_and_cancellation_progress_at_staging_limit`,
+  `test_unconsumed_result_releases_staging_capacity`,
+  `test_staging_discards_stale_ids_with_full_sq`,
+  `test_advance_timeouts_ignores_stale_entry_after_slot_reuse`,
+  `test_deadline_registration_uses_refreshed_wheel`,
+  `test_unsupported_deadline_is_rejected_without_submission`,
+  `test_cancel_acknowledgement_invariants`,
+  `test_request_retirement_releases_hold_before_cancel_acknowledgement`,
+  `test_orphaned_follow_up_cannot_stage_reused_slot`,
+  `test_orphaned_read_retries_do_not_requeue`, `test_expiring_bucket_preserves_unconsumed_success`,
+  `test_stale_waiter_identity_cannot_orphan_reused_slot`,
+  `test_deferred_taskrun_is_serviced_during_busy_turn`,
+  `test_wake_poll_alone_does_not_require_kernel_service`,
+  `test_skipped_park_keeps_deferred_service_obligation`, `test_publish_wakes_eventfd_blocked_loop`,
+  `test_park_rearms_wake_poll_with_full_sq`,
+  `test_transient_flush_without_sq_progress_returns_through_service`,
+  `test_partial_completion_releases_capacity_to_next_queued_request`,
+  `test_same_open_sync_waits_for_failure_accounting`,
+  `test_durable_write_keeps_permit_through_follow_up_sqes`,
+  `test_blocked_durability_does_not_count_as_ready_during_compaction`,
+  `test_durability_admitted_after_service_registers_its_wait`,
+  `test_foreign_durability_release_wakes_closed_worker_park`,
+  `test_shutdown_finishes_orphaned_write_and_detached_sync`,
+  `test_busy_service_and_expired_park_do_not_sleep`,
+  `test_every_enter_reports_a_dropped_completion`: internals of commonware's multiplexed
+  driver: the staging queue and SQ limit, waiter-slot reuse, the timeout wheel, the
+  wake-poll/eventfd park, deferred-taskrun service, per-open durability permits, orphaned
+  ops, and CQ overflow. Zig has one op plus one cancel per thread ring, so there is no
+  queue, slab, wheel, park, permit, or overflow
+- `iouring/driver.rs` `test_cancelled_direct_reads_retain_their_owners_until_completion`,
+  `test_forwarded_direct_read_falls_back_through_its_observer`,
+  `test_direct_reads_are_served_by_the_direct_descriptor`: O_DIRECT reads; zigware storage
+  has no direct-I/O path
+- `iouring/request.rs` `test_direct_read_covers_the_aligned_superset`,
+  `test_direct_chunks_progress_under_every_page_cap`, `test_direct_read_completion_sequences`,
+  `test_direct_fallback_rereads_the_range_and_keeps_buffered_progress`: O_DIRECT reads (none in
+  zigware)
+- `iouring/request.rs` `test_uncached_read_fallback_preserves_progress_and_is_shared_with_writes`,
+  `test_queued_cache_fallbacks_retry`, `test_uncached_sync_write_retries_without_hint_when_unsupported`:
+  RWF_DONTCACHE hint fallback; Zig ring ops pass no rw flags
+- `iouring/request.rs` `test_sync_completion_credits_only_its_successful_barrier`,
+  `test_durability_completion_retains_failure`: commonware's per-open durability tracker
+  (fused RWF_DSYNC writes, sync barriers); Zig's fsync is a plain synchronous op
+- `iouring/request.rs` `test_connect_completion_rules`, `test_poll_completion_rules`: connect and
+  accept-poll over the ring; Zig does only recv/sendmsg there (connect/accept use `std.Io`)
+- `iouring/request.rs` `test_write_cursor_retains_owners_across_batches`,
+  `test_write_cursor_single_and_overrun`, `test_partial_progress_retires_reentrant_panicking_owner`,
+  `test_complete_preserves_status_and_read_buffers`: Rust ownership of `IoBufs` owners across
+  SQEs (drop timing, reentrant/panicking destructors)
+- `iouring/request.rs` `test_request_metadata_and_sqe_tags`,
+  `test_read_builders_reject_invalid_buffer_bounds`: commonware `Request` enum metadata and
+  builder assertions with no Zig counterpart type
+- `iouring/waiter.rs` (11): `test_user_data_encoding`,
+  `test_cqe_resolves_full_generation_after_kernel_wrap`,
+  `test_retained_result_does_not_count_as_pending_or_recycle_early`,
+  `test_exhausted_generation_retires_slot_after_result_consumption`,
+  `test_observer_refresh_and_completion_defer_waking`, `test_invalid_ids`,
+  `test_failed_sqe_construction_keeps_request_unsubmitted`,
+  `test_queued_timeout_retains_result_until_drop`,
+  `test_close_defers_local_and_forwarded_notifications`,
+  `test_close_clears_results_and_keeps_unobserved_syncs`,
+  `test_growth_preserves_in_flight_identity_and_counts`: generational waiter slab, user_data
+  encoding, retained results, and worker close. Zig uses fixed user_data 1 (op) and 2 (cancel)
+  and returns results directly
+- `iouring/timeout.rs` (all 17): the timeout wheel; Zig uses `EXT_ARG` timed enters of at
+  most 20 ms against a per-op deadline
+- `iouring/slab.rs` (all 5): the generational slab behind waiters and timers; none in Zig
+- `iouring/sockaddr.rs` (both 2): raw sockaddr conversion for ring connect; Zig never
+  connects over the ring
+
+Behavior gap found by the audit: `production/ring.zig` `abort` waits for the operation and its cancel, then returns the error even when the operation completed, so a recv that lost a cancel or timeout race drops bytes it already read. commonware keeps the completed result (iouring `driver.rs:1537`, `waiter.rs:991`).
+

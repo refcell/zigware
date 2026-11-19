@@ -154,3 +154,298 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
 - 2026-11-13: run_tiles (Grid, Tiles, Shares claim/steal) with ported tile tests.
 - 2026-11-13: Strategy interface (Sequential, Rayon over a std.Io fork-join pool), batches,
   parallel sorts, ported lib.rs tests.
+
+## Test audit (2026-11-19, against main)
+
+Every commonware `#[test]` in this lane's crates (macro and rstest cases expanded where noted), matched by reading both sides: ported (a Zig test checks the behavior, often one consolidated test), open, or not portable with the reason. Written by the consensus-marshal lane; tick a box when its test lands.
+
+### parallel (lib.rs, mocks.rs, policy.rs, topology.rs)
+| File | Tests | Ported | Open | Not portable |
+| --- | --- | --- | --- | --- |
+| lib.rs | 106 | 37 | 15 | 54 |
+| mocks.rs | 12 | 9 | 0 | 3 |
+| policy.rs | 83 | 49 | 34 | 0 |
+| topology.rs | 35 | 7 | 0 | 28 |
+| Total | 236 | 102 | 49 | 85 |
+
+Open:
+- [ ] `lib.rs:3790` `spawn_inlines_a_sub_overhead_job`: adaptive spawn honors an inline decision
+  (runs on caller)
+- [ ] `lib.rs:3833` `spawn_keeps_offloading_big_jobs`: adaptive spawn of a 2ms job always runs on
+  the pool
+- [ ] `lib.rs:3885` `measured_run_records_busy_time_of_all_items`: map busy time is the sum of item
+  times
+- [ ] `lib.rs:3894` `measured_join_excludes_idle_waits`: join is charged both sides' work, not the
+  joiner's wait
+- [ ] `lib.rs:3928` `measured_run_excludes_queueing`: busy time excludes the time queued behind busy
+  workers
+- [ ] `lib.rs:4520` `run_batches_runs_serial_decision_on_calling_thread`: serial policy decision
+  gives one whole batch
+- [ ] `lib.rs:4669` `run_batches_records_only_complete_success`: mapping or assembly errors record
+  no samples
+- [ ] `lib.rs:4697` `run_batches_keeps_one_policy_decision_and_fixed_execution`: one run_batches
+  makes one policy entry
+- [ ] `lib.rs:5043` `adaptive_policy_records_all_adaptive_operations`: each of 12 operations makes
+  its own entry
+- [ ] `lib.rs:5095` `adaptive_policy_buckets_by_input_size`: map lens 1, 2, 3 make two entries
+- [ ] `lib.rs:5106` `adaptive_policy_buckets_by_work_multiplier`: multipliers 1, 2, 3 make two
+  entries
+- [ ] `lib.rs:5117` `adaptive_run_buckets_by_input_size`: run lens 1, 2, 3 make two entries
+- [ ] `lib.rs:5162` `adaptive_policy_keys_default_methods_by_external_callsite`: fold and
+  run_batches key by the caller
+- [ ] `lib.rs:5175` `adaptive_policy_keys_partition_map_by_external_callsite`: map_partition keys by
+  the caller
+- [ ] `lib.rs:5189` `join_shares_policy_entry_per_callsite`: repeated joins at one site share one
+  entry
+- [ ] `policy.rs:2140` `spawn_placement_recovers_cold_loser`: a cold Wide seed regains the lead at
+  its probe
+- [ ] `policy.rs:2165` `spawn_placement_recovers_after_spike`: one slow Wide sample's lead loss is
+  undone
+- [ ] `policy.rs:2210` `spawn_placement_slow_probe_stays_damped`: a slow probe blends and keeps
+  normal backoff
+- [ ] `policy.rs:2234` `spawn_placement_reverts_lucky_probe`: a lucky Wide probe loses the lead
+  within two samples
+- [ ] `policy.rs:2274` `spawn_round_trip_skips_placement`: a round trip alone seeds no placement
+- [ ] `policy.rs:2309` `spawn_overflow_leaves_seeds_untouched`: overflow roots don't advance
+  placement seeds
+- [ ] `policy.rs:2487` `choice_local_seed_keeps_serial_due`: seeds Wide, Local, probe, then serial
+  seed
+- [ ] `policy.rs:2518` `confined_seed_preserves_cadence_after_serial`: a late Wide seed sets no
+  immediate boundary
+- [ ] `policy.rs:2550` `confined_wide_leaves_local_seed_due`: a confined Wide caller leaves the
+  Local seed due
+- [ ] `policy.rs:2600` `choice_parallel_estimate_tracks_preferred_placement`: parallel estimate is
+  the preferred placement's
+- [ ] `policy.rs:2668` `busy_budget_ignores_strategy_parallelism`: the serial budget uses busy time
+  at parallelism 64
+- [ ] `policy.rs:2706` `local_busy_time_tracks_recent_runs`: cheaper Local runs lower busy time and
+  allow serial
+- [ ] `policy.rs:2892` `confined_calls_compare_own_placement`: a confined caller races serial
+  against its placement
+- [ ] `policy.rs:2940` `interleaved_callers_choose_fastest_paths`: mixed callers on one entry each
+  get their best
+- [ ] `policy.rs:2990` `confined_calls_rediscover_faster_placement`: confined probes find a
+  placement now faster
+- [ ] `policy.rs:3009` `confined_calls_notice_serial_slowdown`: a confined caller moves off serial
+  when it slows
+- [ ] `policy.rs:3028` `confined_calls_probe_while_serial_wins`: confined probes find their
+  placement beats serial
+- [ ] `policy.rs:3069` `choice_rediscovers_placement_while_serial_wins`: the choice finds a faster
+  stale placement
+- [ ] `policy.rs:3113` `choice_caps_probes_while_serial_wins`: each losing placement is probed once
+  per capped interval
+- [ ] `policy.rs:3151` `choice_ignores_ineligible_serial_when_pacing`: an over-budget serial doesn't
+  stretch probe pacing
+- [ ] `policy.rs:3193` `confined_calls_keep_big_work_parallel`: an over-budget confined placement
+  never samples serial
+- [ ] `policy.rs:3226` `confined_calls_pay_only_own_probes`: a confined caller pays only its own
+  cadence's probes
+- [ ] `policy.rs:3269` `confined_calls_leave_choice_untouched`: Local-only samples leave Wide's seed
+  due
+- [ ] `policy.rs:3322` `interleaved_callers_keep_independent_cadences`: interleaved populations
+  decide as if alone
+- [ ] `policy.rs:3379` `confined_local_samples_update_shared_choice`: confined Local samples move
+  the choice to Wide
+- [ ] `policy.rs:3416` `choice_advances_run_cadence_once`: a choice caller advances the run cadence
+  once per call
+- [ ] `policy.rs:3467` `interleaved_callers_refresh_local_estimate`: the Local estimate follows a
+  slowdown under any rhythm
+- [ ] `policy.rs:3546` `interleaved_callers_rediscover_faster_local_placement`: the choice caller's
+  probes return to Local
+- [ ] `policy.rs:3605` `confined_races_back_off_until_flip`: a close race backs off, then resets on
+  a flip
+- [ ] `policy.rs:3667` `confined_flips_reset_confirmations_between_boundaries`: flips between
+  boundaries reset to the base
+- [ ] `policy.rs:3718` `confined_noisy_races_rediscover_stale_placement`: stale Wide overtakes
+  serial at the derived call
+- [ ] `policy.rs:3835` `spawn_workers_preserve_outside_inline_preference`: worker spawns keep
+  outside callers inlining
+- [ ] `policy.rs:3866` `spawn_workers_learn_inline_preference`: a worker-only site settles inline
+- [ ] `policy.rs:3890` `spawn_populations_keep_independent_cadences`: worker and outside spawns keep
+  separate cadences
+
+Not portable:
+- `lib.rs` `forced_parallel_uses_idle_group`, `local_calls_home_group`,
+  `nested_calls_record_current_placement`, `unhomed_calls_compare_remote_group`,
+  `single_group_places_outside_calls`, `fold_init_wide_seed_preserves_order`,
+  `local_nested_calls_stay_on_group`, `wide_nested_calls_span_groups`,
+  `sort_inherits_worker_placement`, `local_calls_use_only_group_workers`,
+  `grouped_jobs_and_runs_complete`, `spawn_inline_leaves_groups_untouched`,
+  `sort_leases_only_its_group`, `join_seeds_wide_then_home_group`,
+  `waiting_worker_runs_queued_dependencies`, `root_keeps_claim_on_execution_group`,
+  `root_uses_learned_descendant_width`, `narrow_root_runs_wide_unrecorded`,
+  `spawn_inherits_worker_placement`, `spawn_dropped_future_keeps_claims`,
+  `spawn_detached_local_keeps_group_busy`, `spawn_detached_wide_keeps_groups_busy`,
+  `wide_calls_wake_all_groups`, `spawn_overflow_leaves_placement_untouched`,
+  `spawn_moved_future_helps_grouped_workers`, `placed_runs_plan_placement_width`: grouped pools,
+  leases, homing, and descendant placement are not ported (lane Decisions: the pool is one group)
+- `lib.rs` `single_group_calls_use_pool_workers`: zigware's caller runs one job and helps while it
+  waits (lane Decisions), so items do run on the caller
+- `lib.rs` `rayon_spawn_propagates_job_panic`, `sequential_spawn_propagates_job_panic`:
+  #[should_panic]
+- `lib.rs` `spawn_panic_records_nothing`, `panicking_spawns_are_charged_before_they_propagate`:
+  panicking jobs caught with catch_unwind
+- `lib.rs` `spawn_worker_records_separate_overhead`: every zigware spawner counts as outside; pool
+  workers have no identity (lane Decisions)
+- `lib.rs` `spawns_awaited_outside_the_pool_are_charged_once`,
+  `spawns_awaited_on_a_worker_are_charged_once`,
+  `worker_spawns_awaited_outside_the_pool_are_charged_at_most_once`,
+  `enclosing_runs_are_charged_for_spawns_of_nested_runs`,
+  `fan_out_outside_the_pool_is_charged_for_its_parks`, `measured_run_includes_nested_runs`,
+  `block_on_on_a_worker_is_charged_the_job`,
+  `block_on_on_a_worker_is_charged_another_strategy_s_job`: rayon per-thread busy accounting of
+  awaited and nested work (TestClock, install on a worker); zigware charges a `run` body its wall
+  time (rayon.zig)
+- `lib.rs` `runs_outside_the_pool_poll_spawns_without_blocking`,
+  `block_on_outside_the_pool_charges_the_job_not_the_wait`,
+  `block_on_outside_the_pool_charges_the_future_s_own_work`,
+  `block_on_outside_the_pool_sums_jobs_and_nested_runs`, `inline_spawns_while_waiting_are_charged`,
+  `nested_block_on_keeps_the_outer_wake`, `spawn_future_moved_from_outside_to_worker_keeps_helping`,
+  `spawn_driven_inline_on_member_thread`: polling, moving, or block_on of arbitrary futures;
+  zigware's spawn takes a caller-owned Task, not a future (lane Decisions)
+- `lib.rs` `nested_calls_use_current_pool`, `new_keeps_builder_settings`,
+  `taken_over_thread_leaves_no_jobs`: rayon builder and worker features (install_in, thread names,
+  start handler, use_current_thread, yield_now)
+- `lib.rs` `adaptive_policy_is_scoped_to_rayon`, `adaptive_policy_is_shared_by_clones`,
+  `strategy_without_policy_records_nothing`: Rust's per-Rayon Arc policy, Clone, and without_policy;
+  zigware's policy is opt-in, caller-owned, shared by pointer
+- `mocks.rs` `pending_rejects_single_worker`,
+  `parallel_explorer_refuses_to_inline_a_handed_off_job`: #[should_panic]
+- `mocks.rs` `explore_drops_its_pool_on_return`: Arc weak-pointer drop check
+- `topology.rs` `build_accounts_for_all_workers`, `local_homes_and_reuses_idle_group`,
+  `local_keeps_home_after_work_finishes`, `fixed_homes_never_move`, `local_homes_only_idle_groups`,
+  `local_concurrent_callers_share_home`, `local_claims_home_set_during_scan`,
+  `wide_claims_groups_and_prefers_home`, `root_avoids_home_leased_by_others`,
+  `root_homes_or_takes_least_loaded`, `root_widening_refreshes_group_recency`,
+  `root_admission_excludes_placement_claims`, `root_admission_stays_within_group_width`,
+  `single_group_admits_all_roots`, `single_group_tracks_only_known_domains`,
+  `narrow_group_takes_only_wide_calls`, `build_splits_threads_by_domain_width`,
+  `build_sizes_groups_by_allowed_cpus`, `fixed_homes_use_effective_worker_count`,
+  `partition_homes_groups_at_build`, `floating_workers_exclude_established_homes`,
+  `unusable_mask_restores_inherited_mask`, `single_group_keeps_first_home_mask`,
+  `narrow_domain_takes_no_home`, `nudge_moves_caller_home_temporarily`,
+  `nudge_leaves_caller_in_place`, `nudge_leaves_foreign_workers_in_place`,
+  `local_panic_restores_caller_mask`: group leases, homing, and affinity writes are not ported (lane
+  Decisions: topology model only, the pool is one group)
+
+### parallel (rayon/)
+| File | Tests | Ported | Open | Not portable |
+| --- | --- | --- | --- | --- |
+| rayon/bridge.rs | 33 | 5 | 1 | 27 |
+| rayon/broadcast/test.rs | 13 | 0 | 0 | 13 |
+| rayon/join/test.rs | 9 | 0 | 3 | 6 |
+| rayon/meter/test.rs | 22 | 0 | 3 | 19 |
+| rayon/registry/injector.rs | 1 | 0 | 0 | 1 |
+| rayon/registry/test.rs | 32 | 0 | 0 | 32 |
+| rayon/sort.rs | 12 | 3 | 5 | 4 |
+| rayon/spawn/test.rs | 4 | 1 | 1 | 2 |
+| rayon/test.rs | 7 | 1 | 1 | 5 |
+| rayon/thread_pool/test.rs | 21 | 2 | 0 | 19 |
+| rayon/wake_loom_tests.rs | 3 | 0 | 0 | 3 |
+| Total | 157 | 12 | 14 | 131 |
+
+Open:
+- [ ] `rayon/bridge.rs:1961` `try_fold_stops_at_an_error_and_drops_every_item_once`: try_fold
+  stops at the failing item serially; parallel returns one of several errors
+- [ ] `rayon/join/test.rs:46` `sort`: recursive join quicksort on a pool sorts random data
+- [ ] `rayon/join/test.rs:55` `sort_in_pool`: recursive join quicksort of 12K items in a pool
+- [ ] `rayon/join/test.rs:124` `join_counter_overflow`: 500,000 joins on a 2-thread pool all
+  run both sides
+- [ ] `rayon/meter/test.rs:147` `inline_joins_charge_both_sides`: a metered join charges both
+  sides' busy time
+- [ ] `rayon/meter/test.rs:158` `joins_charge_the_stolen_side_but_not_the_wait`: metered join
+  charges the stolen side's time, not the wait
+- [ ] `rayon/meter/test.rs:206` `spawned_jobs_charge_nothing`: spawned jobs run while a metered
+  run waits add no busy time
+- [ ] `rayon/sort.rs:1879` `sorts_presorted_runs`: stable sort of ascending, descending, and
+  chunk-reversed inputs
+- [ ] `rayon/sort.rs:1903` `sorts_zero_sized_values`: stable sort of zero-sized items never
+  calls the comparator
+- [ ] `rayon/sort.rs:1945` `quicksorts_presorted_reversed_and_equal_inputs`: unstable sort of
+  presorted, reversed, equal, perturbed inputs
+- [ ] `rayon/sort.rs:2014` `quicksorts_zero_sized_values`: unstable sort of zero-sized, empty,
+  one-item slices
+- [ ] `rayon/sort.rs:2031` `an_inconsistent_comparator_still_permutes_the_slice`: random
+  comparator keeps every element; a resort restores order
+- [ ] `rayon/spawn/test.rs:20` `spawn_then_join_in_worker`: a spawn from inside a pool job runs
+  and delivers its result
+- [ ] `rayon/test.rs:47` `check_config_build`: a pool built with N threads reports N threads
+
+Not portable:
+- `rayon/bridge.rs` `produce_too_many_items`, `produce_fewer_items`,
+  `left_produces_items_with_no_complete`, `right_produces_items_with_no_complete`,
+  `left_produces_too_many_items`, `right_produces_too_many_items`, `left_produces_fewer_items`,
+  `only_left_result`, `only_right_result`, `reducer_does_not_preserve_order`,
+  `right_produces_fewer_items`, `left_panics`, `right_panics`: #[should_panic]
+- `rayon/bridge.rs` `try_map_drops_every_item_when_an_output_drop_panics`,
+  `a_panicking_map_drops_every_item_and_output_once`, `a_panicking_fold_drops_every_item_once`,
+  `operations_require_a_worker`, `collect_drop_on_unwind`, `collect_drop_on_unwind_zst`,
+  `produces_items_with_no_complete`, `left_produces_fewer_items_drops`: catch_unwind panics
+  and drop counting
+- `rayon/bridge.rs` `check_move`, `check_drops`, `drain_producer_drops_unproduced_items`: Rust
+  move semantics and drop counting
+- `rayon/bridge.rs` `drain_producer_split_at`: rayon's Producer/DrainProducer not ported
+  (lane Decisions: no rayon port)
+- `rayon/bridge.rs` `reductions_follow_the_tree_of_splits`, `a_stolen_half_splits_again`:
+  rayon's adaptive split tree; zigware splits into min(len, 64) balanced chunks (Decisions)
+- `rayon/broadcast/test.rs` all 13 (`broadcast_pool`, `spawn_broadcast_pool`,
+  `broadcast_self`, `spawn_broadcast_self`, `broadcast_mutual`, `spawn_broadcast_mutual`,
+  `broadcast_mutual_sleepy`, `spawn_broadcast_mutual_sleepy`, `broadcast_panic_one`,
+  `broadcast_panic_many`, `broadcast_sleep_race`, `broadcast_after_spawn_broadcast`,
+  `broadcast_after_spawn`): broadcast API not ported (no rayon port); panic ones also panic
+- `rayon/join/test.rs` `panic_propagate_a`, `panic_propagate_b`, `panic_propagate_both`:
+  #[should_panic]; `panic_b_still_executes`: catch_unwind
+- `rayon/join/test.rs` `join_context_neither`, `join_context_second`: join_context/migrated
+  not ported (workers are std.Io tasks with no identity)
+- `rayon/meter/test.rs` `charges_the_calling_thread_until_it_leaves`,
+  `entering_the_current_context_keeps_charging`, `suspension_charges_nothing_and_resumes`,
+  `charges_land_on_the_current_run`, `blocked_threads_are_charged_for_the_wait`,
+  `parked_contexts_charge_nothing_until_resumed`,
+  `parked_contexts_receive_charges_and_nested_runs`,
+  `unparked_work_on_a_parked_context_is_charged`, `parking_nests_and_ignores_no_context`,
+  `contexts_are_scoped_to_their_runs`: meter Context/suspend/park/charge API not ported;
+  zigware meters pool-job time in `Rayon.execute`
+- `rayon/meter/test.rs` `nested_runs_charge_the_enclosing_run_once`,
+  `nested_runs_on_workers_charge_the_enclosing_run_once`: zigware adapts and measures only
+  the outermost call (lane Log 2026-11-13)
+- `rayon/meter/test.rs` `context_is_restored_when_op_unwinds`,
+  `unwinding_nested_run_charges_the_enclosing_run`: catch_unwind panics
+- `rayon/meter/test.rs` `installs_charge_the_worker_but_not_the_wait`,
+  `cross_group_installs_charge_the_worker_but_not_the_wait`,
+  `broadcasts_charge_the_worker_but_not_the_wait`, `spawned_broadcasts_charge_nothing`,
+  `idle_yields_charge_nothing`: install, groups, broadcast, yield_now not ported
+- `rayon/registry/injector.rs` `contended_admission_keeps_worker_available`: grouped
+  injector, placements, and yield_now not ported (pool is one group, topology Decision)
+- `rayon/registry/test.rs` all 32 (`workers_form_consecutive_groups` ...
+  `wide_work_survives_concurrent_local_wakes`): worker groups, Local/Wide placements,
+  install, per-worker deques, broadcast, thread names; pool is one group (Decisions)
+- `rayon/sort.rs` `test_heapsort`, `test_split_for_merge`: rayon sort internals; zigware
+  uses std.sort.block/pdq runs and a pairwise merge (Decisions)
+- `rayon/sort.rs` `a_panicking_comparator_keeps_every_element`,
+  `a_panicking_comparator_keeps_every_element_in_a_quicksort`: catch_unwind panics
+- `rayon/spawn/test.rs` `termination_while_things_are_executing`: every Task must be
+  block_on'd before its pool is destroyed (Decisions)
+- `rayon/spawn/test.rs` `lifo_order` (the only test_order! expansion): pool queue is FIFO by
+  design and has no worker-local deque (pool.zig)
+- `rayon/test.rs` `worker_thread_index`, `start_callback_called`,
+  `use_current_thread_rejects_a_worker`: thread index, start handler, use_current_thread
+  not ported (workers are std.Io tasks; zero-thread pool instead)
+- `rayon/test.rs` `check_error_send_sync`: Send/Sync; `pool_operations_require_a_worker`:
+  catch_unwind, and zigware ops need no worker
+- `rayon/thread_pool/test.rs` `panic_propagate`: #[should_panic]; `panic_thread_name`:
+  thread_name and catch_unwind; `failed_thread_stack`: stack_size not ported
+- `rayon/thread_pool/test.rs` `self_install`, `mutual_install`, `mutual_install_sleepy`:
+  install not ported (operations run on the caller)
+- `rayon/thread_pool/test.rs` `spawn_lifo_order`: FIFO queue by design;
+  `yield_now_to_spawn`: yield_now not ported
+- `rayon/thread_pool/test.rs` `result_wakes_sleeping_worker`,
+  `canceled_sender_wakes_sleeping_worker`, `queued_work_wakes_sleeping_worker`,
+  `outside_and_foreign_workers_do_not_poll`, `duplicate_wakes_during_poll_are_retained`,
+  `retained_wakers_outlive_ready_panic_and_pool`, `nested_waits_service_later_work`,
+  `workers_wait_independently`, `result_wakes_later_group_worker`,
+  `canceled_sender_wakes_later_group_worker`, `queued_work_wakes_later_group_worker`:
+  block_on_worker future polling and wakers not ported (spawn takes a caller-owned Task)
+- `rayon/wake_loom_tests.rs` `injection_races_sleep`, `injection_races_local_idle_exit`,
+  `injection_races_local_wake_handoff`: loom models of the grouped sleep protocol; no
+  grouped pool and no loom
+

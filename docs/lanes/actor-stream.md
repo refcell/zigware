@@ -158,3 +158,41 @@ Not portable:
   runtime.mocks, as in commonware).
 - 2026-11-13: mailbox `backoff` counter registered through `new_with_metrics`.
 - 2026-11-13: actor mailbox benches; the lane backlog is done.
+
+## Test audit (2026-11-19, against main)
+
+Every commonware `#[test]` in this lane's crates (macro and rstest cases expanded where noted), matched by reading both sides: ported (a Zig test checks the behavior, often one consolidated test), open, or not portable with the reason. Written by the consensus-marshal lane; tick a box when its test lands.
+
+### actor
+| File | Tests | Ported | Open | Not portable |
+| --- | --- | --- | --- | --- |
+| mailbox.rs | 46 | 27 | 0 | 19 |
+| Total | 46 | 27 | 0 | 19 |
+
+Open:
+- None
+
+Not portable:
+- `mailbox.rs` loom tests (`#[cfg(feature = "loom")]`): these check thread interleavings of the
+  lock-free ready queue, activity word, and AtomicWaker. Zig uses one Io.Mutex and Condition
+  instead (docs/lanes/actor-stream.md, Decisions: "Loom tests ... have no counterpart"):
+  `sender_drop_racing_waker_registration_wakes_or_disconnects`,
+  `sender_enqueue_then_drop_racing_poll_recv_drains_message`,
+  `sender_enqueue_then_drop_racing_try_recv_drains_message`,
+  `handled_enqueue_wakes_registered_receiver`,
+  `receiver_drop_racing_ready_fast_path_feedback_wakes_if_ready`,
+  `receiver_drop_racing_ready_enqueue_drops_message`,
+  `receiver_drop_racing_overflow_enqueue_drops_messages`,
+  `receiver_drop_drains_ready_message_published_under_overflow_lock`,
+  `receiver_drop_drains_overflow_message_published_under_overflow_lock`,
+  `concurrent_close_and_ready_enqueue_remains_closed`,
+  `concurrent_close_and_overflow_enqueue_remains_closed`,
+  `concurrent_spill_and_refill_preserves_messages`,
+  `concurrent_spill_senders_preserve_messages`,
+  `concurrent_replace_keeps_one_overflow_message`,
+  `stale_overflow_hint_retries_ready_before_policy`,
+  `concurrent_overflow_cannot_be_bypassed_by_ready_fast_path`,
+  `concurrent_overflow_mutation_does_not_hide_published_overflow`,
+  `published_overflow_wakes_pending_receiver`,
+  `concurrent_refill_and_enqueue_preserves_overflow_order`
+

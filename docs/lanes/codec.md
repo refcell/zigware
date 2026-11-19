@@ -209,3 +209,81 @@ TOML entries; here a missing entry fails `verify` and prints the line to add), a
 - 2026-11-13: invariants: minifuzz (Builder, Branch tokens, Sampler) and `Unstructured`
   (arbitrary 1.4); sampler stream matches commonware's byte for byte.
 - 2026-11-13: codec fuzz covers NonZero and Lazy; generic FixedArray and Viewing tests.
+
+## Test audit (2026-11-19, against main)
+
+Every commonware `#[test]` in this lane's crates (macro and rstest cases expanded where noted), matched by reading both sides: ported (a Zig test checks the behavior, often one consolidated test), open, or not portable with the reason. Written by the consensus-marshal lane; tick a box when its test lands.
+
+### codec
+| File | Tests | Ported | Open | Not portable |
+| --- | --- | --- | --- | --- |
+| buf.rs | 16 | 9 | 0 | 7 |
+| codec.rs | 13 | 7 | 0 | 6 |
+| config.rs | 8 | 7 | 0 | 1 |
+| mode.rs | 8 | 5 | 0 | 3 |
+| types/btree_map.rs | 7 | 7 | 0 | 0 |
+| types/btree_set.rs | 7 | 7 | 0 | 0 |
+| types/bytes.rs | 3 | 3 | 0 | 0 |
+| types/hash_map.rs | 15 | 13 | 1 | 1 |
+| types/hash_set.rs | 14 | 13 | 0 | 1 |
+| types/lazy.rs | 9 | 9 | 0 | 0 |
+| types/net.rs | 8 | 8 | 0 | 0 |
+| types/primitives.rs (18 + 12 from `impl_num_test!`) | 30 | 26 | 0 | 4 |
+| types/tuple.rs | 2 | 2 | 0 | 0 |
+| types/vec.rs | 6 | 4 | 0 | 2 |
+| uint.rs | 4 | 4 | 0 | 0 |
+| util.rs | 4 | 2 | 0 | 2 |
+| varint.rs | 18 | 15 | 0 | 3 |
+| Total | 172 | 141 | 1 | 30 |
+
+Open:
+- [ ] `types/hash_map.rs:407` `test_hashmap_malicious_allocation`: u32::MAX map length, one entry,
+  fails EndOfBuffer unallocated
+  (map_test.zig checks this for sets only; `Map.read` is never fed a hostile length)
+
+Not portable:
+- `buf.rs` `test_take_owned_claims_matching_views`, `test_take_owned_through_adapters`: custom
+  `Buf`/`OwnedBytes` storage types and `Take`/`Chain` adapters; Zig reads one contiguous slice
+  (codec.md Decisions)
+- `buf.rs` `test_try_take_owned_reports_shortfall`: checks the error's requested/available
+  payload and `Take` limits; Zig errors carry no payload and there are no adapters (codec.md).
+  A short read leaving the cursor unchanged is in buf.zig "reader reads and bounds"
+- `buf.rs` `test_take_owned_past_inner_end`, `test_viewing_advance_past_end`,
+  `test_viewing_copy_past_end`, `test_viewing_split_past_end`; `codec.rs` `test_encode_fixed_panic`,
+  `test_decode_fixed_panic`; `mode.rs` `mode_macro_rejects_invalid_expressions`;
+  `types/primitives.rs` `test_usize_encode_panic`, `test_usize_write_panic`; `util.rs`
+  `test_max_items_size_beyond_prefix`: #[should_panic] (Zig asserts or returns EndOfBuffer)
+- `codec.rs` `test_fixed_array_infallible`, `test_fixed_array_generic_infallible`,
+  `test_fixed_array_bounded_generic`, `test_fixed_array_lifetime`: `FixedArray` derive variants
+  (infallible `From`, trait bounds, lifetimes) are Rust derive/trait features; the round trip is
+  in codec_test.zig "custom fixed-size type" and "generic fixed array conversions"
+- `config.rs` `test_type_inference`: Rust type inference for `RangeCfg::new`
+- `mode.rs` `macro_converts_heterogeneous_values`, `mode_macro_constructs_literals_and_expressions`:
+  `modes!`/`mode!` macros and `From<_> for Mode`; Zig has plain `mode()` and `Modes(N).init`
+- `types/hash_map.rs` `test_hashmap_encoding_matches_ordered_map`, `types/hash_set.rs`
+  `test_hashset_encoding_matches_ordered_set`: one implementation serves the BTree and Hash
+  flavors, so they cannot differ (codec.md), and the `write_bufs` half is not ported
+- `types/primitives.rs` `test_array_specialization_selection`, `types/vec.rs`
+  `test_specialization_selection`: count `put_slice`/`put_u8` calls through mock `BufMut`/`Buf`
+  trait impls, and `write_bufs`; Zig `Writer` has no such hook
+- `types/primitives.rs` `test_array_write_bufs_equivalence`, `types/vec.rs`
+  `test_write_bufs_equivalence`: `write_bufs`/`BufsMut` not ported (codec.md Decisions)
+- `util.rs` `test_ensure_zeros_across_chunks`, `varint.rs` `test_fragmented_varint`: chained
+  (non-contiguous) `Buf`; Zig `Reader` is one contiguous slice (codec.md Decisions)
+- `varint.rs` `test_varuint_into`, `test_varsint_into`: `From`/`Into` impls on `UInt`/`SInt`
+
+### formatting
+| File | Tests | Ported | Open | Not portable |
+| --- | --- | --- | --- | --- |
+| hex_literal.rs | 11 | 11 | 0 | 0 |
+| lib.rs | 6 | 4 | 0 | 2 |
+| Total | 17 | 15 | 0 | 2 |
+
+Open:
+- none
+
+Not portable:
+- `lib.rs` `test_hex_newtype_debug`, `test_hex_newtype_from`: `Debug` and `From<T> for Hex<T>`
+  trait impls; Zig `Hex` only has `format` (its "ff00" output is in root.zig
+  "hex formatter display")
+

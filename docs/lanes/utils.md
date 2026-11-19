@@ -196,3 +196,250 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   net, and sequence fuzz targets.
 - 2026-11-16: bitmap Atomic, thread_local Cached, amount, and sync UpgradableRwLock.
 - 2026-11-16: futures Pool, AbortablePool, try_join_all, and the futures fuzz target.
+
+## Test audit (2026-11-19, against main)
+
+Every commonware `#[test]` in this lane's crates (macro and rstest cases expanded where noted), matched by reading both sides: ported (a Zig test checks the behavior, often one consolidated test), open, or not portable with the reason. Written by the consensus-marshal lane; tick a box when its test lands.
+
+### utils (everything but bitmap/)
+| File | Tests | Ported | Open | Not portable |
+| --- | --- | --- | --- | --- |
+| acknowledgement.rs | 5 | 5 | 0 | 0 |
+| amount.rs | 2 | 2 | 0 | 0 |
+| cache.rs | 50 | 42 | 2 | 6 |
+| channel/fallible.rs | 18 | 18 | 0 | 0 |
+| channel/reservation.rs | 5 | 5 | 0 | 0 |
+| channel/ring.rs | 14 | 11 | 0 | 3 |
+| channel/tracked.rs | 7 | 6 | 0 | 1 |
+| concurrency.rs | 3 | 3 | 0 | 0 |
+| faults.rs | 55 | 45 | 0 | 10 |
+| futures.rs | 22 | 12 | 0 | 10 |
+| futures/shared.rs | 13 | 0 | 0 | 13 |
+| futures/try_join_all.rs | 30 | 5 | 8 | 17 |
+| handles.rs | 13 | 12 | 0 | 1 |
+| hostname.rs | 12 | 10 | 0 | 2 |
+| iter.rs | 9 | 5 | 0 | 4 |
+| lib.rs | 15 | 12 | 0 | 3 |
+| net.rs | 8 | 8 | 0 | 0 |
+| ordered.rs | 48 | 46 | 0 | 2 |
+| prefetch.rs | 4 | 4 | 0 | 0 |
+| priority_set.rs | 5 | 5 | 0 | 0 |
+| probability.rs | 7 | 6 | 0 | 1 |
+| range.rs | 12 | 8 | 0 | 4 |
+| rational/mod.rs | 28 | 26 | 0 | 2 |
+| rng.rs | 12 | 11 | 0 | 1 |
+| sampling.rs | 9 | 7 | 0 | 2 |
+| sequence/fixed_bytes.rs | 6 | 6 | 0 | 0 |
+| sequence/prefixed_u64.rs | 2 | 2 | 0 | 0 |
+| sequence/u32.rs | 2 | 2 | 0 | 0 |
+| sequence/u64.rs | 2 | 2 | 0 | 0 |
+| sequence/unit.rs | 3 | 3 | 0 | 0 |
+| sequence/vec_u64.rs | 1 | 1 | 0 | 0 |
+| sync/exclusive.rs | 1 | 0 | 0 | 1 |
+| sync/mod.rs | 7 | 4 | 0 | 3 |
+| thread_local.rs | 8 | 5 | 0 | 3 |
+| time.rs | 19 | 16 | 0 | 3 |
+| vec.rs | 32 | 26 | 0 | 6 |
+| **Total** | **489** | **381** | **10** | **98** |
+
+Counting notes:
+- rstest cases are counted one per case. faults.rs `test_bft3f1_quorum_and_max_faults` (21)
+  and `test_bft5f1_quorums` (21) are ported by the case tables in
+  `src/utils/faults.zig` "faults: N3f1 quorum and max_faults" and "faults: N5f1 quorums".
+  ordered.rs: `test_map_from_parts_lengths` (9), `test_map_values_into_reuses_keys` (2),
+  `test_try_map_values_error` (6). shared.rs: `test_destroyed_waker_may_drop_a_registered_clone`
+  (2). try_join_all.rs: `preserves_order` (5), `later_error_drops_futures_and_values` (8),
+  `cancellation_drops_futures_and_values` (8), `completed_future_drop_unblocks_another` (3),
+  `later_error_wakes_caller` (3).
+- Each proptest fn counts once. cache.rs `cache_invariants_hold{,_with_wide_small}` are ported by
+  `cache_test.zig` "fuzz cache" (capacities 1..48, optional prefill). faults.rs proptests are
+  ported by "faults: quorum relationships and safety for all n below 10000".
+- probability.rs includes `expression_macro_rejects_invalid_probability` (line 326), a
+  `#[should_panic]` test that is missing from the input TSV.
+
+Open:
+- [ ] `cache.rs:2601` `shared_hashes_without_rehash_steps`: each op hashes a key exactly once
+  (hash-call counts)
+- [ ] `cache.rs:2868` `non_clone_keys_keep_incoming_metadata_on_ghost_hits`: on a Ghost hit
+  the caller's key, not the historical one, is stored
+- [ ] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_1::known_1_false`:
+  later error returns while first task blocks, cancelling it
+- [ ] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_1::known_2_true`:
+  same, count 2
+- [ ] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_2::known_1_false`:
+  same, count 30
+- [ ] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_2::known_2_true`:
+  same, count 30
+- [ ] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_3::known_1_false`:
+  same, count 31
+- [ ] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_3::known_2_true`:
+  same, count 31
+- [ ] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_4::known_1_false`:
+  same, count 64
+- [ ] `futures/try_join_all.rs:264` `later_error_drops_futures_and_values::case_4::known_2_true`:
+  same, count 64
+
+Not portable:
+- `faults.rs` `test_bft3f1_max_faults_zero_panics`, `test_bft3f1_quorum_zero_panics`,
+  `test_bft5f1_max_faults_zero_panics`, `test_bft5f1_quorum_zero_panics`,
+  `test_bft5f1_m_quorum_zero_panics`, `test_bft5f1_l_quorum_zero_panics`,
+  `test_max_faults_negative_panics`, `test_max_faults_overflow_panics`,
+  `test_quorum_negative_panics`, `test_quorum_overflow_panics`: #[should_panic]
+- `futures.rs` `test_rebind_empty_slot_panics`, `test_rebind_entry_missing_entry_panics`;
+  `handles.rs` `test_partition_rejects_a_count_that_is_not_a_power_of_two`;
+  `iter.rs` `zip_eq_panics_when_right_is_shorter`, `zip_eq_panics_when_left_is_shorter`,
+  `macro_rejects_empty_iterators`; `lib.rs` `test_modulo_zero_panics`,
+  `test_participant_from_usize_overflow`; `probability.rs`
+  `expression_macro_rejects_invalid_probability`; `rational/mod.rs` `log2_ceil_negative_panics`,
+  `log2_floor_negative_panics`; `time.rs` `test_epoch_panics`, `test_epoch_millis_panics`;
+  `vec.rs` `test_from_unchecked_panics_on_empty`, `test_mutate_panics_on_empty`: #[should_panic]
+- `time.rs` `test_as_millis_u64_overflow`; `sampling.rs`
+  `weighted_index_update_panics_preserve_index`, `without_replacement_restores_weights_on_unwind`;
+  `thread_local.rs` `test_nested_guards_rejected`, `test_create_panic_does_not_poison_held_flag`,
+  `test_reset_panic_does_not_poison_held_flag`: assert via catch_unwind (panic/unwind)
+- `cache.rs` `displaced_key_destructors_follow_replacement_bookkeeping`: panicking key Drop
+  under catch_unwind
+- `cache.rs` `eviction_does_not_clone_keys`, `canonical_key_move_and_ghost_drop_ownership`:
+  key clone counting and Rc/Drop ownership counts
+- `cache.rs` `test_ghost_rehash_reads_live_keys`, `collisions_rehash_and_stable_values`,
+  `distinct_hashes_rehash_and_stable_values`: force hashbrown lazy growth; Zig indexes are
+  preallocated with `init_capacity` (cache.zig:336, 462) and never rehash
+- `futures/shared.rs` `test_clones_share_output_and_poll_one_at_a_time`,
+  `test_clone_after_completion_resolves`, `test_wake_during_poll_rewakes_clone_polled_meanwhile`,
+  `test_clone_finding_future_busy_is_woken_after_poll`,
+  `test_dropped_woken_clone_leaves_others_woken`,
+  `test_last_clone_drops_future_despite_retained_waker`, `test_panic_poisons_every_clone`,
+  `test_clones_poll_inner_future_once_per_wake`,
+  `test_panicking_replaced_waker_poisons_every_clone`, `test_output_clone_may_wake_inner_future`,
+  `test_destroyed_waker_may_drop_a_registered_clone::case_1_replaced`,
+  `test_destroyed_waker_may_drop_a_registered_clone::case_2_dropped`,
+  `test_last_drop_with_panicking_waker_releases_future`: `Shared` not ported by design
+  (docs/lanes/utils.md Decisions)
+- `futures.rs` `test_rebind_restores_value_and_yields_rest`, `test_rebind_error_destroys_value`,
+  `test_rebind_entry_restores_value_and_yields_rest`, `test_rebind_entry_error_destroys_value`,
+  `test_option_future`: `rebind`/`rebind_entry`/`OptionFuture` not ported by design (utils.md)
+- `futures.rs` `test_dummy_future_doesnt_resolve`: Zig `Pool.next_completed` asserts a
+  non-empty pool (futures.zig:73); no pending-forever empty pool
+- `futures.rs` `test_borrowing_futures`, `test_abortable_pool_borrowing_futures`;
+  `futures/try_join_all.rs` `supports_borrowed_non_send_values`: Rust lifetimes/borrowed futures
+- `futures/try_join_all.rs` `cancellation_drops_futures_and_values::case_{1..4}::poll_{1_false,
+  2_true}` (8), `completed_future_drop_unblocks_another::case_{1,2,3}` (3): outer-future drop
+  and Drop side effects/counts
+- `futures/try_join_all.rs` `later_error_wakes_caller::case_{1,2,3}` (3): Waker wake counting
+- `futures/try_join_all.rs` `consumes_non_send_iterator_before_returning_send_future`: Send
+  bound; `size_hint_can_change`: Rust Iterator::size_hint collector choice
+- `channel/ring.rs` `test_receiver_drop_releases_waker`, `test_replaced_waker_dropped_outside_lock`:
+  Waker registration internals
+- `channel/ring.rs` `test_send_all`: futures `Sink::send_all`
+- `channel/tracked.rs` `test_batch_destructor_can_read_watermark`: documented, batch IDs are
+  plain values (utils.md Decisions)
+- `sync/mod.rs` `test_traced_async_mutex`, `test_traced_async_rwlock`; `sync/exclusive.rs`
+  `test_exclusive_is_sync_and_grants_exclusive_access`: traced locks and `Exclusive` not ported
+  by design (utils.md)
+- `sync/mod.rs` `test_async_rwlock`: re-exported tokio `RwLock`; Zig uses `std.Io.RwLock`
+  (utils.md)
+- `lib.rs` `test_max`: const fn `max` is `@max` by decision (utils.md)
+- `hostname.rs` `test_hostname_try_from`, `test_hostname_into_string`: TryFrom/String conversions
+- `iter.rs` `macro_ignores_colliding_into_iterator_methods`: Rust macro method resolution
+- `ordered.rs` `test_map_deref_to_set`: Deref impl; `test_map_from_set`: FromIterator conversion
+- `range.rs` `test_contains_cyclic_current_bounds`: partially consumed RangeInclusive iterator
+  state; `test_non_empty_range_into`: From impl; `test_non_empty_range_debug`: Debug impl;
+  `test_non_empty_range_iter`: IntoIterator impl
+- `rng.rs` `test_try_fill_bytes_consistency_with_fill_bytes`: rand `TryRng::try_fill_bytes`
+- `vec.rs` `test_try_from_iterator`: TryCollect trait; `test_from_non_empty_vec`: From impl;
+  `test_iterators`: iter/iter_mut/IntoIterator impls; `test_as_ref`: AsRef impls
+
+### utils (bitmap/)
+| File | Tests | Ported | Open | Not portable |
+| --- | --- | --- | --- | --- |
+| bitmap/atomic.rs | 5 | 2 | 0 | 3 |
+| bitmap/mod.rs | 74 | 57 | 8 | 9 |
+| bitmap/prunable.rs | 54 | 44 | 0 | 10 |
+| bitmap/historical/tests.rs | 20 | 17 | 0 | 3 |
+| bitmap/roaring/container/array.rs | 25 | 24 | 1 | 0 |
+| bitmap/roaring/container/bitmap.rs | 26 | 21 | 5 | 0 |
+| bitmap/roaring/container/mod.rs | 27 | 12 | 15 | 0 |
+| bitmap/roaring/container/run.rs | 26 | 21 | 3 | 2 |
+| bitmap/roaring/fuzz.rs | 1 | 1 | 0 | 0 |
+| bitmap/roaring/mod.rs | 32 | 28 | 0 | 4 |
+| bitmap/roaring/ops.rs | 43 | 43 | 0 | 0 |
+| bitmap/roaring/prunable.rs | 27 | 22 | 0 | 5 |
+| **Total** | **360** | **292** | **32** | **36** |
+
+Open:
+- [ ] `bitmap/mod.rs:1800` `test_multi_chunk_operations`: and/or/xor over two full 4-byte chunks
+- [ ] `bitmap/mod.rs:1843` `test_partial_chunk_operations`: and/or/xor keep length on 35-bit maps
+- [ ] `bitmap/mod.rs:2128` `test_ones_iter_empty`: ones_iter of an empty bitmap yields nothing
+- [ ] `bitmap/mod.rs:2135` `test_ones_iter_all_zeros`: ones_iter of zeroes(100) yields nothing
+- [ ] `bitmap/mod.rs:2162` `test_ones_iter_single_bit`: one-bit bitmap, set and unset
+- [ ] `bitmap/mod.rs:2219` `test_ones_iter_matches_count_ones`: ones_iter count equals count_ones
+- [ ] `bitmap/mod.rs:2716` `test_from_different_chunk_sizes`: from_bools at N=8 and N=16
+- [ ] `bitmap/mod.rs:2960` `is_unset_chunk_boundaries`: is_unset with N=1 (8-bit chunks)
+- [ ] `bitmap/roaring/container/array.rs:796` `test_union_disjoint_unlimited`: union copies b's
+  tail when b lies entirely after a
+- [ ] `bitmap/roaring/container/bitmap.rs:636` `test_iterator_size_hint_after_exhaustion_regression`:
+  iter remaining() is 0 after exhaustion
+- [ ] `bitmap/roaring/container/bitmap.rs:849` `test_encode_size_independent_of_cardinality`: full
+  bitmap encode_size equals empty
+- [ ] `bitmap/roaring/container/bitmap.rs:911` `test_run_count_idempotent_on_duplicate`: duplicate
+  insert leaves run_count unchanged
+- [ ] `bitmap/roaring/container/bitmap.rs:920` `test_run_count_at_boundaries`: run_count at 0 and
+  u16 max, extending inward
+- [ ] `bitmap/roaring/container/bitmap.rs:964` `test_from_words_run_count_matches_scan`:
+  from_words alternating word gives run_count 32
+- [ ] `bitmap/roaring/container/mod.rs:742` `test_new_container`: new container is empty, array kind
+- [ ] `bitmap/roaring/container/mod.rs:766` `test_equality_ignores_representation`: eql across
+  array/bitmap/run kinds
+- [ ] `bitmap/roaring/container/mod.rs:786` `test_decode_rejects_noncanonical_sparse_bitmap_container`:
+  sparse bitmap payload rejected (only array-as-run tested)
+- [ ] `bitmap/roaring/container/mod.rs:807` `test_decode_rejects_noncanonical_full_bitmap_container`:
+  full bitmap payload rejected
+- [ ] `bitmap/roaring/container/mod.rs:825` `test_encode_canonicalizes_sparse_bitmap_container`:
+  sparse bitmap encodes and decodes as array
+- [ ] `bitmap/roaring/container/mod.rs:838` `test_encode_canonicalizes_full_bitmap_container`:
+  full bitmap encodes and decodes as run
+- [ ] `bitmap/roaring/container/mod.rs:848`
+  `test_encode_sparse_bitmap_container_spanning_first_to_last_word`: values in first/last words
+- [ ] `bitmap/roaring/container/mod.rs:871` `test_encode_sparse_run_container_ending_at_max`:
+  sparse run ending at u16 max encodes as array
+- [ ] `bitmap/roaring/container/mod.rs:891`
+  `test_decode_normalization_is_idempotent_after_run_to_bitmap`: re-encode is stable
+- [ ] `bitmap/roaring/container/mod.rs:940` `test_max_cardinality_serializes_as_bitmap`: 4096-value
+  array decodes as bitmap
+- [ ] `bitmap/roaring/container/mod.rs:980`
+  `test_insert_range_overlap_noop_does_not_force_bitmap_conversion`: no-op range keeps array
+- [ ] `bitmap/roaring/container/mod.rs:1089` `test_no_thrash_in_hysteresis_band`: bitmap stays
+  bitmap inside the threshold band
+- [ ] `bitmap/roaring/container/mod.rs:1120` `test_union_bitmap_fast_path_normalizes_to_run`:
+  bitmap union result is run kind
+- [ ] `bitmap/roaring/container/mod.rs:1132`
+  `test_intersection_bitmap_fast_path_normalizes_to_array_when_sparse`: result kind array
+- [ ] `bitmap/roaring/container/mod.rs:1150`
+  `test_difference_bitmap_fast_path_normalizes_to_array_when_sparse`: result kind array
+- [ ] `bitmap/roaring/container/run.rs:771` `test_from_full_bitmap`: full bitmap converts to one run
+- [ ] `bitmap/roaring/container/run.rs:796` `test_encode_size_empty`: empty run encode size
+- [ ] `bitmap/roaring/container/run.rs:802` `test_encode_size_grows_per_run`: encode size for 5 runs
+
+Not portable:
+- `bitmap/atomic.rs` `test_set_past_len_panics`, `test_set_past_len_in_tail_word_panics`,
+  `test_set_on_empty_panics`: #[should_panic]
+- `bitmap/mod.rs` `test_truncate_larger_size_panics`, `test_pop_chunk_not_aligned`,
+  `test_pop_chunk_insufficient_bits`, `test_flip_out_of_bounds`, `test_and_length_mismatch`,
+  `test_or_length_mismatch`, `test_xor_length_mismatch`, `test_prune_too_many_chunks`,
+  `is_unset_out_of_bounds`: #[should_panic]
+- `bitmap/prunable.rs` `test_get_pruned_bit_panics`, `test_get_pruned_chunk_panics`,
+  `test_set_pruned_bit_panics`, `test_prune_to_bit_out_of_bounds`,
+  `test_truncate_into_pruned_region_panics`, `test_pop_chunk_not_aligned`,
+  `test_pop_chunk_insufficient_bits`, `test_set_chunk_by_index_rejects_high_bits_in_last_byte`,
+  `test_set_chunk_by_index_rejects_nonzero_trailing_bytes`,
+  `test_set_chunk_by_index_rejects_nonzero_final_byte`: #[should_panic]
+- `bitmap/historical/tests.rs` `test_read_popped_bit_panics`, `test_prune_beyond_length_panics`,
+  `test_pop_into_pruned_region_panics`: #[should_panic]
+- `bitmap/roaring/container/run.rs` `test_arbitrary_can_generate_run_starting_at_zero`,
+  `test_arbitrary_can_generate_trailing_max_singleton`: Rust Arbitrary impl
+- `bitmap/roaring/mod.rs` `test_from_iter_empty`, `test_from_iter_basic`,
+  `test_from_iter_range_expression`, `test_extend_into_existing`: Rust FromIterator/Extend impls
+- `bitmap/roaring/prunable.rs` `test_panic_on_insert_below_pruned`,
+  `test_panic_on_contains_below_pruned`, `test_panic_on_insert_range_below_pruned`,
+  `test_panic_on_iter_range_below_pruned`, `test_extend_below_pruned_panics`: #[should_panic]
+
