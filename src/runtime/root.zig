@@ -24,4 +24,5 @@ pub const process = struct {
 test {
     std.testing.refAllDecls(@This());
     _ = process.metered;
+    _ = @import("panic_test.zig");
 }

@@ -253,8 +253,8 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | File | Tests | Ported | Open | Not portable |
 | --- | --- | --- | --- | --- |
 | conformance.rs | 3 | 3 | 0 | 0 |
-| deterministic.rs | 50 | 28 | 1 | 21 |
-| lib.rs | 59 | 47 | 0 | 12 |
+| deterministic.rs | 50 | 33 | 1 | 16 |
+| lib.rs | 59 | 50 | 0 | 9 |
 | mocks.rs | 20 | 19 | 0 | 1 |
 | network/audited.rs | 5 | 2 | 2 | 1 |
 | network/deterministic.rs | 2 | 2 | 0 | 0 |
@@ -264,7 +264,7 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | process/metered.rs | 2 | 0 | 1 | 1 |
 | telemetry/metrics/batched.rs | 4 | 4 | 0 | 0 |
 | telemetry/metrics/histogram.rs | 1 | 1 | 0 | 0 |
-| telemetry/metrics/mod.rs | 18 | 16 | 0 | 2 |
+| telemetry/metrics/mod.rs | 18 | 17 | 0 | 1 |
 | tokio/runtime.rs | 21 | 4 | 2 | 15 |
 | utils/abort.rs | 11 | 1 | 0 | 10 |
 | utils/buffer/mod.rs | 46 | 38 | 1 | 7 |
@@ -279,7 +279,7 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | utils/handle.rs | 19 | 10 | 0 | 9 |
 | utils/mod.rs | 3 | 0 | 0 | 3 |
 | utils/supervision.rs | 9 | 4 | 0 | 5 |
-| Total | 526 | 335 | 20 | 171 |
+| Total | 526 | 344 | 20 | 162 |
 
 Open (none are in runtime/src/telemetry/, the runtime-telemetry lane's directory):
 - [x] `deterministic.rs:1742` `test_logical_open_releases_retained_mutations`: unsynced fragments of
@@ -328,11 +328,10 @@ Not portable:
 - `deterministic.rs` `test_paced_future_moves_between_tasks`, `test_external_realtime`,
   `test_external_realtime_variable`, `test_realtime_no_skip`: deterministic `external` feature
   (real-time pacing); runtime.md: `external_*` not ported
-- `deterministic.rs` `test_bad_timeout`, `test_recover_panic_handling`, `test_context_return`,
-  `test_bad_start_time`, `test_external_simulated`, `test_metrics_label_empty`,
-  `test_metrics_label_invalid_first_char`, `test_metrics_label_invalid_char`,
-  `test_metrics_label_reserved_prefix`: `#[should_panic]` or panic propagation/`catch_unwind`; Zig
-  cannot catch a panic
+- `deterministic.rs` `test_recover_panic_handling`, `test_context_return`,
+  `test_external_simulated`: panic recovery across runners, a context outliving its runner, and the
+  `external` feature; `test_bad_start_time`: `start_time_ns` is a `u64`, so no time before the epoch
+  exists. Their other `#[should_panic]` tests are death tests in `panic_test.zig`
 - `deterministic.rs` `test_borrowed_non_send_root`: compile-time check that the root needs no
   `Send`/`'static` bound
 - `deterministic.rs` `test_parallel_strategy_spawn_completes`,
@@ -347,9 +346,8 @@ Not portable:
   semantics (runtime.md lib.rs no-counterpart list)
 - `lib.rs` `test_read_options_compose`, `test_write_options_compose`: runtime.md: "the options are
   packed structs of bools, with no flag algebra to test"
-- `lib.rs` `test_panic_aborts_spawn`, `test_multiple_panics`, `test_spawn_blocking_panic`,
-  `test_factory_panic_finishes_running_metric`: `#[should_panic]` or panic
-  propagation/`catch_unwind`; Zig cannot catch a panic
+- `lib.rs` `test_factory_panic_finishes_running_metric`: reads a metric after catching a panic;
+  the other `#[should_panic]` tests are death tests in `panic_test.zig`
 - `lib.rs` `test_select`: runtime.md: `select!` polls branches in order; `std.Io.Select` does not
   order ready ones
 - `network/audited.rs` `test_stream_preserves_chunking`: Zig `Stream.recv` fills a caller buffer;
@@ -365,8 +363,6 @@ Not portable:
   `submit_recv` prefix-buffer API, absent in zigware
 - `process/metered.rs` `test_allocator_metrics_skipped_without_mimalloc`: mimalloc allocator
   metrics; zigware has no mimalloc feature
-- `telemetry/metrics/mod.rs` `test_duplicate_metrics_different_type_panics`: `#[should_panic]` or
-  panic propagation/`catch_unwind`; Zig cannot catch a panic
 - `telemetry/metrics/mod.rs` `test_registered_with_registration_notifies_on_last_drop`:
   runtime-telemetry.md: "No custom `Registration::from(guard)`"
 - `tokio/runtime.rs` `test_join_all_aborts_all_tasks_before_waiting`,
@@ -500,7 +496,7 @@ Not portable:
 | --- | --- | --- | --- | --- |
 | storage/audited.rs | 8 | 5 | 2 | 1 |
 | storage/faulty.rs | 51 | 47 | 1 | 3 |
-| storage/header.rs | 21 | 20 | 0 | 1 |
+| storage/header.rs | 21 | 21 | 0 | 0 |
 | storage/hold.rs | 2 | 0 | 2 | 0 |
 | storage/iouring.rs | 66 | 13 | 16 | 37 |
 | storage/memory/mod.rs | 15 | 15 | 0 | 0 |
@@ -514,7 +510,7 @@ Not portable:
 | iobuf/buf.rs | 60 | 20 | 1 | 39 |
 | iobuf/bufs.rs | 98 | 54 | 7 | 37 |
 | iobuf/owner.rs | 36 | 0 | 0 | 36 |
-| Total | 450 | 191 | 40 | 219 |
+| Total | 450 | 192 | 40 | 218 |
 
 Open:
 - [x] `storage/audited.rs:266` `test_audited_blob_forwards_read_options`: audited blob passes each
@@ -615,7 +611,6 @@ Not portable:
   (`pending.rs`); zigware syncs on the caller and keeps no such debt
 - `storage/faulty.rs` `test_write_config_arbitrary_is_compact_and_covers_grid`: Rust `Arbitrary`
   impl for `WriteConfig`; faulty.zig has none
-- `storage/header.rs` `test_header_create_empty_versions`: #[should_panic]
 - `storage/memory/open.rs` `test_open_racing_last_blob_drop`: runtime.md: "relies on Rust `Arc`
   drop racing an open on another thread: no counterpart"
 - `storage/metered.rs` `test_shared_blob_owners_share_metrics`; `storage/tokio/mod.rs`
