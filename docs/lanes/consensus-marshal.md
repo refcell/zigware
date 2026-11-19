@@ -279,7 +279,7 @@ ports its range's tests and the helpers defined in it, into
   (storage, floors, repair, dispatch) to keep files and functions within TigerStyle.
 
 ## Backlog
-- [ ] Pool the finalized-archive sync (`actor_finalize.start_finalized_sync` runs inline;
+- [x] Pool the finalized-archive sync (`actor_finalize.start_finalized_sync` runs inline;
   commonware pools it). Then flip `pooled_finalized_sync` in `standard/tests/dispatch.zig`
   (3 skipped tests: mailbox not blocked by a sync, per-batch release, stale floor anchor).
 - [x] aggregation: types (all 5 conformance hashes match), scheme, limits, safe_tip.
@@ -356,3 +356,5 @@ ports its range's tests and the helpers defined in it, into
   events (commonware's biased order), with a regression test in `tests/restart.zig`.
 - 2026-11-18: aggregation "determinism" runs one seed on ed25519 outside nightly, and
   "unclean byzantine shutdown" runs only under `-Dslow-tests` (CI wall time).
+- 2026-11-18: `store.start_sync` returns a `store.Durable` handle; a delayed (paced) finalized
+  sync is pooled in `Actor.Syncs` and released per batch, ahead of every other event.

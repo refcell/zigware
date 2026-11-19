@@ -3,15 +3,16 @@
 //! rebuilds the total order of finalized blocks for the application.
 //!
 //! One task runs the actor. Pump tasks feed its mailbox and the resolver handler into one
-//! bounded inbox; buffer waiters and a watcher on the application's current acknowledgement
-//! push their completions into the same inbox. The actor handles events in arrival order,
-//! except that it first takes every ready buffer waiter and then every resolved
-//! acknowledgement, even before their notices arrive, as commonware's biased `select_loop!`
-//! prefers waiters, then acknowledgements, then the mailbox, then the resolver (its first
-//! arm, sync completions, has no counterpart: zigware's archives are durable when a write or
-//! sync returns, so commonware's pooled syncs complete inside the event that starts them).
-//! The durability acks of `proposed`, `verified`, and `certified` fire once the write
-//! returns. A storage or allocation error stops the actor with that error (commonware panics).
+//! bounded inbox; pooled syncs, buffer waiters, and a watcher on the application's current
+//! acknowledgement push their completions into the same inbox. The actor handles events in
+//! arrival order, except that it first releases every durable pooled sync, then takes every
+//! ready buffer waiter, then every resolved acknowledgement, even before their notices
+//! arrive, as commonware's biased `select_loop!` prefers syncs, then waiters, then
+//! acknowledgements, then the mailbox, then the resolver. Zigware's archives are durable
+//! when a write or sync returns, so a finalized sync is pooled only when its store's handle
+//! carries a delay (a paced test store). The durability acks of `proposed`, `verified`, and
+//! `certified` fire once the write returns. A storage or allocation error stops the actor
+//! with that error (commonware panics).
 //!
 //! The handlers live in `actor_ingress.zig` (mailbox), `actor_backfill.zig` (resolver), and
 //! `actor_finalize.zig` (storage, floors, repair, and dispatch).
@@ -106,6 +107,8 @@ pub fn Actor(comptime P: type) type {
             resolver: HandlerMessage,
             /// Buffer waiter `id` recorded its outcome.
             waiter: u64,
+            /// The pooled finalized-archive sync `seq` became durable.
+            synced: u64,
             /// The armed application acknowledgement of this generation resolved.
             ack: u64,
             closed,
@@ -152,6 +155,8 @@ pub fn Actor(comptime P: type) type {
         started: bool = false,
         inbox: Inbox = undefined,
         waiters: Waiters = undefined,
+        /// Finalized-archive syncs waiting to become durable.
+        syncs: Syncs = undefined,
         /// The task waiting on the current application acknowledgement.
         ack_watch: ?Io.Future(void) = null,
         ack_generation: u64 = 0,
@@ -364,6 +369,7 @@ pub fn Actor(comptime P: type) type {
             defer self.shutdown();
             self.inbox.init(self.io);
             self.waiters = .{ .gpa = self.gpa, .io = self.io, .inbox = &self.inbox };
+            self.syncs = .{ .gpa = self.gpa, .io = self.io, .inbox = &self.inbox };
             try self.inbox.forward(.mailbox, &self.mailbox_receiver);
             try self.inbox.forward(.resolver, &self.resolver_receiver);
             try finalize.startup(self);
@@ -381,16 +387,20 @@ pub fn Actor(comptime P: type) type {
         fn handle(self: *Self, event: Event) !bool {
             switch (event) {
                 .closed => return false,
+                .synced => |seq| {
+                    if (self.syncs.take_notified(seq)) try self.release_sync(seq);
+                },
                 .waiter => |id| {
                     const done = self.waiters.take_notified(id) orelse return true;
                     try self.handle_waiter(done);
                 },
                 .ack => |generation| {
+                    try self.drain_ready_syncs();
                     try self.drain_ready_waiters();
                     return self.handle_ack(generation);
                 },
                 .mailbox => |message| {
-                    self.drain_ready_waiters() catch |err| {
+                    self.drain_ready_syncs_then_waiters() catch |err| {
                         release_event(event);
                         return err;
                     };
@@ -401,7 +411,7 @@ pub fn Actor(comptime P: type) type {
                     try ingress.handle(self, message);
                 },
                 .resolver => |message| {
-                    self.drain_ready_waiters() catch |err| {
+                    self.drain_ready_syncs_then_waiters() catch |err| {
                         release_event(event);
                         return err;
                     };
@@ -425,6 +435,29 @@ pub fn Actor(comptime P: type) type {
             if (self.ack_watch) |*watch| watch.cancel(self.io);
             self.ack_watch = null;
             return self.process_ready_acks();
+        }
+
+        /// Releases every pooled sync that is already durable, then handles every ready buffer
+        /// waiter (commonware's first two `select_loop!` arms).
+        fn drain_ready_syncs_then_waiters(self: *Self) !void {
+            try self.drain_ready_syncs();
+            try self.drain_ready_waiters();
+        }
+
+        /// Releases every pooled sync already durable, oldest first, before any other event.
+        fn drain_ready_syncs(self: *Self) !void {
+            const ready_max = self.syncs.tasks.count();
+            for (0..ready_max) |_| {
+                const seq = self.syncs.take_ready() orelse return;
+                try self.release_sync(seq);
+            }
+        }
+
+        /// A durable finalized-archive sync releases its batch for dispatch.
+        fn release_sync(self: *Self, seq: u64) !void {
+            assert(!self.syncs.tasks.contains(seq));
+            self.dispatch_gate.release(seq);
+            try finalize.try_dispatch_blocks(self);
         }
 
         /// Handles every buffer waiter that is already ready, as commonware's biased
@@ -522,6 +555,7 @@ pub fn Actor(comptime P: type) type {
             self.block_subscriptions.deinit(gpa);
             self.floor.deinit(gpa);
             if (self.started) {
+                self.syncs.deinit();
                 self.waiters.deinit();
                 self.resolver_receiver.deinit();
                 deinit_owned(&self.application);
@@ -560,7 +594,7 @@ pub fn Actor(comptime P: type) type {
             switch (event) {
                 .mailbox => |message| Message.discard(message),
                 .resolver => |message| HandlerMessage.discard(message),
-                .waiter, .ack, .closed => {},
+                .waiter, .synced, .ack, .closed => {},
             }
         }
 
@@ -697,6 +731,72 @@ pub fn Actor(comptime P: type) type {
             }
 
             fn deinit(self: *Waiters) void {
+                while (self.tasks.count() > 0) self.reap(self.tasks.keys()[0]);
+                self.tasks.deinit(self.gpa);
+                self.* = undefined;
+            }
+        };
+
+        /// Pooled finalized-archive syncs (commonware's `PooledSync::Finalized`): each waits out
+        /// its handle's delay in its own task, marks itself durable, and posts a `synced`
+        /// notice. A sync cancelled at shutdown releases nothing.
+        pub const Syncs = struct {
+            gpa: Allocator,
+            io: Io,
+            inbox: *Inbox,
+            /// By sync sequence number, in start order.
+            tasks: std.AutoArrayHashMapUnmanaged(u64, *Pending) = .empty,
+
+            const Pending = struct {
+                durable: std.atomic.Value(bool) = .init(false),
+                future: Io.Future(void) = undefined,
+            };
+
+            /// Pools sync `seq`, durable `durable.delay_ns` from now.
+            pub fn push(self: *Syncs, seq: u64, durable: store.Durable) !void {
+                assert(durable.delay_ns > 0);
+                assert(!self.tasks.contains(seq));
+                try self.tasks.ensureUnusedCapacity(self.gpa, 1);
+                const pending = try self.gpa.create(Pending);
+                errdefer self.gpa.destroy(pending);
+                pending.* = .{};
+                const args = .{ self.inbox, seq, durable.delay_ns, pending };
+                pending.future = try self.io.concurrent(wait, args);
+                self.tasks.putAssumeCapacityNoClobber(seq, pending);
+            }
+
+            fn wait(inbox: *Inbox, seq: u64, delay_ns: u64, pending: *Pending) void {
+                const io = inbox.io;
+                io.sleep(.fromNanoseconds(@intCast(delay_ns)), .awake) catch return;
+                pending.durable.store(true, .release);
+                _ = inbox.push(.{ .synced = seq });
+            }
+
+            /// Takes the oldest durable sync, if any.
+            pub fn take_ready(self: *Syncs) ?u64 {
+                for (self.tasks.keys(), self.tasks.values()) |seq, pending| {
+                    if (!pending.durable.load(.acquire)) continue;
+                    self.reap(seq);
+                    return seq;
+                }
+                return null;
+            }
+
+            /// Takes sync `seq` after its notice; false when already taken.
+            pub fn take_notified(self: *Syncs, seq: u64) bool {
+                const pending = self.tasks.get(seq) orelse return false;
+                assert(pending.durable.load(.acquire));
+                self.reap(seq);
+                return true;
+            }
+
+            fn reap(self: *Syncs, seq: u64) void {
+                const pending = (self.tasks.fetchOrderedRemove(seq) orelse return).value;
+                pending.future.cancel(self.io);
+                self.gpa.destroy(pending);
+            }
+
+            fn deinit(self: *Syncs) void {
                 while (self.tasks.count() > 0) self.reap(self.tasks.keys()[0]);
                 self.tasks.deinit(self.gpa);
                 self.* = undefined;

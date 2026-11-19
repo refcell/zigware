@@ -65,8 +65,8 @@ pub fn Recording(comptime T: type, comptime Block: type) type {
             try self.inner.sync();
         }
 
-        pub fn start_sync(self: Self) Error!void {
-            try self.inner.start_sync();
+        pub fn start_sync(self: Self) Error!store.Durable {
+            return self.inner.start_sync();
         }
 
         pub fn get(self: Self, id: store.Identifier(Digest)) Error!?Block {
@@ -116,7 +116,9 @@ const SingleStore = struct {
 
     pub fn sync(_: SingleStore) Error!void {}
 
-    pub fn start_sync(_: SingleStore) Error!void {}
+    pub fn start_sync(_: SingleStore) Error!store.Durable {
+        return .done;
+    }
 
     pub fn get(self: SingleStore, id: store.Identifier(Digest)) Error!?TestBlock {
         const block = self.block.* orelse return null;

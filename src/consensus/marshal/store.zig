@@ -31,6 +31,22 @@ fn archive_identifier(comptime A: type, comptime D: type, id: *const Identifier(
     };
 }
 
+/// A started sync's durability (commonware's sync `Handle`). zigware's archives are durable
+/// once `start_sync` returns, so a handle carries only the simulated delay before the sync
+/// counts as durable: zero for the archives, a pace for test stores that slow syncs down.
+pub const Durable = struct {
+    delay_ns: u64 = 0,
+
+    pub const done: Durable = .{};
+
+    /// Durable once both are.
+    pub fn join(a: Durable, b: Durable) Durable {
+        const joined: Durable = .{ .delay_ns = @max(a.delay_ns, b.delay_ns) };
+        assert(joined.delay_ns >= a.delay_ns and joined.delay_ns >= b.delay_ns);
+        return joined;
+    }
+};
+
 fn height_range(range: storage.rmap.Range) struct { Height, Height } {
     assert(range.start <= range.end);
     return .{ .new(range.start), .new(range.end) };
@@ -63,8 +79,10 @@ pub fn Certificates(comptime A: type, comptime S: type, comptime B: type, compti
             try self.archive.sync();
         }
 
-        pub fn start_sync(self: Self) Error!void {
+        /// Starts a sync of every write so far; the handle says when it is durable.
+        pub fn start_sync(self: Self) Error!Durable {
             try self.archive.start_sync();
+            return .done;
         }
 
         /// The finalization at a height or for a block digest; the caller owns it.
@@ -112,8 +130,10 @@ pub fn Blocks(comptime A: type, comptime Block: type) type {
             try self.archive.sync();
         }
 
-        pub fn start_sync(self: Self) Error!void {
+        /// Starts a sync of every write so far; the handle says when it is durable.
+        pub fn start_sync(self: Self) Error!Durable {
             try self.archive.start_sync();
+            return .done;
         }
 
         /// The block at a height or with a digest; the caller owns it.

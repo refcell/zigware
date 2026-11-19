@@ -2,9 +2,10 @@
 //! and certificates, floor transitions, gap repair, round floors, pruning, and dispatch to the
 //! application. Every function takes the actor (`*actor.Actor(P)`) as `self`.
 //!
-//! Archive writes return once durable, so each `start_finalized_sync` completes at once: it
-//! releases the dispatch gate and resumes dispatch in the same event. The gate still holds
-//! dispatch at or above a buffered write between `store_finalization` and that sync.
+//! `start_finalized_sync` releases the dispatch gate and resumes dispatch in the same event
+//! when the stores' handles are durable at once (the archives' always are); otherwise the
+//! actor pools the sync (`Actor.Syncs`) and releases its batch when it becomes durable. The
+//! gate holds dispatch at or above a buffered write until a sync covering it is durable.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -221,8 +222,12 @@ pub fn sync_finalized(self: anytype) !void {
 /// the writes it covers for dispatch (commonware pools this sync; here it returns durable).
 pub fn start_finalized_sync(self: anytype) !void {
     const seq = try self.dispatch_gate.adopt(self.gpa) orelse return;
-    try self.finalized_blocks.start_sync();
-    try self.finalizations_by_height.start_sync();
+    const blocks = try self.finalized_blocks.start_sync();
+    const finalizations = try self.finalizations_by_height.start_sync();
+    const durable = blocks.join(finalizations);
+    // A sync durable at once releases its batch here (commonware's pool yields it on the
+    // next loop iteration, ahead of every other event); a delayed one is pooled.
+    if (durable.delay_ns > 0) return self.syncs.push(seq, durable);
     self.dispatch_gate.release(seq);
     try try_dispatch_blocks(self);
 }

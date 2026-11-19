@@ -1120,11 +1120,6 @@ test "standard boundary restage sends once" {
 
 const pace_ms = 100;
 
-/// Whether the actor pools its finalized-archive sync off the actor loop, as commonware's
-/// `start_finalized_sync` does. Marshal's `start_finalized_sync` still syncs inline, so a
-/// paced sync blocks the mailbox and serializes overlapping syncs: durability holds, but
-/// the timing these three tests pin does not. They run once the sync is pooled.
-const pooled_finalized_sync = false;
 const PacedActor = common.Actor(
     harness.Provider,
     App,
@@ -1247,7 +1242,6 @@ fn sync_not_blocking_body(ctx: Ctx) anyerror!void {
 }
 
 test "standard finalization sync does not block mailbox" {
-    if (!pooled_finalized_sync) return error.SkipZigTest;
     try run(sync_not_blocking_body);
 }
 
@@ -1351,7 +1345,6 @@ fn stale_anchor_body(ctx: Ctx) anyerror!void {
 }
 
 test "standard stale floor anchor holds dispatch until durable" {
-    if (!pooled_finalized_sync) return error.SkipZigTest;
     try run(stale_anchor_body);
 }
 
@@ -1388,7 +1381,6 @@ fn overlapping_syncs_body(ctx: Ctx) anyerror!void {
 }
 
 test "standard overlapping finalized syncs release per batch" {
-    if (!pooled_finalized_sync) return error.SkipZigTest;
     try run(overlapping_syncs_body);
 }
 

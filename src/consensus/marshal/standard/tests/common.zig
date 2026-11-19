@@ -1092,9 +1092,11 @@ pub fn PacedCertificates(comptime T: type) type {
             try self.inner.sync();
         }
 
-        pub fn start_sync(self: Self) Error!void {
-            try pace(self.ctx, self.pace_ms);
-            try self.inner.start_sync();
+        /// Starts the inner sync; it counts as durable `pace_ms` later (commonware's
+        /// `PacedStore` sleeps inside the sync handle).
+        pub fn start_sync(self: Self) Error!store.Durable {
+            const inner = try self.inner.start_sync();
+            return inner.join(.{ .delay_ns = self.pace_ms * std.time.ns_per_ms });
         }
 
         pub fn get(self: Self, id: store.Identifier(BlockDigest)) Error!?Finalization {
@@ -1139,9 +1141,11 @@ pub fn PacedBlocks(comptime T: type, comptime StoredBlock: type) type {
             try self.inner.sync();
         }
 
-        pub fn start_sync(self: Self) Error!void {
-            try pace(self.ctx, self.pace_ms);
-            try self.inner.start_sync();
+        /// Starts the inner sync; it counts as durable `pace_ms` later (commonware's
+        /// `PacedStore` sleeps inside the sync handle).
+        pub fn start_sync(self: Self) Error!store.Durable {
+            const inner = try self.inner.start_sync();
+            return inner.join(.{ .delay_ns = self.pace_ms * std.time.ns_per_ms });
         }
 
         pub fn get(self: Self, id: store.Identifier(Digest)) Error!?StoredBlock {
