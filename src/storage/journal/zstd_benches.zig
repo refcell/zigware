@@ -1,5 +1,6 @@
 //! Benchmarks of the journal's zstd encoder: compressing sample text and journal-like records
-//! with match finding (`compress`) against the raw-block path it replaced (`store`). Each run
+//! with libzstd's exact level 3 path (`exact`, what journals write), the faster encoder
+//! (`compress`), and the raw-block path (`store`). Each run
 //! reports `frame_bytes` and `ratio_permille` (frame size per thousand input bytes); the
 //! input size over the time per iteration is the throughput.
 
@@ -55,7 +56,7 @@ pub fn run(runner: *bench.Runner) !void {
                 .text => zstd.corpus.text(prng.random(), data),
                 .records => zstd.corpus.records(prng.random(), data),
             }
-            for ([_]zstd.Mode{ .store, .compress }) |mode| {
+            for ([_]zstd.Mode{ .store, .compress, .exact }) |mode| {
                 const benchmark = bench.Benchmark.init("journal::zstd::encode")
                     .with_param("mode", mode)
                     .with_param("data", kind)

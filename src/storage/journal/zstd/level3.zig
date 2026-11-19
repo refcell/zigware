@@ -4,6 +4,8 @@ pub const params = @import("params.zig");
 pub const dfast = @import("dfast.zig");
 pub const fse = @import("fse_exact.zig");
 pub const huf = @import("huf_exact.zig");
+pub const seq = @import("seq_exact.zig");
+pub const block = @import("block_exact.zig");
 
 test {
     _ = params;
@@ -13,4 +15,7 @@ test {
     _ = @import("fse_exact_test.zig");
     _ = huf;
     _ = @import("huf_exact_test.zig");
+    _ = seq;
+    _ = block;
+    _ = @import("block_exact_test.zig");
 }

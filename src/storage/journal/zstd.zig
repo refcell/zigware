@@ -4,16 +4,17 @@
 //! per item that declares its decompressed size. zigware has no C dependencies, so:
 //!
 //! - decompression uses `std.compress.zstd` and reads any frame libzstd writes;
-//! - compression writes the frame header `zstd::bulk::compress(.., 3)` writes (libzstd 1.5.7:
-//!   content size, no checksum or dictionary, level 3's window from `zstd/params.zig`). Each
-//!   block is compressed (LZ77 sequences coded with FSE, Huffman literals; see `zstd/`) when
-//!   that is smaller, else stored raw or RLE. Block bytes do not yet match libzstd's; the
-//!   byte-exact level 3 path is being ported (docs/lanes/storage-merkle.md).
+//! - compression (`compress_into`) writes exactly the frame `zstd::bulk::compress(.., 3)`
+//!   writes with libzstd 1.5.7, the version commonware pins: its frame header, double-fast
+//!   match finder, pre-splitter, Huffman literals, and FSE sequences (`zstd/*_exact.zig`), so
+//!   compressed journals hash like commonware's. The faster earlier encoder (`Mode.compress`)
+//!   writes valid frames whose bytes differ.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const block = @import("zstd/block.zig");
+const block_exact = @import("zstd/block_exact.zig");
 const params = @import("zstd/params.zig");
 
 /// Sample inputs for tests and benchmarks.
@@ -63,21 +64,23 @@ pub fn compress_bound(len: usize) usize {
     return header_size(len) + blocks * 3 + len;
 }
 
-/// Append one zstd frame holding `data` to `out`; returns the frame.
+/// Append the frame libzstd 1.5.7 level 3 writes for `data` to `out`; returns the frame.
 pub fn compress_into(
     gpa: Allocator,
     data: []const u8,
     out: *std.ArrayList(u8),
 ) Allocator.Error![]u8 {
-    return encode_into(gpa, data, out, .compress);
+    return encode_into(gpa, data, out, .exact);
 }
 
 /// How `encode_into` writes blocks.
 pub const Mode = enum {
     /// Raw and RLE blocks only (the encoder before match finding; kept for comparison).
     store,
-    /// Compressed blocks wherever they are smaller.
+    /// Compressed blocks wherever they are smaller (fast; bytes differ from libzstd's).
     compress,
+    /// libzstd 1.5.7 level 3, byte for byte.
+    exact,
 };
 
 /// Append one zstd frame holding `data` to `out` in `mode`; returns the frame.
@@ -89,6 +92,14 @@ pub fn encode_into(
 ) Allocator.Error![]u8 {
     const start = out.items.len;
     try out.ensureUnusedCapacity(gpa, compress_bound(data.len));
+    if (mode == .exact) {
+        var encoder = try block_exact.Encoder.init(gpa, data.len);
+        defer encoder.deinit(gpa);
+        write_header(data.len, out);
+        encoder.compress(data, out);
+        assert(out.items.len - start <= compress_bound(data.len));
+        return out.items[start..];
+    }
     const context: ?*block.Context = if (mode == .compress and data.len >= compress_len_min)
         try block.Context.create(gpa, data.len)
     else

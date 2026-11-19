@@ -350,3 +350,22 @@ variants need `runtime` storage; do them after its interface lands.
     digests. Planted bugs (no overshoot repayment, quicksort threshold 4, preferRepeat off,
     suspect sample off, `<` for `<=` in the old-table check, single stream below 255) each
     fail it. Raw weights above 128 symbols (libzstd: "should not happen") was never reached.
+  - [x] Piece 5: `zstd/seq_exact.zig` (`ZSTD_seqToCodes`, `ZSTD_selectEncodingType` below
+    lazy, `ZSTD_buildCTable`, `ZSTD_encodeSequences`, the 1.3.4 small-table workaround) and
+    `zstd/block_exact.zig` (`ZSTD_compress_frameChunk`, `ZSTD_compressBlock_internal`,
+    `ZSTD_entropyCompressSeqStore`: raw below 7 bytes, RLE except on the first block, `minGain`,
+    suspect literals at 20 per sequence, repeat offsets and Huffman tables confirmed only by
+    compressed blocks). Correction to the path facts above: dfast does pre-split
+    (`splitLevels[dfast]` is 1, so `ZSTD_splitBlock_byChunks` at 43-byte sampling), once a
+    frame has saved at least 3 bytes. Without a dictionary no FSE table is ever
+    `repeat_valid`, so dfast never picks `set_repeat` and FSE tables never carry over.
+    Whole frames matched the `bulk::compress(.., 3)` oracle on 210 files from 0 B to 26 MB
+    (text, binaries, records, runs, noise, mixtures). Found on the way: `FSE_writeNCount`'s bit
+    count reaches 32 after a long zero run, which overflowed the port's `u5` (now `u6`).
+    `block_exact_test.zig` pins 11 frame digests. Planted bugs (splitter penalty, threshold,
+    and savings gate; RLE on the first block; `minGain >> 7`; suspect ratio 10; the `u5`
+    bit count) each fail it.
+  - [x] Piece 6: `zstd.compress_into` (every compressed journal) writes the exact frames
+    (`Mode.exact`); the faster encoder stays as `Mode.compress` for comparison, and the round
+    trip fuzz and benches cover all three modes. The four `<true>` journal conformance
+    workloads are not wired yet; storage-journal owns `journal/conformance_test.zig`.

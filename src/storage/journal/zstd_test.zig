@@ -71,7 +71,7 @@ const data_max = 300_000;
 
 /// Builds data from drawn steps (literal runs, copies at drawn offsets, byte runs, and
 /// doublings that cross block boundaries), so matches, repeat offsets, and every literal
-/// and sequence encoding occur, then round trips it in both modes.
+/// and sequence encoding occur, then round trips it in every mode.
 fn fuzz_round_trip(_: void, smith: *std.testing.Smith) anyerror!void {
     const draws: codec.fuzz.Draws = .init(smith);
     var data: std.ArrayList(u8) = .empty;
@@ -104,6 +104,9 @@ fn fuzz_round_trip(_: void, smith: *std.testing.Smith) anyerror!void {
     assert(data.items.len <= data_max);
     const stored = try round_trip(data.items, .store);
     try testing.expect(try round_trip(data.items, .compress) <= stored);
+    // libzstd stores a first block that is one repeated byte raw, so `exact` may exceed
+    // `store`; it still decodes and stays within `compress_bound`.
+    _ = try round_trip(data.items, .exact);
 }
 
 // Seeded inputs in `zig build test`, then `std.testing.fuzz` under `--fuzz`.

@@ -223,7 +223,8 @@ pub fn write_ncount(out: []u8, norm: []const i16, max_symbol: u32, log: u32) Err
     const table_size: i32 = @as(i32, 1) << @intCast(log);
     var len: usize = 0;
     var stream: u32 = log - table_log_min;
-    var count_bits: u5 = 4;
+    // libzstd's `bitCount` reaches 32 after a long zero run, before its flush.
+    var count_bits: u6 = 4;
     var remaining: i32 = table_size + 1;
     var threshold: i32 = table_size;
     var nb_bits: u5 = @intCast(log + 1);
@@ -236,16 +237,16 @@ pub fn write_ncount(out: []u8, norm: []const i16, max_symbol: u32, log: u32) Err
             if (symbol == max_symbol + 1) break;
             while (symbol >= start + 24) {
                 start += 24;
-                stream +%= @as(u32, 0xFFFF) << count_bits;
+                stream +%= shl(0xFFFF, count_bits);
                 put16(out, &len, stream);
                 stream >>= 16;
             }
             while (symbol >= start + 3) {
                 start += 3;
-                stream +%= @as(u32, 3) << count_bits;
+                stream +%= shl(3, count_bits);
                 count_bits += 2;
             }
-            stream +%= (symbol - start) << count_bits;
+            stream +%= shl(symbol - start, count_bits);
             count_bits += 2;
             if (count_bits > 16) {
                 put16(out, &len, stream);
@@ -259,7 +260,7 @@ pub fn write_ncount(out: []u8, norm: []const i16, max_symbol: u32, log: u32) Err
         remaining -= if (count < 0) -count else count;
         count += 1;
         if (count >= threshold) count += max;
-        stream +%= @as(u32, @intCast(count)) << count_bits;
+        stream +%= shl(@intCast(count), count_bits);
         count_bits += nb_bits;
         if (count < max) count_bits -= 1;
         previous_zero = count == 1;
@@ -279,6 +280,14 @@ pub fn write_ncount(out: []u8, norm: []const i16, max_symbol: u32, log: u32) Err
     len -= 2;
     len += (@as(usize, count_bits) + 7) / 8;
     return len;
+}
+
+/// `value << bits` in a `U32`, as libzstd shifts its bit stream: bits past 31 are lost.
+fn shl(value: u32, bits: u6) u32 {
+    assert(bits < 32);
+    const shifted = value << @intCast(bits);
+    assert(bits > 0 or shifted == value);
+    return shifted;
 }
 
 fn put16(out: []u8, len: *usize, stream: u32) void {
