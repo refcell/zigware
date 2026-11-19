@@ -96,6 +96,7 @@ test {
     _ = @import("actors/resolver/actor_network_test.zig");
     _ = @import("actors/resolver/ingress_test.zig");
     _ = @import("actors/voter/ingress_test.zig");
+    _ = @import("actors/voter/tests/root.zig");
     _ = @import("engine_test.zig");
     _ = @import("twins_campaign_test.zig");
     _ = @import("tle_test.zig");
