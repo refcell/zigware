@@ -2196,6 +2196,458 @@ test "coding certified ancestry delivery skips recoding" {
     }
 }
 
+/// A direct coding actor whose application acknowledges by hand (commonware's
+/// `Application::manual_ack()` actor of the delivery tests). Must not move.
+const ManualStack = struct {
+    const A = common.Actor(common.App);
+
+    stores: harness.Archives,
+    mailbox: A.Mailbox,
+    resolver: common.RecordingResolver,
+    application: common.App,
+    buffer: common.RecordingCodingBuffer,
+    handle: @import("runtime").context.Handle(anyerror!void),
+
+    fn start(
+        self: *ManualStack,
+        ctx: Ctx,
+        prefix: []const u8,
+        validators: *const common.Fixture,
+    ) !void {
+        try self.stores.open(ctx, prefix);
+        errdefer self.stores.deinit();
+        const provider: common.Provider = .init(&validators.schemes[0]);
+        const config = try common.test_config(A, gpa, prefix, provider, &self.stores.cache_ref);
+        const initialized = try A.init(
+            ctx.child("actor"),
+            .{ .archive = &self.stores.finalizations },
+            .{ .archive = &self.stores.blocks },
+            config,
+        );
+        self.mailbox = initialized.mailbox;
+        const scope = ctx.scope.child("resolver");
+        var holding = try common.RecordingResolver.holding(gpa, ctx.io(), &scope);
+        self.resolver = holding.resolver;
+        self.application = try common.App.manual_ack(gpa, ctx.io());
+        self.buffer = try common.RecordingCodingBuffer.init(gpa, ctx.io());
+        self.handle = try initialized.actor.start(
+            self.application.clone(),
+            self.buffer.clone(),
+            holding.receiver,
+            holding.resolver.clone(),
+        );
+    }
+
+    fn stop(self: *ManualStack) void {
+        const ended = self.handle.abort() catch {};
+        ended catch {};
+        self.mailbox.deinit();
+        self.application.deinit();
+        self.buffer.deinit();
+        self.resolver.deinit();
+        self.stores.deinit();
+    }
+};
+
+/// `(finalization, block).encode()` for an application block. The caller frees it.
+fn encode_finalized(
+    finalization: *const H.Finalization,
+    block: *const common.CodingB,
+) ![]u8 {
+    const codec = @import("codec");
+    const size = finalization.encode_size() + block.encode_size();
+    const bytes = try gpa.alloc(u8, size);
+    var writer: codec.Writer = .init(bytes);
+    finalization.write(&writer);
+    block.write(&writer);
+    std.debug.assert(writer.written().len == size);
+    return bytes;
+}
+
+test "coding finalized height delivery rejects digest mismatch" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            var stack: ManualStack = undefined;
+            try stack.start(ctx, "finalized-height-digest-mismatch", &validators);
+            defer stack.stop();
+            const mailbox = &stack.mailbox;
+            try testing.expectEqual(0, (try stack.application.acknowledged()).get());
+
+            var honest = try common.missing_candidate(gpa, validators.participants[0]);
+            defer honest.block.deinit(gpa);
+            const height = honest.block.height();
+            var other = try common.coded(gpa, honest.context, honest.block.parent(), 1, 101);
+            defer other.deinit(gpa);
+            const round = honest.context.round;
+            const proposal = common.Proposal.init(round, .zero(), honest.block.commitment());
+            var finalization = try H.make_finalization(gpa, &validators, proposal, quorum);
+            defer finalization.deinit(gpa);
+            // Same height and context, different bytes: the signed digest is the honest one.
+            try testing.expect(std.meta.eql(honest.block.context(), other.context()));
+            try testing.expect(finalization.proposal.payload.block().eql(honest.block.digest()));
+            try testing.expect(!finalization.proposal.payload.block().eql(other.digest()));
+
+            var subscriptions = [_]utils.channel.oneshot.Receiver(common.Block){
+                try mailbox.subscribe_by_commitment(honest.block.commitment(), .wait),
+                try mailbox.subscribe_by_commitment(other.commitment(), .wait),
+                try mailbox.subscribe_by_digest(honest.block.digest(), .wait),
+                try mailbox.subscribe_by_digest(other.digest(), .wait),
+            };
+            defer for (&subscriptions) |*subscription| subscription.deinit();
+            const processed = try mailbox.get_processed();
+            const tip = stack.application.tip();
+
+            // A valid finalization must reject different bundled block bytes.
+            const value = try encode_finalized(&finalization, other.inner());
+            defer gpa.free(value);
+            const accepted = try stack.resolver.deliver(.{
+                .key = .{ .finalized = height },
+                .subscriber = .{ .finalized = .{ .by_height = height } },
+            }, value);
+            try testing.expect(!accepted);
+            try testing.expect(try mailbox.get_block(.{ .height = height }) == null);
+            try testing.expect(try mailbox.get_block(.{ .digest = honest.block.digest() }) == null);
+            try testing.expect(try mailbox.get_block(.{ .digest = other.digest() }) == null);
+            try testing.expect(try mailbox.get_finalization(height) == null);
+            try testing.expect(std.meta.eql(try mailbox.get_processed(), processed));
+            for (&subscriptions) |*subscription| {
+                try testing.expectError(error.Empty, subscription.try_recv());
+            }
+            try testing.expectEqual(1, stack.application.block_count());
+            try testing.expect(!stack.application.contains(height));
+            const pending = try stack.application.pending_ack_heights(gpa);
+            defer gpa.free(pending);
+            try testing.expectEqual(0, pending.len);
+            try testing.expect(std.meta.eql(stack.application.tip(), tip));
+        }
+    }.body);
+}
+
+/// Waits until `resolver` recorded more than `count` fetches.
+fn wait_fetches(ctx: Ctx, resolver: common.RecordingResolver, count: usize) !void {
+    var waited: u32 = 0;
+    while (resolver.fetch_count() <= count) : (waited += 1) {
+        if (waited > 5_000) return error.TestTimedOut;
+        try ctx.sleep(.fromMilliseconds(1));
+    }
+}
+
+/// A competing branch of four blocks at views 11 through 14 above genesis.
+fn competing_branch(me: common.K, out: *[4]common.Block) !void {
+    const genesis = try common.genesis_block(gpa);
+    var parent_view: u64 = 0;
+    var parent_commitment = try common.genesis_coding_commitment(gpa, &genesis);
+    var made: usize = 0;
+    errdefer for (out[0..made]) |*block| block.deinit(gpa);
+    for (out, 1..) |*block, height| {
+        const context: common.CodingCtx = .{
+            .round = common.round_at(0, height + 10),
+            .leader = me,
+            .parent = .{ .new(parent_view), parent_commitment },
+        };
+        block.* = try common.coded(gpa, context, parent_commitment.block(), height, height * 100);
+        made += 1;
+        parent_view = height + 10;
+        parent_commitment = block.commitment();
+    }
+}
+
+/// Caches a certified ancestor at height 2 of `chain` and checks it was delivered under
+/// certification evidence, without re-coding.
+fn cache_certified_ancestor(
+    stack: *common.ActorStack,
+    validators: *const common.Fixture,
+    chain: *[3]common.ChainLink,
+) !void {
+    const child = &chain[2];
+    try testing.expect(try stack.mailbox.verified(child.round, child.block.clone()));
+    const proposal = common.Proposal.init(child.round, .new(2), child.block.commitment());
+    var notarization = try H.make_notarization(gpa, validators, proposal, quorum);
+    defer notarization.deinit(gpa);
+    _ = stack.mailbox.report(.{ .certification = notarization });
+    const ancestor = &chain[1].block;
+    const value = try common.encode_coded(gpa, ancestor);
+    defer gpa.free(value);
+    try stack.resolver.respond_to_next_fetch(value);
+    const fallback: core_mailbox.CommitmentFallback = .{ .fetch_by_commitment = .new(2) };
+    var subscription = try stack.mailbox.subscribe_by_commitment(ancestor.commitment(), fallback);
+    defer subscription.deinit();
+    var certified = try subscription.recv();
+    defer certified.deinit(gpa);
+    try testing.expect(try stack.resolver.wait_for_delivery_response());
+    try testing.expect(try shards_absent(&certified));
+    const fetches = try stack.resolver.fetches(gpa);
+    defer gpa.free(fetches);
+    try testing.expect(fetches[0].subscriber.eql(.{ .certified = .new(2) }));
+}
+
+/// Delivers the competing ancestors the verifier fetches: neither the certified fork nor a
+/// cached untrusted child authenticates them, so each is fetched untrusted and re-coded, and
+/// the certified fork's bytes are refused for the first.
+fn serve_competing_ancestry(
+    ctx: Ctx,
+    stack: *common.ActorStack,
+    branch: *const [4]common.Block,
+    certified: *const common.Block,
+) !void {
+    for ([_]usize{ 1, 0 }, 0..) |position, index| {
+        const ancestor = &branch[position];
+        try wait_fetches(ctx, stack.resolver, index + 1);
+        const fetches = try stack.resolver.fetches(gpa);
+        defer gpa.free(fetches);
+        const item = fetches[index + 1];
+        try testing.expect(item.key.eql(.{ .block = ancestor.commitment() }));
+        try testing.expect(item.subscriber.eql(.{ .untrusted = ancestor.height() }));
+        var subscription = try stack.mailbox.subscribe_by_commitment(ancestor.commitment(), .wait);
+        defer subscription.deinit();
+        _ = try stack.mailbox.get_processed();
+        if (index == 0) {
+            const wrong = try common.encode_coded(gpa, certified);
+            defer gpa.free(wrong);
+            try testing.expect(!try stack.resolver.deliver(item, wrong));
+            try testing.expectError(error.Empty, subscription.try_recv());
+        }
+        const value = try common.encode_coded(gpa, ancestor);
+        defer gpa.free(value);
+        try testing.expect(try stack.resolver.deliver(item, value));
+        var delivered = try subscription.recv();
+        defer delivered.deinit(gpa);
+        try testing.expect(delivered.commitment().eql(ancestor.commitment()));
+        // Untrusted ancestry is re-coded.
+        try testing.expect(try shards_present(&delivered));
+    }
+}
+
+/// Finalizes `branch`'s tip and waits until every branch block is finalized by height.
+fn finalize_competing_branch(
+    ctx: Ctx,
+    stack: *common.ActorStack,
+    validators: *const common.Fixture,
+    branch: *const [4]common.Block,
+) !void {
+    const candidate = &branch[3];
+    const proposal = common.Proposal.init(
+        candidate.context().round,
+        branch[2].context().round.view,
+        candidate.commitment(),
+    );
+    var finalization = try H.make_finalization(gpa, validators, proposal, quorum);
+    defer finalization.deinit(gpa);
+    _ = stack.mailbox.report(.{ .finalization = finalization });
+    var waited: u32 = 0;
+    while (true) : (waited += 1) {
+        if (waited > 5_000) return error.TestTimedOut;
+        const processed = try stack.mailbox.get_processed();
+        if (processed) |value| if (std.meta.eql(value, .{ .block = .new(4) })) break;
+        try ctx.sleep(.fromMilliseconds(1));
+    }
+    for (branch) |*block| {
+        var finalized = (try stack.mailbox.get_block(.{ .height = block.height() })) orelse
+            return error.BlockMissing;
+        defer finalized.deinit(gpa);
+        try testing.expect(finalized.commitment().eql(block.commitment()));
+    }
+}
+
+/// A digest subscription to `block` resolves at once with `block`.
+fn expect_subscribed(stack: *common.ActorStack, block: *const common.Block) !void {
+    var subscription = try stack.mailbox.subscribe_by_digest(block.digest(), .wait);
+    defer subscription.deinit();
+    var received = try subscription.recv();
+    defer received.deinit(gpa);
+    try testing.expect(received.commitment().eql(block.commitment()));
+}
+
+const WalkingMarshaled = common.MarshaledOf(common.WalkingVerifyingApp);
+
+test "coding optimistic ancestry conflicts with certified cache" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            const provider: common.Provider = .init(&validators.schemes[0]);
+            var buffer = try common.RecordingCodingBuffer.init(gpa, ctx.io());
+            defer buffer.deinit();
+            var stack = try common.start_coding_actor_with_recording(
+                ctx.child("validator"),
+                "optimistic-ancestry-conflict",
+                provider,
+                buffer,
+            );
+            defer stack.stop();
+            const me = validators.participants[0];
+            var certified_chain: [3]common.ChainLink = undefined;
+            try common.coding_chain(gpa, me, &certified_chain);
+            defer for (&certified_chain) |*link| link.block.deinit(gpa);
+            try cache_certified_ancestor(&stack, &validators, &certified_chain);
+
+            // Later views extend a competing branch at the same heights; only its candidate
+            // and the candidate's parent are available before verification.
+            var branch: [4]common.Block = undefined;
+            try competing_branch(me, &branch);
+            defer for (&branch) |*block| block.deinit(gpa);
+            const candidate = &branch[3];
+            const parent = &branch[2];
+            try testing.expect(!branch[1].digest().eql(certified_chain[1].block.digest()));
+            try testing.expect(try stack.mailbox.verified(parent.context().round, parent.clone()));
+            const candidate_round = candidate.context().round;
+            try testing.expect(try stack.mailbox.verified(candidate_round, candidate.clone()));
+            try expect_subscribed(&stack, parent);
+
+            var shard_stack: common.ShardStack = undefined;
+            const shards_ctx = ctx.child("shards");
+            const participants = validators.participants;
+            try common.start_shard_mailbox(&shard_stack, shards_ctx, participants, provider);
+            defer shard_stack.stop();
+            var walked: std.ArrayList(common.D) = .empty;
+            defer walked.deinit(gpa);
+            const app: common.WalkingVerifyingApp = .{ .gpa = gpa, .blocks = &walked };
+            const marshal = stack.mailbox.clone();
+            const shards = shard_stack.shards();
+            const config =
+                common.marshaled_config(WalkingMarshaled, app, marshal, shards, provider);
+            var marshaled = try WalkingMarshaled.init(ctx.child("marshaled"), config);
+            defer marshaled.deinit();
+            var verify = try marshaled.start_verify(candidate.context(), candidate.commitment());
+            defer verify.deinit();
+            try serve_competing_ancestry(ctx, &stack, &branch, &certified_chain[1].block);
+
+            // Both forks stay cached and are retrieved by their own digests.
+            for ([_]*const common.Block{ &certified_chain[1].block, &branch[1] }) |ancestor| {
+                var stored = (try stack.mailbox.get_block(.{ .digest = ancestor.digest() })) orelse
+                    return error.AncestorMissing;
+                defer stored.deinit(gpa);
+                try testing.expect(stored.commitment().eql(ancestor.commitment()));
+            }
+            var certify = try marshaled.start_certify(candidate_round, candidate.commitment());
+            defer certify.deinit();
+            try testing.expect(try certify.recv());
+            // The verifier walked the competing branch down to genesis.
+            try testing.expectEqual(5, walked.items.len);
+            for (walked.items[0..4], 0..) |digest, index| {
+                try testing.expect(digest.eql(branch[3 - index].digest()));
+            }
+
+            // Finalization follows the competing branch despite the certified height-2 block.
+            try finalize_competing_branch(ctx, &stack, &validators, &branch);
+            try testing.expectEqual(3, stack.resolver.fetch_count());
+        }
+    }.body);
+}
+
+/// The subscribers of the recorded certified and untrusted fetches, in order (at most 8).
+fn ancestry_annotations(
+    resolver: common.RecordingResolver,
+    out: *[8]common.Annotation,
+) ![]common.Annotation {
+    const fetches = try resolver.fetches(gpa);
+    defer gpa.free(fetches);
+    var count: usize = 0;
+    for (fetches) |item| {
+        if (item.subscriber != .certified and item.subscriber != .untrusted) continue;
+        out[count] = item.subscriber;
+        count += 1;
+    }
+    return out[0..count];
+}
+
+/// Delivers `parent` for `fetch`, then subscribes to `grandparent` and checks processing is
+/// still held below it. Returns the grandparent subscription.
+fn deliver_below_tip(
+    stack: *common.ActorStack,
+    fetch: common.Fetch,
+    parent: *const common.Block,
+    grandparent: *const common.Block,
+) !utils.channel.oneshot.Receiver(common.Block) {
+    const value = try common.encode_coded(gpa, parent);
+    defer gpa.free(value);
+    try testing.expect(try stack.resolver.deliver(fetch, value));
+    var subscription = try stack.mailbox.subscribe_by_commitment(grandparent.commitment(), .{
+        .fetch_by_commitment = grandparent.height(),
+    });
+    errdefer subscription.deinit();
+    const processed = try stack.mailbox.get_processed();
+    const processed_height = if (processed) |position| position.height().get() else 0;
+    try testing.expect(processed_height < grandparent.height().get());
+    return subscription;
+}
+
+test "coding certification retention follows finalized tip" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            const provider: common.Provider = .init(&validators.schemes[0]);
+            var buffer = try common.RecordingCodingBuffer.init(gpa, ctx.io());
+            defer buffer.deinit();
+            var stack = try common.start_coding_actor_with_recording(
+                ctx.child("validator"),
+                "certification-retention",
+                provider,
+                buffer,
+            );
+            defer stack.stop();
+            const mailbox = &stack.mailbox;
+            var chain: [3]common.ChainLink = undefined;
+            try common.coding_chain(gpa, validators.participants[0], &chain);
+            defer for (&chain) |*link| link.block.deinit(gpa);
+            const grandparent = &chain[0].block;
+            const parent = &chain[1].block;
+            const child = &chain[2];
+
+            // A certified parent fetch starts before the child is finalized.
+            try testing.expect(try mailbox.verified(child.round, child.block.clone()));
+            const proposal = common.Proposal.init(child.round, .new(2), child.block.commitment());
+            var notarization = try H.make_notarization(gpa, &validators, proposal, quorum);
+            defer notarization.deinit(gpa);
+            _ = mailbox.report(.{ .certification = notarization });
+            const fallback: core_mailbox.CommitmentFallback =
+                .{ .fetch_by_commitment = parent.height() };
+            var subscriptions: [4]utils.channel.oneshot.Receiver(common.Block) = undefined;
+            var made: usize = 0;
+            defer for (subscriptions[0..made]) |*subscription| subscription.deinit();
+            subscriptions[0] = try mailbox.subscribe_by_commitment(parent.commitment(), fallback);
+            made += 1;
+            _ = try mailbox.get_processed();
+            const fetches = try stack.resolver.fetches(gpa);
+            defer gpa.free(fetches);
+            const fetch = fetches[fetches.len - 1];
+            try testing.expect(fetch.subscriber.eql(.{ .certified = parent.height() }));
+
+            // Finalization advances the tip while missing ancestors hold back processing.
+            var finalization = try H.make_finalization(gpa, &validators, proposal, quorum);
+            defer finalization.deinit(gpa);
+            _ = mailbox.report(.{ .finalization = finalization });
+            const info = (try mailbox.get_info(.{ .height = child.block.height() })) orelse
+                return error.InfoMissing;
+            try testing.expect(info.digest.eql(child.block.digest()));
+            subscriptions[1] = try mailbox.subscribe_by_commitment(parent.commitment(), fallback);
+            made += 1;
+            // A late certification must not restore evidence below the tip.
+            _ = mailbox.report(.{ .certification = notarization });
+            subscriptions[2] = try mailbox.subscribe_by_commitment(parent.commitment(), fallback);
+            made += 1;
+            _ = try mailbox.get_processed();
+
+            // The original fetch still arrives, but retains no older ancestry evidence.
+            subscriptions[3] = try deliver_below_tip(&stack, fetch, parent, grandparent);
+            made += 1;
+            var out: [8]common.Annotation = undefined;
+            const annotations = try ancestry_annotations(stack.resolver, &out);
+            const expected = [_]common.Annotation{
+                .{ .certified = parent.height() },
+                .{ .untrusted = parent.height() },
+                .{ .untrusted = parent.height() },
+                .{ .untrusted = grandparent.height() },
+            };
+            try testing.expectEqual(expected.len, annotations.len);
+            for (expected, annotations) |want, got| try testing.expect(want.eql(got));
+        }
+    }.body);
+}
+
 test {
     _ = common;
 }

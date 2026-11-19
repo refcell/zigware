@@ -919,3 +919,41 @@ pub fn encode_coded(gpa: Allocator, block: *const Block) ![]u8 {
     assert(writer.written().len == size);
     return bytes;
 }
+
+/// Records the ancestry verification walks and accepts only after reaching genesis; it never
+/// proposes (commonware `WalkingVerifyingApp`). Copies share the test-owned log.
+pub const WalkingVerifyingApp = struct {
+    pub const Block = CodingB;
+
+    gpa: Allocator,
+    /// The digests walked, newest first.
+    blocks: *std.ArrayList(D),
+
+    pub fn propose(
+        _: *WalkingVerifyingApp,
+        _: Ctx,
+        _: CodingCtx,
+        ancestry_stream: Ancestry,
+    ) anyerror!?broadcast.Digested(CodingB) {
+        var stream = ancestry_stream;
+        stream.deinit();
+        return null;
+    }
+
+    pub fn verify(
+        self: *WalkingVerifyingApp,
+        _: Ctx,
+        _: CodingCtx,
+        ancestry_stream: Ancestry,
+    ) anyerror!bool {
+        var stream = ancestry_stream;
+        defer stream.deinit();
+        while (try stream.next()) |value| {
+            var block = value;
+            defer block.deinit();
+            try self.blocks.append(self.gpa, block.digest());
+            if (block.inner().height().is_zero()) return true;
+        }
+        return false;
+    }
+};

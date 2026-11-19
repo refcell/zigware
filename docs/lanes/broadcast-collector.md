@@ -157,18 +157,22 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
 - [x] marshal coding fuzz: commonware's consensus/fuzz has no coding target, so
   `coding/fuzz.zig` fuzzes the decoders (`Coding.decode_block`, `StoredCodedBlock`, `Shard`)
   on mutated encodings (minifuzz and coverage-guided).
-- [ ] marshal coding: `coding/harness.zig` and the `coding/mod.rs` tests (`mod_test.zig`).
-  Done: `CodingB`, `CodingCtx`, `genesis_commitment`, `make_coding_block`, and
-  `CodingHarness`'s blocks (`TestCommitment` is spelled over the digests, since `CodingB`'s
-  context refers to it), with `mailbox_provides_application_blocks`; the coding `Validator`
-  (shards engine in place of broadcast, archives via `mocks/harness.ArchivesWith`) with an
-  end-to-end finalize smoke test. The coding variant signs with its own scheme over the
-  coding commitment (`CodingHarness.Scheme`/`Provider`/`Fixture`/`fixture`), since marshal's
-  shared `S` is bound to digest subjects. Next: the mod.rs tests, and the scenario wrappers
-  once marshal's generic scenarios land.
-  The runtime thread (T-01a1d57b-1bfd) ported mod.rs 4989-6420 (15 propose, prepare, relay,
-  restart, and certify-release tests) in `coding/tests/propose_test.zig`, adding
-  `RecordingCodingBuffer.sent_to_all` to `tests/common.zig`.
+- [x] marshal coding: `coding/harness.zig` and the `coding/mod.rs` tests. The coding variant
+  signs with its own scheme over the coding commitment (`CodingHarness.Scheme`/`Provider`/
+  `Fixture`/`fixture`), since marshal's shared `S` is bound to digest subjects.
+  `TestCommitment` is spelled over the digests, since `CodingB`'s context refers to it. The
+  coding `Validator` runs the shards engine in place of broadcast. Who ported which tests:
+  - this lane: the single-actor (recording buffer and resolver), validator, and Marshaled
+    tests of mod.rs 160-4988 in `mod_test.zig` (helpers in `tests/common.zig`), and the
+    finalize, hailstorm, and ack_pipeline wrappers in `tests/scenarios.zig`;
+  - examples (T-01a1d5b9-c891): the 20 query scenarios and SuccessRecoverable in
+    `tests/queries.zig`, plus the prunable validator in `harness.zig`;
+  - marshal (T-01a1d5ef): the 5 recoverable wrappers of mod.rs 1355-1485 in
+    `tests/recoverable.zig`;
+  - runtime (T-01a1d57b-1bfd): mod.rs 4989-6420 (15 propose, prepare, relay, restart, and
+    certify-release tests) in `tests/propose_test.zig`, adding
+    `RecordingCodingBuffer.sent_to_all`.
+  Not portable: `floor_anchor_panics_on_parent_commitment_mismatch` (a `should_panic` test).
 
 ## Log
 - 2026-11-13: broadcast lib.rs and buffered (engine, mailbox, overflow policy, metrics,
@@ -197,3 +201,4 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
 - 2026-11-16: marshal coding `Marshaled` with 8 tests.
 - 2026-11-18: coding harness blocks and the first mod.rs test.
 - 2026-11-18: coding harness validator with an end-to-end finalize smoke test.
+- 2026-11-19: the rest of coding/mod.rs (delivery, ancestry, retention); the port is done.
