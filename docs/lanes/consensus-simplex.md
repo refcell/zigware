@@ -498,3 +498,7 @@ resolver; those lanes are running, so do the types first and the actors as they 
   while the parent's certification sync was parked still let the candidate be voted
   (test_pipelined_handoff_held_build_becomes_ineligible_at_leader_timeout). Open: the inbox's
   `next_event` still returns a queued event ahead of an already expired deadline.
+- 2026-11-19 (runtime lane): the inbox's `next_until` now returns null for an already
+  expired deadline even with events queued, closing the item above: commonware's biased
+  `select_loop!` fires `sleep_until(deadline)` before any other branch. Only the voter
+  passes a deadline; the batcher and resolver call `next()`.

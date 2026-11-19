@@ -83,6 +83,7 @@ test {
     _ = actors.batcher.votes;
     _ = actors.batcher.verifier;
     _ = actors.batcher.round;
+    _ = actors.inbox;
     _ = @import("actors/ingress_test.zig");
     _ = @import("actors/batcher/actor_test.zig");
     _ = @import("actors/batcher/actor_late_test.zig");

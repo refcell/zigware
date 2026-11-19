@@ -73,7 +73,7 @@ pub fn Inbox(
             return (try self.next_until(null)).?;
         }
 
-        /// The next event, or null once the awake clock reaches `deadline_ns`.
+        /// The next event, or null once the awake clock reaches `deadline_ns`, queued or not.
         pub fn next_until(self: *Self, deadline_ns: ?i96) Io.Cancelable!?Event {
             return next_event(self, deadline_ns);
         }
@@ -104,6 +104,11 @@ fn next_event(inbox: anytype, deadline_ns: ?i96) Io.Cancelable!?@TypeOf(inbox.*)
     const capacity = inbox.buffer.len;
     inbox.mutex.lockUncancelable(inbox.io);
     defer inbox.mutex.unlock(inbox.io);
+    // An expired deadline wins over queued events: commonware's biased `select_loop!` polls
+    // `sleep_until(deadline)` ahead of its other branches.
+    if (deadline_ns) |due| {
+        if (Io.Timestamp.now(inbox.io, .awake).nanoseconds >= due) return null;
+    }
     // Each wake re-checks the queue and the deadline.
     while (inbox.count == 0) {
         assert(!inbox.is_closed); // Proof: only `shutdown` closes the queue.
@@ -180,4 +185,30 @@ fn Payload(comptime Source: type) type {
         .optional => |optional| optional.child,
         else => Value,
     };
+}
+
+test "inbox: an expired deadline wins over a queued event" {
+    const runtime = @import("runtime");
+    var runner = try runtime.deterministic.Runner.init(std.testing.allocator, .{});
+    defer runner.deinit();
+    try try runner.start_context(struct {
+        const Event = union(enum) { value: u32, closed };
+        fn release(_: Event) void {}
+        fn body(ctx: runtime.deterministic.Context) anyerror!void {
+            const io = ctx.io();
+            var inbox: Inbox(Event, 4, release) = undefined;
+            inbox.init(io);
+            defer inbox.shutdown();
+            try ctx.sleep(.fromMilliseconds(10));
+            const now = Io.Timestamp.now(io, .awake).nanoseconds;
+            try std.testing.expect(inbox.push(.{ .value = 7 }));
+            // commonware's biased select: the expired deadline fires first.
+            try std.testing.expectEqual(null, try inbox.next_until(now));
+            // A live deadline still yields the queued event at once.
+            const event = (try inbox.next_until(now + std.time.ns_per_s)).?;
+            try std.testing.expectEqual(7, event.value);
+            // With nothing queued, the deadline ends the wait.
+            try std.testing.expectEqual(null, try inbox.next_until(now + std.time.ns_per_s));
+        }
+    }.body, .{});
 }
