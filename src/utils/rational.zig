@@ -351,6 +351,15 @@ fn log2(gpa: Allocator, numer: *const Int, denom: *const Int, binary_digits: usi
         return .{ .numerator = numerator, .has_remainder = false };
     }
 
+    if (try log2_digits_interval(gpa, &normalized_numer, &normalized_denom, binary_digits)) |bits| {
+        // The ratio is in (1, 2) and never squares to exactly a power of two (it is not one),
+        // so the exact loop below would end with a remainder.
+        var fractional = try Int.initSet(gpa, bits);
+        defer fractional.deinit();
+        try numerator.add(&numerator, &fractional);
+        return .{ .numerator = numerator, .has_remainder = true };
+    }
+
     var fractional_bits = try Int.initSet(gpa, 0);
     defer fractional_bits.deinit();
     var numer_squared = try Int.init(gpa);
@@ -358,8 +367,10 @@ fn log2(gpa: Allocator, numer: *const Int, denom: *const Int, binary_digits: usi
     var denom_squared = try Int.init(gpa);
     defer denom_squared.deinit();
     for (0..binary_digits) |_| {
-        try numer_squared.sqr(&normalized_numer);
-        try denom_squared.sqr(&normalized_denom);
+        // `mul(x, x)` rather than `sqr(x)`: std's `sqr` is schoolbook only, while `mul` uses
+        // Karatsuba, about 4x faster on the ~300k-bit squares of the bloom filter's rates.
+        try numer_squared.mul(&normalized_numer, &normalized_numer);
+        try denom_squared.mul(&normalized_denom, &normalized_denom);
         try fractional_bits.shiftLeft(&fractional_bits, 1);
         // If the square is at least 2, the digit is 1: halve it (double the denominator).
         try denom_squared.shiftLeft(&denom_squared, 1);
@@ -374,6 +385,55 @@ fn log2(gpa: Allocator, numer: *const Int, denom: *const Int, binary_digits: usi
     try numerator.add(&numerator, &fractional_bits);
     const has_remainder = normalized_numer.order(normalized_denom) == .gt;
     return .{ .numerator = numerator, .has_remainder = has_remainder };
+}
+
+/// Fixed-point fractional bits of the interval `log2_digits_interval` squares.
+const interval_precision = 120;
+
+/// The first `binary_digits` (at most 64) binary digits of log2(numer / denom) for a ratio in
+/// (1, 2), from the same square-and-compare as `log2` over a fixed-point interval that holds
+/// the exact value: each digit is taken only when the whole interval lies on one side of 2, so
+/// the digits equal the exact loop's. Null when the interval straddles 2, which only the exact
+/// squaring can decide. The exact squares reach about 2^digits times the ratio's bits (about
+/// 900k bits for 1/10000 at 16 digits); this stays within 256 bits.
+fn log2_digits_interval(
+    gpa: Allocator,
+    numer: *const Int,
+    denom: *const Int,
+    binary_digits: usize,
+) Allocator.Error!?u64 {
+    assert(numer.order(denom.*) == .gt);
+    if (binary_digits > 64) return null;
+    const one: u256 = 1 << interval_precision;
+    const two: u256 = one << 1;
+    var shifted = try numer.clone();
+    defer shifted.deinit();
+    try shifted.shiftLeft(&shifted, interval_precision);
+    var quotient = try Int.init(gpa);
+    defer quotient.deinit();
+    var remainder = try Int.init(gpa);
+    defer remainder.deinit();
+    try quotient.divFloor(&remainder, &shifted, denom);
+    // Proof: numer / denom < 2, so the quotient is below 2^(interval_precision + 1).
+    var low = quotient.toInt(u256) catch unreachable;
+    var high = low + @intFromBool(!remainder.eqlZero());
+    assert(low >= one and high <= two);
+    var digits: u64 = 0;
+    for (0..binary_digits) |_| {
+        // Both bounds stay below 2^(interval_precision + 2), so their squares fit in u256.
+        low = (low * low) >> interval_precision;
+        high = (high * high + one - 1) >> interval_precision;
+        digits <<= 1;
+        if (low >= two) {
+            digits |= 1;
+            low >>= 1;
+            high = (high + 1) >> 1;
+        } else if (high >= two) {
+            return null;
+        }
+        assert(low <= high);
+    }
+    return digits;
 }
 
 test {
