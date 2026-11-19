@@ -346,7 +346,7 @@ line, with where its Zig counterpart lives. Counts:
 | File | Ported | In progress | Not portable | Total |
 | --- | --- | --- | --- | --- |
 | standard/mod.rs | 188 | 0 | 9 | 197 |
-| coding/mod.rs | 98 | 2 | 1 | 101 |
+| coding/mod.rs | 100 | 0 | 1 | 101 |
 
 `mocks/harness.rs` has no tests of its own: all 31 generic scenario functions are ported
 (`mocks/scenarios.zig`, `scenarios_queries.zig`, `scenarios_recoverable.zig`) and run through
@@ -570,8 +570,10 @@ job to gate, and `mocks/strategy.rs`'s GatedStrategy has no other user).
 - L163 `mailbox_provides_application_blocks`: ported (coding/mod_test.zig)
 - L814 `test_coding_walk_ends_at_mismatched_parent_digest` (#5715): ported
   (coding/tests/walk_test.zig); making ancestry's `is_parent` accept any digest fails it
-- L4703 `issue_5716_regression` (#5717): in progress (actor-stream lane)
-- L4848 `pr_5717_regression` (#5717): in progress (actor-stream lane)
+- L4703 `issue_5716_regression` (#5717): ported (coding/tests/walk_test.zig); untrusted
+  requests that ignore the round floor fail it
+- L4848 `pr_5717_regression` (#5717): ported (coding/tests/walk_test.zig); caching a
+  delivery above the cache ceiling fails it
 - L440 `test_config`: ported (coding/mod_test.zig)
 - L688 `test_coding_notarized_delivery_rejects_dishonest_payload_config`: ported (coding/mod_test.zig)
 - L766 `test_coding_block_provider_parent_fetches_by_commitment`: ported (coding/mod_test.zig)
