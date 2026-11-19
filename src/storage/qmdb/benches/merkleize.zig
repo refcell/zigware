@@ -23,6 +23,7 @@ const Session = common.Session;
 const Disk = common.Disk;
 const Variant = common.Variant;
 const AnyDb = common.AnyDb;
+const Current = common.CurrentChunksDb;
 const mmr = common.mmr;
 const mmb = common.mmb;
 const FixedDigest = common.FixedDigest;
@@ -37,7 +38,7 @@ const small_page_cache_pages: u32 = 32;
 /// Overwrite batches applied before timing the churned benchmark.
 const churn_batches: u64 = 50;
 
-/// Commonware's merkleize `VARIANTS`, without the `current` entries.
+/// Commonware's merkleize `VARIANTS`.
 const variants = .{
     Variant("any::unordered::fixed::mmr", AnyDb(mmr, .unordered, FixedDigest)),
     Variant("any::unordered::variable::mmr", AnyDb(mmr, .unordered, VariableDigest)),
@@ -47,6 +48,70 @@ const variants = .{
     Variant("any::ordered::variable::mmr", AnyDb(mmr, .ordered, VariableDigest)),
     Variant("any::ordered::fixed::mmb", AnyDb(mmb, .ordered, FixedDigest)),
     Variant("any::ordered::variable::mmb", AnyDb(mmb, .ordered, VariableDigest)),
+    Variant(
+        "current::unordered::fixed::mmr chunk=32",
+        Current(mmr, .unordered, FixedDigest, 32),
+    ),
+    Variant(
+        "current::unordered::variable::mmr chunk=32",
+        Current(mmr, .unordered, VariableDigest, 32),
+    ),
+    Variant(
+        "current::unordered::fixed::mmb chunk=32",
+        Current(mmb, .unordered, FixedDigest, 32),
+    ),
+    Variant(
+        "current::unordered::variable::mmb chunk=32",
+        Current(mmb, .unordered, VariableDigest, 32),
+    ),
+    Variant(
+        "current::unordered::fixed::mmr chunk=256",
+        Current(mmr, .unordered, FixedDigest, 256),
+    ),
+    Variant(
+        "current::unordered::variable::mmr chunk=256",
+        Current(mmr, .unordered, VariableDigest, 256),
+    ),
+    Variant(
+        "current::unordered::fixed::mmb chunk=256",
+        Current(mmb, .unordered, FixedDigest, 256),
+    ),
+    Variant(
+        "current::unordered::variable::mmb chunk=256",
+        Current(mmb, .unordered, VariableDigest, 256),
+    ),
+    Variant(
+        "current::ordered::fixed::mmr chunk=32",
+        Current(mmr, .ordered, FixedDigest, 32),
+    ),
+    Variant(
+        "current::ordered::variable::mmr chunk=32",
+        Current(mmr, .ordered, VariableDigest, 32),
+    ),
+    Variant(
+        "current::ordered::fixed::mmb chunk=32",
+        Current(mmb, .ordered, FixedDigest, 32),
+    ),
+    Variant(
+        "current::ordered::variable::mmb chunk=32",
+        Current(mmb, .ordered, VariableDigest, 32),
+    ),
+    Variant(
+        "current::ordered::fixed::mmr chunk=256",
+        Current(mmr, .ordered, FixedDigest, 256),
+    ),
+    Variant(
+        "current::ordered::variable::mmr chunk=256",
+        Current(mmr, .ordered, VariableDigest, 256),
+    ),
+    Variant(
+        "current::ordered::fixed::mmb chunk=256",
+        Current(mmb, .ordered, FixedDigest, 256),
+    ),
+    Variant(
+        "current::ordered::variable::mmb chunk=256",
+        Current(mmb, .ordered, VariableDigest, 256),
+    ),
 };
 
 const Options = struct {

@@ -11,4 +11,5 @@ pub fn run(runner: *bench.Runner) !void {
     try @import("init.zig").run(runner);
     try @import("apply_batch.zig").run(runner);
     try @import("merkleize.zig").run(runner);
+    try @import("chained_growth.zig").run(runner);
 }
