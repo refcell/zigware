@@ -1144,7 +1144,6 @@ fn CertificationCase(comptime W: type) type {
 }
 
 fn encode_pair(first: anytype, second: anytype) ![]u8 {
-    const codec = @import("codec");
     const a = try codec.encode(@TypeOf(first), gpa, first);
     defer gpa.free(a);
     const b = try codec.encode(@TypeOf(second), gpa, second);
@@ -1362,4 +1361,267 @@ test "certified covered by verified write recoverable after restart" {
             stored.deinit();
         }
     }.body);
+}
+
+const parallel = @import("parallel");
+const codec = @import("codec");
+const cryptography = @import("cryptography");
+const simplex = @import("../../../simplex/root.zig");
+const simplex_types = @import("../../../simplex/types.zig");
+const SimNet = harness.Network;
+const Vote = simplex_types.Vote(harness.S, harness.D);
+const Certificate = simplex_types.Certificate(harness.S, harness.D);
+
+/// commonware `scripted_byzantine_parent_equivocation`: a Byzantine leader reuses an honest
+/// block's commitment in a header naming an older certified parent. The victim rejects that
+/// header (and nullifies), then certifies the honest header the quorum notarized: the
+/// rejected verify must not poison the round's certification gate.
+fn Equivocation(comptime W: type) type {
+    return struct {
+        const Self = @This();
+        const Params = struct {
+            pub const Context = Ctx;
+            pub const Scheme = harness.S;
+            pub const Elector = simplex.elector.RoundRobinElector;
+            pub const Blocker = SimNet.Control;
+            pub const Digest = harness.D;
+            pub const Automaton = *W;
+            pub const Relay = *W;
+            pub const Reporter = *W;
+            pub const Strategy = parallel.Sequential;
+            pub const Sender = SimNet.Sender;
+            pub const Receiver = SimNet.Receiver;
+        };
+        const Engine = simplex.engine.Engine(Params);
+        const Channel = simplex.engine.Channel(Params);
+
+        net: *Net,
+        validator: *Validator,
+        floor: harness.Finalization,
+        digest: D,
+        wrapper: *W,
+        elector: simplex.elector.RoundRobinElector,
+        page_cache: runtime.buffer.paged.CacheRef,
+        engine: Engine,
+        handle: ?runtime.context.Handle(Engine.RunResult),
+        /// The Byzantine leader's vote and certificate channels, and the observer's votes.
+        byzantine_vote: Channel,
+        byzantine_certificate: Channel,
+        byzantine_resolver: Channel,
+        observer_vote: Channel,
+
+        fn byzantine(self: *const Self) harness.K {
+            return self.net.fixture.participants[3];
+        }
+
+        fn victim(self: *const Self) harness.K {
+            return self.net.fixture.participants[1];
+        }
+
+        /// Finalizes view 1 in marshal, verifies view 2, and buffers the honest view-3
+        /// block (naming view 2) without sending it anywhere.
+        fn init_marshal(self: *Self, ctx: Ctx) !void {
+            self.net = try Net.start(ctx, harness.num_validators);
+            errdefer self.net.stop();
+            const participants = self.net.fixture.participants;
+            self.validator = try self.net.validator(ctx, "marshal", 1);
+            var genesis = try H.genesis_block(gpa, harness.num_validators);
+            defer genesis.deinit();
+            const leader = self.byzantine();
+            var floor_block = try proposed_block(round_at(1), leader, 0, genesis.digest(), 1, 100);
+            defer floor_block.deinit();
+            try H.verify(self.validator, round_at(1), &floor_block);
+            self.floor = try finalize(&self.net.fixture, 1, 0, &floor_block);
+            report(&self.validator.mailbox, try self.floor.clone(gpa));
+            const floor_digest = floor_block.digest();
+            var skipped = try proposed_block(round_at(2), participants[3], 1, floor_digest, 2, 200);
+            defer skipped.deinit();
+            try H.verify(self.validator, round_at(2), &skipped);
+            var block = try proposed_block(round_at(3), leader, 2, skipped.digest(), 3, 300);
+            defer block.deinit();
+            self.digest = block.digest();
+            _ = try self.validator.extra.mailbox.broadcast(.{ .some = &.{} }, block.clone());
+        }
+
+        fn register(control: SimNet.Control, channel: u64) !Channel {
+            const registered = try control.register(channel, harness.test_quota);
+            return .{ .sender = registered.sender, .receiver = registered.receiver };
+        }
+
+        /// Registers the three simplex channels (marshal owns 1 and 2), the Byzantine
+        /// sender's, and the observer's vote tap, links everyone, and runs the engine.
+        fn init_engine(self: *Self, ctx: Ctx, partition: []const u8) !void {
+            const oracle = self.net.network.network.oracle();
+            const victim_control = oracle.control(self.victim());
+            const votes = try register(victim_control, 3);
+            const certificates = try register(victim_control, 4);
+            const backfill = try register(victim_control, 5);
+            const byzantine_control = oracle.control(self.byzantine());
+            self.byzantine_vote = try register(byzantine_control, 3);
+            self.byzantine_certificate = try register(byzantine_control, 4);
+            self.byzantine_resolver = try register(byzantine_control, 5);
+            self.observer_vote = try register(oracle.control(self.net.fixture.participants[0]), 3);
+            try self.net.link(harness.num_validators);
+            const marshal = self.validator.mailbox.clone();
+            self.wrapper = try W.create(ctx.child("wrapper"), Mock.init(gpa), marshal, epocher());
+            self.elector = try simplex.elector.RoundRobin(cryptography.Sha256).default().build(
+                gpa,
+                harness.num_validators,
+            );
+            self.page_cache = try .init(gpa, harness.page_size, harness.page_cache_size);
+            try self.engine.init(ctx.child("simplex"), .{
+                .scheme = self.net.fixture.schemes[1],
+                .elector = self.elector,
+                .blocker = victim_control,
+                .automaton = self.wrapper,
+                .relay = self.wrapper,
+                .reporter = self.wrapper,
+                .track_historical_votes = false,
+                .strategy = parallel.sequential,
+                .partition = partition,
+                .mailbox_size = 128,
+                .epoch = .zero(),
+                .floor = .{ .finalized = try self.floor.clone(gpa) },
+                .replay_buffer = 1024,
+                .write_buffer = 1024,
+                .page_cache = &self.page_cache,
+                .leader_timeout = .from_secs(2),
+                .certification_timeout = .from_secs(4),
+                .timeout_retry = .from_secs(3),
+                .view_retention = .new(10),
+                .skip = .{ .enabled = .{ .timeout = .from_secs(6) } },
+                .fetch_timeout = .from_secs(1),
+                .fetch_retry_delay = .from_millis(100),
+                .forward = .disabled,
+            });
+            const args = .{ &self.engine, votes, certificates, backfill };
+            self.handle = try ctx.child("engine").spawn(Engine.run, args);
+        }
+
+        fn deinit(self: *Self, ctx: Ctx) void {
+            if (self.handle) |handle| {
+                // `Closed` means the abort ended the engine, as it should.
+                if (handle.abort()) |result| {
+                    result catch |err| std.debug.panic("engine failed: {t}", .{err});
+                } else |_| {}
+            }
+            self.engine.deinit();
+            ctx.io().sleep(.fromMilliseconds(100), .awake) catch {};
+            self.wrapper.destroy();
+            const channels = [_]*Channel{
+                &self.byzantine_vote,
+                &self.byzantine_certificate,
+                &self.byzantine_resolver,
+                &self.observer_vote,
+            };
+            for (channels) |channel| {
+                channel.sender.deinit();
+                channel.receiver.deinit();
+            }
+            self.elector.deinit(gpa);
+            self.page_cache.deinit();
+            self.validator.crash();
+            self.floor.deinit(gpa);
+            self.net.stop();
+        }
+
+        /// Sends `value` (borrowed) from the Byzantine peer to the victim on `channel`.
+        fn send(self: *Self, channel: *Channel, comptime T: type, value: T) !void {
+            const bytes = try codec.encode(T, gpa, value);
+            defer gpa.free(bytes);
+            const reached = try channel.sender.send(.{ .one = self.victim() }, &.{bytes}, true);
+            gpa.free(reached);
+        }
+
+        /// Waits for the victim's nullify vote at `view`, as the observer receives it.
+        fn await_nullify(self: *Self, view: u64) !void {
+            while (true) {
+                var message = try self.observer_vote.receiver.recv();
+                defer message.deinit();
+                const vote = try codec.decode(Vote, gpa, message.payload);
+                if (vote == .nullify and vote.nullify.round.view.get() == view) return;
+            }
+        }
+
+        fn nullify_skipped(self: *Self) !void {
+            const Nullify = simplex_types.Nullify(harness.S);
+            const Nullification = simplex_types.Nullification(harness.S);
+            const schemes = self.net.fixture.schemes;
+            var votes: [3]Nullify = undefined;
+            for (&votes, [_]usize{ 0, 2, 3 }) |*vote, index| {
+                vote.* = (try Nullify.sign(gpa, &schemes[index], round_at(2))).?;
+            }
+            const strategy = parallel.sequential;
+            var nullification = try Nullification.from_votes(gpa, &schemes[0], &votes, strategy);
+            defer nullification.deinit(gpa);
+            try self.send(&self.byzantine_certificate, Certificate, .{
+                .nullification = nullification,
+            });
+        }
+
+        fn notarize_good(self: *Self, good: harness.Proposal) !void {
+            const Notarize = simplex_types.Notarize(harness.S, harness.D);
+            const Notarization = simplex_types.Notarization(harness.S, harness.D);
+            const schemes = self.net.fixture.schemes;
+            var votes: [3]Notarize = undefined;
+            for (&votes, [_]usize{ 0, 2, 3 }) |*vote, index| {
+                vote.* = (try Notarize.sign(gpa, &schemes[index], good)).?;
+            }
+            const strategy = parallel.sequential;
+            var notarization = try Notarization.from_votes(gpa, &schemes[0], &votes, strategy);
+            defer notarization.deinit(gpa);
+            try self.send(&self.byzantine_certificate, Certificate, .{
+                .notarization = notarization,
+            });
+        }
+
+        fn script(self: *Self, ctx: Ctx) !void {
+            // Skip view 2: the victim may accept a view-3 header naming view 1, while
+            // validators that certified view 2 build on it.
+            try self.nullify_skipped();
+            try ctx.sleep(.fromMilliseconds(250));
+            const bad = harness.Proposal.init(round_at(3), .new(1), self.digest);
+            const good = harness.Proposal.init(round_at(3), .new(2), self.digest);
+            try testing.expect(!std.meta.eql(bad, good));
+            const Notarize = simplex_types.Notarize(harness.S, harness.D);
+            const bad_vote = (try Notarize.sign(gpa, &self.net.fixture.schemes[3], bad)).?;
+            try self.send(&self.byzantine_vote, Vote, .{ .notarize = bad_vote });
+            // The victim's nullify proves the conflicting header reached verify and was
+            // rejected before the honest notarization arrives.
+            try self.await_nullify(3);
+            try ctx.sleep(.fromMilliseconds(250));
+            // The other validators notarize the header naming view 2 without the victim.
+            try self.notarize_good(good);
+            // Same-term vote safety forbids a finalize vote after the nullify, so successful
+            // certification shows as advancing to view 4, whose silent leader times out.
+            try self.await_nullify(4);
+        }
+
+        fn body(ctx: Ctx) anyerror!void {
+            // Round-robin elects participant 3 for view 3; with another leader the scripted
+            // proposal never reaches verify.
+            var elector = try simplex.elector.RoundRobin(cryptography.Sha256).default().build(
+                gpa,
+                harness.num_validators,
+            );
+            defer elector.deinit(gpa);
+            try testing.expectEqual(@as(u32, 3), elector.elect(round_at(3), {}).get());
+            var self: Self = undefined;
+            self.handle = null;
+            try self.init_marshal(ctx);
+            try self.init_engine(ctx, "scripted-equivocation-" ++ comptime kind_name(W));
+            defer self.deinit(ctx);
+            try self.script(ctx);
+        }
+    };
+}
+
+test "inline scripted byzantine parent equivocation" {
+    // commonware `test_inline_scripted_byzantine_parent_equivocation`.
+    try run_for(30, Equivocation(InlineWrapper).body);
+}
+
+test "deferred scripted byzantine parent equivocation" {
+    // commonware `test_deferred_scripted_byzantine_parent_equivocation`.
+    try run_for(30, Equivocation(DeferredWrapper).body);
 }
