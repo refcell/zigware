@@ -271,22 +271,62 @@ pub fn Field(comptime limb_count: comptime_int, comptime modulus_int: anytype) t
             return .{ .limbs_value = sum };
         }
 
-        /// The full product a * b (inputs below 2p), as 2 * limbs words.
+        /// Adds `addend` into `t[offset..offset + limbs]`, whose next word is zero, as one
+        /// carry chain; the carry lands in that word.
+        inline fn add_into_wide(
+            t: *WideLimbs,
+            comptime offset: usize,
+            addend: *const [limbs]u64,
+        ) void {
+            comptime assert(offset + limbs < 2 * limbs);
+            assert(t[offset + limbs] == 0);
+            var carry: u1 = 0;
+            inline for (0..limbs) |j| {
+                const step1 = @addWithOverflow(t[offset + j], addend[j]);
+                const step2 = @addWithOverflow(step1[0], carry);
+                t[offset + j] = step2[0];
+                carry = step1[1] | step2[1];
+            }
+            t[offset + limbs] = carry;
+        }
+
+        /// The full product a * b (inputs below 2p), as 2 * limbs words: row i's low halves
+        /// at offset i and high halves at offset i + 1, as straight carry chains (as `mul`).
         pub fn mul_wide(a: Self, b: Self) WideLimbs {
             comptime assert(lazy_supported);
             var t: WideLimbs = @splat(0);
             inline for (0..limbs) |i| {
-                var carry: u64 = 0;
+                var low: [limbs]u64 = undefined;
+                var high: [limbs]u64 = undefined;
                 inline for (0..limbs) |j| {
-                    const step = multiply_add(a.limbs_value[j], b.limbs_value[i], t[i + j], carry);
-                    t[i + j] = step[0];
-                    carry = step[1];
+                    const product = @as(u128, a.limbs_value[j]) * b.limbs_value[i];
+                    low[j] = @truncate(product);
+                    high[j] = @truncate(product >> 64);
                 }
-                t[i + limbs] = carry;
+                // Before row i, words at i + limbs and above are zero.
+                add_into_wide(&t, i, &low);
+                if (i + 1 < limbs) {
+                    add_into_wide(&t, i + 1, &high);
+                } else {
+                    add_last_row_high(&t, &high);
+                }
             }
             // Inputs below 2p < R / 2 give a product below R^2 / 4.
             assert(t[2 * limbs - 1] >> 62 == 0);
             return t;
+        }
+
+        /// The last row's high halves fill the top `limbs` words; the product fits, so no
+        /// carry leaves them.
+        inline fn add_last_row_high(t: *WideLimbs, high: *const [limbs]u64) void {
+            var carry: u1 = 0;
+            inline for (0..limbs) |j| {
+                const step1 = @addWithOverflow(t[limbs + j], high[j]);
+                const step2 = @addWithOverflow(step1[0], carry);
+                t[limbs + j] = step2[0];
+                carry = step1[1] | step2[1];
+            }
+            assert(carry == 0);
         }
 
         pub fn wide_add(a: WideLimbs, b: WideLimbs) WideLimbs {
@@ -321,26 +361,31 @@ pub fn Field(comptime limb_count: comptime_int, comptime modulus_int: anytype) t
             return wide_sub(wide_add(a, modulus_squared_wide), b);
         }
 
-        /// Montgomery reduction t * R^-1 mod p for t < p * R.
+        /// Montgomery reduction t * R^-1 mod p for t < p * R. With t = high R + low, the
+        /// result is high + (low + m p) / R: the low half reduces in `mul`'s sliding window
+        /// (to at most p), then the high half (below p) is added and reduced once.
         pub fn reduce_wide(value: WideLimbs) Self {
             comptime assert(lazy_supported);
-            var t = value;
-            var carry_top: u64 = 0;
-            inline for (0..limbs) |i| {
-                const m = t[i] *% inverse_word;
-                var carry: u64 = 0;
-                inline for (0..limbs) |j| {
-                    const step = multiply_add(m, modulus_limbs[j], t[i + j], carry);
-                    t[i + j] = step[0];
-                    carry = step[1];
-                }
-                assert(t[i] == 0);
-                const step1 = @addWithOverflow(t[i + limbs], carry);
-                const step2 = @addWithOverflow(step1[0], carry_top);
-                t[i + limbs] = step2[0];
-                carry_top = @as(u64, step1[1]) + step2[1];
+            var t: [limbs + 2]u64 = @splat(0);
+            t[0..limbs].* = value[0..limbs].*;
+            inline for (0..limbs) |_| {
+                const m = t[0] *% inverse_word;
+                accumulate_row(&t, m, &modulus_limbs);
+                assert(t[0] == 0);
+                inline for (0..limbs + 1) |k| t[k] = t[k + 1];
+                t[limbs + 1] = 0;
             }
-            const result = reduce_once(t[limbs..].*, carry_top);
+            assert(t[limbs] <= 1);
+            var top: u64 = t[limbs];
+            var carry: u1 = 0;
+            inline for (0..limbs) |j| {
+                const step1 = @addWithOverflow(t[j], value[limbs + j]);
+                const step2 = @addWithOverflow(step1[0], carry);
+                t[j] = step2[0];
+                carry = step1[1] | step2[1];
+            }
+            top += carry;
+            const result = reduce_once(t[0..limbs].*, top);
             assert(result.is_canonical());
             return result;
         }

@@ -83,11 +83,18 @@ pub const Fp2 = struct {
         return a.conjugate();
     }
 
+    /// Karatsuba with lazy reduction (blst's `mul_mont_384x`): three double-width products
+    /// and two Montgomery reductions. v0 - v1 + p^2 and cross - v0 - v1 = a0 b1 + a1 b0 both
+    /// lie in [0, 2p^2), below p R.
     pub fn mul(a: Fp2, b: Fp2) Fp2 {
-        const v0 = a.c0.mul(b.c0);
-        const v1 = a.c1.mul(b.c1);
-        const cross = a.c0.add(a.c1).mul(b.c0.add(b.c1));
-        return .{ .c0 = v0.sub(v1), .c1 = cross.sub(v0).sub(v1) };
+        comptime assert(Fp.lazy_supported);
+        const v0 = Fp.mul_wide(a.c0, b.c0);
+        const v1 = Fp.mul_wide(a.c1, b.c1);
+        const cross = Fp.mul_wide(a.c0.add_unreduced(a.c1), b.c0.add_unreduced(b.c1));
+        return .{
+            .c0 = Fp.reduce_wide(Fp.wide_sub_plus_p_squared(v0, v1)),
+            .c1 = Fp.reduce_wide(Fp.wide_sub(Fp.wide_sub(cross, v0), v1)),
+        };
     }
 
     pub fn square(a: Fp2) Fp2 {
@@ -134,21 +141,34 @@ pub const Fp2 = struct {
         return a.norm().is_square();
     }
 
-    /// Square root for p = 3 mod 4 (Adj and Rodriguez-Henriquez, Algorithm 9);
-    /// null when `a` is not a square. Variable time.
+    /// Square root through Fp square roots (the complex method, Adj and Rodriguez-Henriquez
+    /// Algorithm 8, as blst's `sqrt_fp2`): with s = sqrt(c0^2 + c1^2), x0 = sqrt((c0 +- s) / 2)
+    /// and x1 = c1 / (2 x0). Null when `a` is not a square. Either root may come back; every
+    /// caller fixes the sign. Variable time.
     pub fn sqrt(a: Fp2) ?Fp2 {
         if (a.is_zero()) return zero;
-        const a1 = a.pow((p - 3) / 4);
-        const alpha = a1.square().mul(a);
-        const x0 = a1.mul(a);
-        const minus_one = one.neg();
-        if (alpha.conjugate().mul(alpha).eql(minus_one)) return null;
-        const candidate = if (alpha.eql(minus_one))
-            Fp2.mul(.{ .c0 = .zero, .c1 = .one }, x0)
-        else
-            alpha.add(one).pow((p - 1) / 2).mul(x0);
+        const candidate = if (a.c1.is_zero()) sqrt_of_fp(a.c0) else sqrt_general(a) orelse
+            return null;
         if (!candidate.square().eql(a)) return null;
         return candidate;
+    }
+
+    /// A root of c0 + 0u: sqrt(c0), or sqrt(-c0) u since -1 is not a square in Fp.
+    fn sqrt_of_fp(c0: Fp) Fp2 {
+        if (c0.sqrt()) |root| return .{ .c0 = root, .c1 = .zero };
+        const root = c0.neg().sqrt().?; // Proof: c0 or -c0 is a square, as -1 is not.
+        return .{ .c0 = .zero, .c1 = root };
+    }
+
+    fn sqrt_general(a: Fp2) ?Fp2 {
+        assert(!a.c1.is_zero());
+        const half = comptime Fp.from_int_comptime((p + 1) / 2);
+        const s = a.norm().sqrt() orelse return null;
+        const x0 = a.c0.add(s).mul(half).sqrt() orelse
+            a.c0.sub(s).mul(half).sqrt() orelse return null;
+        // x0 != 0: otherwise c0 = -s, so c1^2 = s^2 - c0^2 = 0.
+        assert(!x0.is_zero());
+        return .{ .c0 = x0, .c1 = a.c1.mul(x0.double().inverse()) };
     }
 
     /// RFC 9380 sgn0 for m = 2.
@@ -403,6 +423,11 @@ test "fields: fp2 laws, sqrt, and frobenius" {
         try testing.expect(s.is_square());
         const root = s.sqrt().?;
         try testing.expect(root.eql(a) or root.eql(a.neg()));
+        // Every Fp element is a square in Fp2: c0 + 0u has a real or an imaginary root.
+        const real: Fp2 = .{ .c0 = a.c0, .c1 = .zero };
+        try testing.expect(real.sqrt().?.square().eql(real));
+        // A nonzero square times the sextic non-residue is not a square.
+        try testing.expect(s.mul(.{ .c0 = .one, .c1 = .one }).sqrt() == null);
         try testing.expect(a.frobenius().eql(a.pow(p)));
         try testing.expect(a.mul_by_nonresidue().eql(a.mul(.{ .c0 = .one, .c1 = .one })));
     }
