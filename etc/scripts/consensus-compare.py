@@ -34,9 +34,10 @@ Scenarios:
   peers and committees of 4, the epoch-0 `bootstrap` of players 0-3, then validators 0-4, as
   examples/dkg/README.md runs them). Once every validator has finalized N heights, validator 5
   starts with `--state-sync` (the README's late joiner: dkg probe, QMDB state sync, marshal
-  backfill), and `catchup_s` is the time from its start until it logs a finalized block at the
-  tip the others had reached when it started. The joiner's sync floor is that tip, so this
-  times p2p connection and the dkg probe, not N heights of backfill.
+  backfill), and `catchup_s` is the time from its start until the timestamp of its first log
+  line finalizing a block at or above the tip the others had reached when it started. The
+  joiner's sync floor is that tip, so this times p2p connection and the dkg probe, not N
+  heights of backfill.
 - `dkg_replay_100`, `dkg_replay_1000`: the same with validator 5 started without
   `--state-sync`, so it replays every height from genesis: marshal backfills each finalized
   block and the application applies it. `catchup_s` as above, plus `replay_ms_per_block`, the
@@ -234,11 +235,12 @@ class DkgNodes:
 
 
 def finalized_at(path, height):
-    """When `path`'s validator logged `height` as finalized (its log line's timestamp)."""
+    """When `path`'s validator first logged a finalized height of at least `height` (its log
+    line's UTC timestamp)."""
     with open(path, errors="replace") as handle:
         for line in ANSI.sub("", handle.read()).splitlines():
             found = FINALIZED.search(line)
-            if found and int(found.group(1)) == height:
+            if found and int(found.group(1)) >= height:
                 return datetime.datetime.fromisoformat(line.split()[0].rstrip("Z"))
     raise RuntimeError(f"{path} never finalized height {height}")
 
@@ -267,11 +269,13 @@ def run_dkg_catchup(side, binary_dir, port, heights, state_sync=True):
         nodes.wait(side, f"{heights} heights", lambda: min(
             top_height(nodes.log(n)) for n in validators) >= heights, deadline)
         tip = max(top_height(nodes.log(n)) for n in validators)
-        start = time.time()
+        start = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
         nodes.spawn("joiner", 5, "validator", *(["--state-sync"] if state_sync else []))
         nodes.wait(side, f"the joiner to reach height {tip}",
                    lambda: top_height(nodes.log("joiner")) >= tip, deadline)
-        result = {"catchup_s": time.time() - start}
+        # The joiner's own log time, not when the 0.2 s poll above noticed it.
+        reached = finalized_at(nodes.log("joiner"), tip)
+        result = {"catchup_s": (reached - start).total_seconds()}
         if not state_sync:
             replay = finalized_at(nodes.log("joiner"), tip) - finalized_at(nodes.log("joiner"), 1)
             result["replay_ms_per_block"] = replay.total_seconds() * 1000 / (tip - 1)
