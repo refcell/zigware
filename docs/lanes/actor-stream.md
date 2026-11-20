@@ -88,16 +88,16 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
   finishes as the deadline fires still wins (commonware's biased `select!`). A canceled
   fiber must run to unwind, so a timed-out call returns a few scheduler cycles (1 ms each
   in the deterministic runtime) after its deadline; commonware drops the future at once.
-- The stream conformance hashes (CupsV0, CupsV1, SakeV0CupsV1, SakeV1CupsV0) are not
-  ported. Commonware's deterministic executor shuffles each iteration's ready queue with the
-  same `StdRng` that draws the test's keys, ephemeral keys, and message bytes, so those bytes
-  depend on how many tasks are ready per iteration. Fibers block at different points than
-  polled futures, so the counts differ and the hashes cannot match (the same reason the
-  runtime lane gives for auditor digests). Wire identity is covered piecewise instead: SAKE
-  message encodings and transcripts by cryptography's SakeV0/V1 conformance hashes, ChaCha20-
-  Poly1305 by its Seal hash, and CUPS record bytes by `record encoding` against an
-  independent oracle. The coordinator accepted this on 2026-11-13: the deterministic runtime
-  will not imitate commonware's polling order, and these hashes stay unported.
+- The stream conformance hashes (CupsV0, CupsV1, SakeV0CupsV1, SakeV1CupsV0, 256 cases each)
+  are ported (`src/stream/sake_conformance_test.zig`, 2026-11-20) and match commonware's
+  `conformance.toml`. Commonware shuffles each iteration's ready queue with the `StdRng` that
+  draws the keys, ephemeral keys, and payloads, so the bytes depend on its ready-batch sizes.
+  Its executor trace for this exchange has one batch of two: joining the finished listener
+  wakes the root task twice, and its queue keeps both entries. zigware queues a woken task
+  once, so the test draws that one shuffle itself after the join. This reverses the
+  2026-11-13 decision, which assumed the batch counts diverge throughout; they diverge only
+  there. A test that skips the draw fails all four hashes. Debug runs them under
+  `-Dslow-tests` (1 minute); ReleaseSafe runs them by default (2 s).
 - Loom tests have no counterpart, because Zig has no loom model checker. The lock-free paths
   they check are covered by two `std.Io.Threaded` stress tests (four producer threads, a
   receiver alternating `recv` and `try_recv`, and receiver close at 40 points with
@@ -117,7 +117,7 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
 - [x] stream utils: `Timeout` (utils/timeout.rs) with the upgrader tests from lib.rs.
 - [x] stream cups protocol (cups/protocol.rs) with its tests, against a test handshake.
 - [x] stream sake (sake/protocol.rs) over `cryptography.handshake.sake`, with its tests.
-- [x] stream sake conformance hashes: not ported, by coordinator decision (see Decisions).
+- [x] stream sake conformance hashes: all four ported and matching (see Decisions).
 - [x] stream fuzz targets (commonware stream/fuzz: transport, connection, lazy_transport,
   e2e with a corrupting/forging/tampering adversary) in `src/stream/fuzz.zig`, seeded in
   `zig build test` and coverage-guided under `--fuzz`.

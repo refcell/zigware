@@ -858,6 +858,28 @@ vectors pass, and every change below computes the same group elements.
   one pass, and 3d7a069c sums a sequential MSM of more than 256 points in one Pippenger,
   which covers `verify` n=128's 272-point MSM at conc=1.
 
+## Actor mailbox and bulletproofs ipa, ABBA rounds (2026-11-20, actor-stream lane)
+
+fe6c92bc's bench-compare.sh, 4 ABBA rounds, commonware built for the native CPU, at load 53
+to 143 (mailbox) and 77 to 143 (ipa), so rows whose rounds straddle 1 are noise-bound ties.
+
+- **Mailbox: faster 5, tie 5, slower 0.** `recv_waiting` is 0.25× (190 against 47.4 µs),
+  from 1.94×. commonware's bench is one task under `block_on`: it polls `recv()` once to
+  register its waker, enqueues, then awaits the ready future. zigware's ran a consumer task
+  and a sleeping producer, so it timed the deterministic scheduler's handoff. a1ccb817 adds
+  `Receiver.poll_recv` (a pending poll parks the receiver until the next receive) and runs
+  commonware's sequence in one task. Its test checks the waker word after each step, and
+  catches a poll that does not park and a receive that leaves the receiver parked. The
+  other rows: `enqueue_ready` 0.44×, `round_trip_ready` 0.43×, `overflow_replace` oldest
+  0.35×, `concurrent_enqueue` 0.39× (faster); `try_recv_ready` 0.57×, `try_recv_overflow`
+  0.72×, `overflow_drop` 1.28×, `overflow_spill` 0.71×, `overflow_replace` newest 0.44×
+  (ties, with rounds from 0.2× to 2×).
+- **ipa: faster 14, tie 6, slower 0.** The bench's pool now carries an adaptive
+  `parallel.Policy`, as commonware's `Rayon::new` does (577e8383); the conc=8 rows above were
+  measured on an always-split pool. Ties: `prove` n=16 conc=1 0.56×, n=32 conc=1 1.19×, n=64
+  conc=1 0.80×; `verify` n=32 conc=1 1.51×, n=64 conc=1 0.68×, n=128 conc=1 0.78×. Every
+  conc=8 row is faster (0.39× to 0.81×).
+
 ## formatting, codec, bls12381 hash and signing (2026-11-19, consensus-simplex lane)
 
 commonware's whole `formatting` and `codec` bench binaries against zigware's benches of the
