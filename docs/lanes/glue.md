@@ -93,7 +93,8 @@ a test harness), `transfers` (4.4k with tests and benches), `stateful` (about 33
   bca770a0c's `Crash.ProcessedHeight` with `participants` (crashed together) and plan.rs's
   new tests; see the bca770a0c entry above (5369b34, 58f6e7b). bca770a0c is simulate's only
   change between 43b357a41 and a9ffc25f3, and all 16 of plan.rs's tests are ported.
-- [ ] stateful: see the stateful section below (curve25519/utils thread).
+- [x] stateful: see the stateful section below (curve25519/utils thread); its last box,
+  the e2e tests, is done.
 - [x] dkg (coding thread): every item in the dkg sections below is done.
 
 ## transfers (owner: thread T-01a1d58d-7682-700c-a399-735d897bbd46)
@@ -621,9 +622,22 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   compact target wider than one commit fails the sync" and compact_sync_test's "an
   unreachable target on tip_updates fails the sync" check both. `matches_sync_target` checks
   `batch.target()`, as every qmdb adapter now does (storage's e87dad2).
-- [ ] tests: single_db_app.rs's engine on `glue.simulate` (simplex, marshal, buffered broadcast,
+- [x] tests: single_db_app.rs's engine on `glue.simulate` (simplex, marshal, buffered broadcast,
   marshal and qmdb resolvers, probe, `Stateful`), then tests/mod.rs's scenarios (finalize,
   crash/restart, pruning, state sync, lossy, partitions), multi_db_app, floor, properties.
+  In `src/glue/stateful/tests/`: single_db.zig and multi_db.zig are the two apps, engine.zig
+  their engine on `glue.simulate`, properties.zig the property checks (those three .rs files
+  hold no tests of their own). All 26 of tests/mod.rs's tests are ported under their names:
+  the 20 plan scenarios in root.zig (finalize and commit, with storage faults, determinism,
+  crash and restart, pruning, delayed start, lossy, random, many concurrent, and rapid
+  crashes, full outage, partition and rejoin, and the eight state sync scenarios, both
+  partitioned restarts included), each on both engines under rotating and stable leaders
+  (`electors()`, 2ac3dc22); the five targeted qmdb and multi-db tests in
+  qmdb_targeted_test.zig and multi_db_targeted_test.zig; and
+  `stable_leader_finalizations_outpace_slow_qmdb_sync` in slow_sync_test.zig. floor.rs's
+  `live_floor_preserves_application_recovery` (two `rstest` cases) is floor_test.zig. The
+  slow scenarios run under `-Dslow-tests`; the full slow stateful suite passed 436/436 at
+  50c9c784.
 
 ## Log
 - 2026-11-16: lane started; simulate's progress tracker and actions with their tests.
