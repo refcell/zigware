@@ -224,10 +224,9 @@ fn check_invariants(cache: anytype) !void {
     try check_main(cache, &resident);
 
     var indexed: usize = 0;
-    for (cache.index.slots) |entry| {
-        if (entry.meta == handles.EMPTY) continue;
+    for (cache.index.metas, cache.index.handles) |meta, slot| {
+        if (meta == handles.EMPTY) continue;
         indexed += 1;
-        const slot = entry.handle;
         try expect(slot < slot_count and resident.isSet(slot));
         const key = cache.slots.items[slot].key;
         try expectEqual(@as(?usize, slot), cache.find_slot(key, cache_mod.key_hash(K, key)));

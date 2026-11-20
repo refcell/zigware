@@ -62,9 +62,7 @@ fn spread(i: u64) u64 {
 }
 
 fn metas(table: *const Table) ![]u32 {
-    const result = try gpa.alloc(u32, table.slots.len);
-    for (table.slots, result) |slot, *meta| meta.* = slot.meta;
-    return result;
+    return gpa.dupe(u32, table.metas);
 }
 
 /// The candidates of `hash`, in probe order (caller frees).
@@ -96,23 +94,23 @@ fn has_candidate(table: *const Table, hash: u64, handle: usize) bool {
 
 /// Slot metadata, Robin Hood order, and `len` agree with each handle's hash.
 fn check_invariants(table: *const Table, context: anytype) !void {
-    const slots = table.slots.len;
+    const slots = table.metas.len;
     try testing.expectEqual(slots * 3 / 4, table.capacity());
     try testing.expect(table.len <= table.capacity());
     if (slots == 0) return;
     try testing.expect(std.math.isPowerOfTwo(slots) and slots >= handles.MIN_SLOTS);
     const mask = slots - 1;
     var occupied: usize = 0;
-    for (table.slots, 0..) |slot, index| {
-        if (slot.meta == handles.EMPTY) continue;
+    for (table.metas, table.handles, 0..) |meta, handle, index| {
+        if (meta == handles.EMPTY) continue;
         occupied += 1;
-        const hash = context.rehash(slot.handle);
+        const hash = context.rehash(handle);
         const displacement = (index -% @as(usize, @truncate(hash))) & mask;
         try testing.expect(displacement <= handles.MAX_DISPLACEMENT);
-        try testing.expectEqual(handles.slot_meta(hash, @intCast(displacement)), slot.meta);
+        try testing.expectEqual(handles.slot_meta(hash, @intCast(displacement)), meta);
         // Each entry is at most one slot further from its home than its predecessor.
-        const next = table.slots[(index + 1) & mask].meta;
-        try testing.expect(next == handles.EMPTY or next >> 8 <= (slot.meta >> 8) + 1);
+        const next = table.metas[(index + 1) & mask];
+        try testing.expect(next == handles.EMPTY or next >> 8 <= (meta >> 8) + 1);
     }
     try testing.expectEqual(table.len, occupied);
 }
@@ -258,7 +256,7 @@ test "handles: basic insert, get, and remove" {
     var table: Table = .empty;
     defer table.deinit(gpa);
     try testing.expect(table.is_empty());
-    try testing.expectEqual(0, table.slots.len);
+    try testing.expectEqual(0, table.metas.len);
     try testing.expectEqual(@as(?usize, null), first_candidate(&table, hashes[0]));
     try testing.expect(!table.remove(hashes[0], 0));
 
@@ -327,18 +325,18 @@ test "handles: growth rehashes every entry" {
     var growths: usize = 0;
     for (0..hashes.len) |handle| {
         hashes[handle] = generator.next_u64();
-        const slots = table.slots.len;
+        const slots = table.metas.len;
         const len = table.len;
         const before = calls;
         try table.insert(gpa, hashes[handle], handle, context);
         try testing.expectEqual(handle + 1, table.len);
-        if (table.slots.len == slots) {
+        if (table.metas.len == slots) {
             try testing.expectEqual(before, calls);
             continue;
         }
         // Growth doubles once, rehashing every existing entry exactly once.
         growths += 1;
-        try testing.expectEqual(@max(slots * 2, handles.MIN_SLOTS), table.slots.len);
+        try testing.expectEqual(@max(slots * 2, handles.MIN_SLOTS), table.metas.len);
         try testing.expectEqual(slots * 3 / 4, len);
         try testing.expectEqual(len, calls - before);
         try check_invariants(&table, Hashes{ .hashes = hashes[0 .. handle + 1] });
@@ -347,7 +345,7 @@ test "handles: growth rehashes every entry" {
         }
     }
     try testing.expectEqual(10, growths);
-    try testing.expectEqual(8192, table.slots.len);
+    try testing.expectEqual(8192, table.metas.len);
 }
 
 test "handles: shared hash run" {
@@ -356,7 +354,7 @@ test "handles: shared hash run" {
     var table: Table = .empty;
     defer table.deinit(gpa);
     for (0..entries) |handle| try table.insert(gpa, spread(1), handle, context);
-    try testing.expectEqual(4096, table.slots.len);
+    try testing.expectEqual(4096, table.metas.len);
     const all = try candidates(&table, spread(1));
     defer gpa.free(all);
     try testing.expectEqual(entries, all.len);
@@ -433,7 +431,7 @@ test "handles: matches a multimap model" {
         // Alternate phases that favor insertion and removal.
         const inserts: u32 = if ((operation / 5000) % 2 == 0) 6 else 3;
         const roll = rng.range_less_than(&generator, u32, 0, 10);
-        const slots = table.slots.len;
+        const slots = table.metas.len;
         const calls = model.calls;
         const hash = if (roll < inserts) hash: {
             const handle = rng.range_less_than(&generator, usize, 0, model_handles);
@@ -453,11 +451,11 @@ test "handles: matches a multimap model" {
             pool[rng.range_less_than(&generator, usize, 0, pool.len)]
         else
             generator.next_u64();
-        if (table.slots.len == slots) try testing.expectEqual(calls, model.calls);
+        if (table.metas.len == slots) try testing.expectEqual(calls, model.calls);
         try testing.expectEqual(model.total(), table.len);
         len_max = @max(len_max, table.len);
 
-        const expected = try model.expected(hash, table.slots.len);
+        const expected = try model.expected(hash, table.metas.len);
         defer gpa.free(expected);
         const actual = try candidates(&table, hash);
         defer gpa.free(actual);
@@ -473,17 +471,17 @@ test "handles: matches a multimap model" {
 test "handles: init_capacity never rehashes" {
     var none = try Table.init_capacity(gpa, 0);
     defer none.deinit(gpa);
-    try testing.expectEqual(0, none.slots.len);
+    try testing.expectEqual(0, none.metas.len);
 
     var generator = rng.test_rng();
     for ([_]usize{ 1, 12, 13, 100, 384, 385, 1000 }) |entries| {
         var table = try Table.init_capacity(gpa, entries);
         defer table.deinit(gpa);
-        const slots = table.slots.len;
+        const slots = table.metas.len;
         try testing.expect(table.capacity() >= entries);
         try testing.expect(slots == handles.MIN_SLOTS or slots / 2 * 3 / 4 < entries);
         for (0..entries) |handle| try table.insert(gpa, generator.next_u64(), handle, NoRehash{});
-        try testing.expectEqual(slots, table.slots.len);
+        try testing.expectEqual(slots, table.metas.len);
         try testing.expectEqual(entries, table.len);
     }
 }
@@ -500,13 +498,13 @@ test "handles: reserve grows once and keeps entries" {
     var table: Table = .empty;
     defer table.deinit(gpa);
     try table.reserve(gpa, 0, context);
-    try testing.expectEqual(0, table.slots.len);
+    try testing.expectEqual(0, table.metas.len);
 
     // A reserve that fits in the current capacity changes nothing.
     for (hashes[0..600], 0..) |hash, handle| try table.insert(gpa, hash, handle, context);
-    var slots = table.slots.len;
+    var slots = table.metas.len;
     try table.reserve(gpa, 1, counted);
-    try testing.expectEqual(slots, table.slots.len);
+    try testing.expectEqual(slots, table.metas.len);
     try testing.expectEqual(0, calls);
 
     // A larger reserve rebuilds once, rehashing each held entry once; the reserved inserts
@@ -514,9 +512,9 @@ test "handles: reserve grows once and keeps entries" {
     try table.reserve(gpa, hashes.len - 600, counted);
     try testing.expect(table.capacity() >= hashes.len);
     try testing.expectEqual(600, calls);
-    slots = table.slots.len;
+    slots = table.metas.len;
     for (hashes[600..], 600..) |hash, handle| try table.insert(gpa, hash, handle, NoRehash{});
-    try testing.expectEqual(slots, table.slots.len);
+    try testing.expectEqual(slots, table.metas.len);
     try testing.expectEqual(hashes.len, table.len);
     try check_invariants(&table, context);
     for (hashes, 0..) |hash, handle| try testing.expect(has_candidate(&table, hash, handle));
