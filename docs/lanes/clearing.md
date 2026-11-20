@@ -318,3 +318,10 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   and 32+32 shapes to them. Digests match std (new shape test, x86-64 and aarch64 under qemu);
   planted wrong leaf length and wrong fixed-block length fail 4 and 5 tests. bmt::build
   1.21× to 0.88× commonware (median of 11 paired rounds; 1.10× best of each side).
+- 2026-11-20: ordered index inserts to faster. The flat ordered index's heads moved from a
+  `std.Treap` to a B-tree of `BTreeMap`'s order (B = 6, pooled nodes; a11ecdeb), then a
+  branchless node search for integer keys. `index::insert/variant=ordered items=10000`: treap
+  1.19 to 1.33× (2 rounds, before the planning fix), B-tree 0.99× (tie, 8 rounds on
+  c7935b0c), branchless 0.87× (faster, 8 rounds all below 1). A sorted-model test checks
+  shape and every query; planted wrong rotate, merge, successor, `after` returning an equal
+  key, and `<=` in the branchless count all fail it (and the qmdb ordered conformance tests).

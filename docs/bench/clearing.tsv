@@ -1,0 +1,12 @@
+# date: 2026-11-20
+# zigware: c7935b0c
+# commonware: a9ffc25f3
+# method: ABBA rounds=8, --bench --noplot --warm-up-time 1 --measurement-time 3 --sample-size 50 | --bench --warm-up-ms 1000 --measurement-ms 3000 --samples 50, commonware target-cpu=native
+1	storage	index::insert/variant=ordered items=10000	643510.0	604560.0	31.66
+2	storage	index::insert/variant=ordered items=10000	688550.0	596100.0	26.37
+3	storage	index::insert/variant=ordered items=10000	645570.0	565420.0	28.17
+4	storage	index::insert/variant=ordered items=10000	745470.0	662430.0	60.61
+5	storage	index::insert/variant=ordered items=10000	781390.0	611290.0	67.95
+6	storage	index::insert/variant=ordered items=10000	608000.0	575530.0	57.67
+7	storage	index::insert/variant=ordered items=10000	574120.0	494820.0	35.82
+8	storage	index::insert/variant=ordered items=10000	526840.0	447130.0	32.11

@@ -63,6 +63,17 @@ fn Heads(comptime T: type, comptime V: type) type {
 
         /// The number of keys of `node` ordered before `key`, and whether the next one is it.
         fn search(node: *const Node, key: Key) struct { usize, bool } {
+            // Integer keys (the `IntCap` translators) order as integers: count the smaller keys
+            // without a branch per key, as random keys mispredict the loop's exit.
+            if (@typeInfo(Key) == .int) {
+                const len = node.len;
+                assert(len <= capacity);
+                var below: usize = 0;
+                inline for (0..capacity) |i| {
+                    below += @intFromBool(i < len) & @intFromBool(node.keys[i] < key);
+                }
+                return .{ below, below < len and node.keys[below] == key };
+            }
             var index: usize = 0;
             while (index < node.len) : (index += 1) {
                 switch (T.order(key, node.keys[index])) {

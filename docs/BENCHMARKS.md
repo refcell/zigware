@@ -430,6 +430,24 @@ about 0.25 µs on zigware, which calls the kernel inline. The ratio measures the
 blob dispatch, not the freezer, so quote it as that. The write counts differ by about 30%
 (unverified: the samples also cover the untimed setup).
 
+### Ordered index: B-tree heads (2026-11-20, clearing lane)
+
+The flat ordered index kept its translated keys in a `std.Treap`, one key per node and a cache
+miss per level. It now keeps them in a B-tree of Rust's `BTreeMap` order (B = 6, 5 to 11 keys
+a node), as commonware's `BTreeMap`, with pooled nodes; integer keys (the `IntCap`
+translators) search a node by counting the smaller keys without a branch. bench-compare.sh, 8
+ABBA rounds on c7935b0c (wall-time iteration planning), commonware target-cpu=native:
+
+| bench | parameters | step | commonware | zigware | rounds | median | verdict |
+|---|---|---|---|---|---|---|---|
+| `index::insert` | `variant=ordered items=10000` | treap (e76ac91f, 2 rounds) | 744 µs | 939 µs | 1.19–1.33× | 1.26× | slower |
+| | | B-tree, linear node search | 491 µs | 487 µs | 0.97–1.21× | 0.99× | tie |
+| | | B-tree, branchless search | 645 µs | 586 µs | 0.78–0.95× | 0.87× | faster |
+
+The treap rounds predate the planning fix and were cut short when the bench queue changed, so
+read that step as provisional. Load: 1.4 to 61 for the linear search, 26 to 68 for the
+branchless one.
+
 ## p2p: stream's cipher and handshake (2026-11-19, p2p lane)
 
 commonware's p2p and stream crates have no Criterion benches of their own. Their hot paths
