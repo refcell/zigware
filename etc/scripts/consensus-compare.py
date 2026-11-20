@@ -45,6 +45,8 @@ import datetime
 import os
 import re
 import shutil
+import signal
+import socket
 import statistics
 import subprocess
 import sys
@@ -219,6 +221,19 @@ SCENARIOS = {
 }
 
 
+def free_port_block(port):
+    """The first block of 10 ports from `port` that nothing listens on, so a run never meets
+    nodes a killed earlier harness left behind on the block its run index would pick."""
+    while True:
+        try:
+            for offset in range(10):
+                with socket.socket() as probe:
+                    probe.bind(("127.0.0.1", port + offset))
+            return port
+        except OSError:
+            port += 1000
+
+
 def ratio(commonware, zigware, lower_better):
     """Below 1 when zigware is better; 1 when both are zero."""
     better, worse = (zigware, commonware) if lower_better else (commonware, zigware)
@@ -268,6 +283,8 @@ def parse_cpus(text):
 
 
 def main():
+    # A SIGTERM unwinds like Ctrl-C, so each run's `finally` stops the nodes it started.
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     if len(sys.argv) < 3:
         print(__doc__)
         return 2
@@ -284,7 +301,7 @@ def main():
             for side in order:
                 # Every run gets fresh ports, so none waits on the last run's sockets.
                 run_index += 1
-                port = BASE_PORT + 10 * run_index
+                port = free_port_block(BASE_PORT + 10 * run_index)
                 for metric, value in run(side, dirs[side], port).items():
                     values.setdefault((name, metric), {"commonware": [], "zigware": []})
                     values[(name, metric)][side].append(value)
