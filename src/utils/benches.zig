@@ -67,7 +67,7 @@ fn SortWorkload(comptime N: usize) type {
         }
 
         pub fn iter(workload: *@This()) usize {
-            std.mem.sortUnstable(Key, workload.work, {}, less_than);
+            utils.sort.unstable(Key, workload.work, {}, less_than);
             assert(workload.work.len == workload.keys.len);
             return workload.work.len;
         }
