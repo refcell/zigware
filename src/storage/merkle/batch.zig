@@ -627,7 +627,7 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
                 while (bits.next()) |bit| try updated.append(gpa, start + bit);
             }
             if (updated.items.len == 0) return levels;
-            std.sort.pdq(u64, updated.items, {}, std.sort.asc(u64)); // `sort_unstable`.
+            try sort_locations(gpa, updated.items); // `sort_unstable`.
             try plan_dirty(F, gpa, self.size(), self.parent.size(), updated.items, &levels);
             return levels;
         }
@@ -821,6 +821,52 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
             return .{ left, right };
         }
     };
+}
+
+/// Below this many locations `sort_locations` uses pdq; above, radix passes cost less.
+const radix_sort_min = 512;
+const radix_bits = 11;
+
+/// Sorts `items` ascending. Long lists take LSD radix passes of `radix_bits` over only the
+/// bits the largest item uses (63k locations below 2^17: two passes, against pdq's
+/// comparisons on hash-ordered keys); short ones take pdq.
+fn sort_locations(gpa: Allocator, items: []u64) Allocator.Error!void {
+    if (items.len < radix_sort_min) {
+        std.sort.pdq(u64, items, {}, std.sort.asc(u64));
+        return;
+    }
+    var largest: u64 = 0;
+    for (items) |item| largest = @max(largest, item);
+    const bits: u32 = 64 - @clz(largest);
+    const scratch = try gpa.alloc(u64, items.len);
+    defer gpa.free(scratch);
+    var source = items;
+    var target = scratch;
+    var shift: u32 = 0;
+    while (shift < bits) : (shift += radix_bits) {
+        var starts: [1 << radix_bits]usize = @splat(0);
+        for (source) |item| starts[radix_digit(item, shift)] += 1;
+        var total: usize = 0;
+        for (&starts) |*start| {
+            const count = start.*;
+            start.* = total;
+            total += count;
+        }
+        assert(total == items.len);
+        for (source) |item| {
+            const digit = radix_digit(item, shift);
+            target[starts[digit]] = item;
+            starts[digit] += 1;
+        }
+        std.mem.swap([]u64, &source, &target);
+    }
+    if (source.ptr != items.ptr) @memcpy(items, source);
+    if (std.debug.runtime_safety) assert(std.sort.isSorted(u64, items, {}, std.sort.asc(u64)));
+}
+
+fn radix_digit(item: u64, shift: u32) usize {
+    assert(shift < 64);
+    return @intCast((item >> @intCast(shift)) & ((1 << radix_bits) - 1));
 }
 
 /// Adds to `levels` the ancestors of the `updated` leaves (sorted, distinct) in a structure of
@@ -1238,5 +1284,24 @@ test "hash_plan lists each node to hash exactly once" {
     inline for (.{ @import("mmr/mod.zig").Family, @import("mmb/mod.zig").Family }) |F| {
         try hash_plan_is_exact(F);
         try add_many_records_updates_once(F);
+    }
+}
+
+test "sort_locations sorts like pdq across radix widths" {
+    const gpa = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x534f5254);
+    const random = prng.random();
+    var items: [3000]u64 = undefined;
+    var expected: [3000]u64 = undefined;
+    // Lengths on both sides of `radix_sort_min`; widths of zero, one, two, and six passes.
+    for ([_]usize{ 0, radix_sort_min - 1, radix_sort_min, 3000 }) |len| {
+        for ([_]u32{ 0, 11, 12, 23, 64 }) |width| {
+            const mask: u64 = if (width == 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(width)) - 1;
+            for (items[0..len]) |*item| item.* = random.int(u64) & mask;
+            @memcpy(expected[0..len], items[0..len]);
+            std.sort.pdq(u64, expected[0..len], {}, std.sort.asc(u64));
+            try sort_locations(gpa, items[0..len]);
+            try std.testing.expectEqualSlices(u64, expected[0..len], items[0..len]);
+        }
     }
 }
