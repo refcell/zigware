@@ -769,3 +769,46 @@ fn StandardValidatorOver(comptime App: type, comptime StoredArchives: type) type
 test {
     _ = @import("harness_test.zig");
 }
+
+/// Locked state shared by every handle, freed with the last one.
+pub fn Shared(comptime State: type) type {
+    return struct {
+        const Self = @This();
+        gpa: Allocator,
+        io: Io,
+        mutex: Io.Mutex = .init,
+        references: u32 = 1,
+        state: State = .{},
+
+        pub fn create(gpa: Allocator, io: Io) Allocator.Error!*Self {
+            const self = try gpa.create(Self);
+            self.* = .{ .gpa = gpa, .io = io };
+            return self;
+        }
+
+        pub fn lock(self: *Self) *State {
+            self.mutex.lockUncancelable(self.io);
+            return &self.state;
+        }
+
+        pub fn unlock(self: *Self) void {
+            self.mutex.unlock(self.io);
+        }
+
+        pub fn retain(self: *Self) void {
+            _ = self.lock();
+            defer self.unlock();
+            assert(self.references > 0);
+            self.references += 1;
+        }
+
+        /// Drops a reference; true when it was the last (the caller frees the state).
+        pub fn release(self: *Self) bool {
+            _ = self.lock();
+            defer self.unlock();
+            assert(self.references > 0);
+            self.references -= 1;
+            return self.references == 0;
+        }
+    };
+}

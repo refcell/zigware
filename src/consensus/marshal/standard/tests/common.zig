@@ -51,49 +51,6 @@ pub const Start = config_api.Start(S, D, Block);
 pub const Ctx = runtime.deterministic.Context;
 pub const Outcome = resolver_api.Outcome;
 
-/// Locked state shared by every handle, freed with the last one.
-fn Shared(comptime State: type) type {
-    return struct {
-        const Self = @This();
-        gpa: Allocator,
-        io: Io,
-        mutex: Io.Mutex = .init,
-        references: u32 = 1,
-        state: State = .{},
-
-        fn create(gpa: Allocator, io: Io) Allocator.Error!*Self {
-            const self = try gpa.create(Self);
-            self.* = .{ .gpa = gpa, .io = io };
-            return self;
-        }
-
-        fn lock(self: *Self) *State {
-            self.mutex.lockUncancelable(self.io);
-            return &self.state;
-        }
-
-        fn unlock(self: *Self) void {
-            self.mutex.unlock(self.io);
-        }
-
-        fn retain(self: *Self) void {
-            _ = self.lock();
-            defer self.unlock();
-            assert(self.references > 0);
-            self.references += 1;
-        }
-
-        /// Drops a reference; true when it was the last (the caller frees the state).
-        fn release(self: *Self) bool {
-            _ = self.lock();
-            defer self.unlock();
-            assert(self.references > 0);
-            self.references -= 1;
-            return self.references == 0;
-        }
-    };
-}
-
 /// One recorded `send`: the round, the block, and the recipients (owned copies).
 pub const BufferSend = struct { round: Round, block: Block, recipients: Recipients };
 
@@ -118,7 +75,7 @@ pub const RecordingBuffer = struct {
         sends: std.ArrayList(BufferSend) = .empty,
     };
 
-    shared: *Shared(State),
+    shared: *harness.Shared(State),
 
     pub fn init(gpa: Allocator, io: Io) Allocator.Error!RecordingBuffer {
         return .{ .shared = try .create(gpa, io) };
@@ -415,7 +372,7 @@ pub const RecordingResolver = struct {
         handler: ?handler.Handler(D) = null,
     };
 
-    shared: *Shared(State),
+    shared: *harness.Shared(State),
 
     /// A resolver and the receiver its handler feeds (commonware `holding`).
     pub fn holding(
@@ -427,7 +384,7 @@ pub const RecordingResolver = struct {
         resolver: RecordingResolver,
     } {
         const channel = try handler.init(D, gpa, io, scope, 100);
-        const shared = Shared(State).create(gpa, io) catch |err| {
+        const shared = harness.Shared(State).create(gpa, io) catch |err| {
             var owned = channel;
             owned.handler.deinit();
             owned.receiver.deinit();
@@ -720,7 +677,7 @@ pub const HoldingBlockReporter = struct {
         min_signal_height: Height = .zero(),
     };
 
-    shared: *Shared(State),
+    shared: *harness.Shared(State),
 
     pub const Created = struct {
         reporter: HoldingBlockReporter,
@@ -742,7 +699,7 @@ pub const HoldingBlockReporter = struct {
             pair.sender.deinit();
             pair.receiver.deinit();
         }
-        const shared = try Shared(State).create(gpa, io);
+        const shared = try harness.Shared(State).create(gpa, io);
         shared.state.started = pair.sender;
         shared.state.min_signal_height = min_signal_height;
         return .{ .reporter = .{ .shared = shared }, .started = pair.receiver };
@@ -814,7 +771,7 @@ pub const ApplicationReporter = struct {
         arrived: Io.Condition = .init,
     };
 
-    shared: *Shared(State),
+    shared: *harness.Shared(State),
 
     pub fn init(gpa: Allocator, io: Io) Allocator.Error!ApplicationReporter {
         return .{ .shared = try .create(gpa, io) };
