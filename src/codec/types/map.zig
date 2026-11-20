@@ -7,7 +7,8 @@
 //! `Map`/`Set` use the `BTreeMap`/`BTreeSet` context, `HashMap`/`HashSet` the hash ones.
 //!
 //! Values hold a slice sorted by `codec.order`; `sort` puts an unsorted slice in order.
-//! Writing asserts the order (a map with duplicate keys is a programming error).
+//! Writing asserts the order (a map with duplicate keys is a programming error): `Map.write`
+//! on its walk, `init` and `Set.write` only with runtime safety.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -93,10 +94,12 @@ pub fn OrderedMap(comptime K: type, comptime V: type, comptime name: []const u8)
         pub const Entry = struct { key: K, value: V };
         pub const Cfg = MapCfg(codec.Cfg(K), codec.Cfg(V));
 
-        /// Wraps entries that are already strictly ascending by key.
+        /// Wraps entries that are already strictly ascending by key. The O(n) order check runs
+        /// only with runtime safety: `init` is otherwise O(1), and `write` checks the order on
+        /// its own walk.
         pub fn init(entries: []const Entry) Self {
             const self = Self{ .entries = entries };
-            assert(self.is_sorted());
+            if (std.debug.runtime_safety) assert(self.is_sorted());
             return self;
         }
 
@@ -130,9 +133,10 @@ pub fn OrderedMap(comptime K: type, comptime V: type, comptime name: []const u8)
         }
 
         pub fn write(self: Self, writer: *Writer) void {
-            assert(self.is_sorted());
             codec.write(usize, self.entries.len, writer);
-            for (self.entries) |entry| {
+            for (self.entries, 0..) |entry, index| {
+                // Strictly ascending, checked pairwise on the walk the encoding makes anyway.
+                assert(index == 0 or less_than({}, self.entries[index - 1], entry));
                 codec.write(K, entry.key, writer);
                 codec.write(V, entry.value, writer);
             }
@@ -211,10 +215,11 @@ pub fn OrderedSet(comptime K: type, comptime name: []const u8) type {
 
         pub const Cfg = codec.SliceCfg(codec.Cfg(K));
 
-        /// Wraps items that are already strictly ascending.
+        /// Wraps items that are already strictly ascending. The O(n) order check runs only with
+        /// runtime safety, as `Map.init`'s.
         pub fn init(items: []const K) Self {
             const self = Self{ .items = items };
-            assert(self.is_sorted());
+            if (std.debug.runtime_safety) assert(self.is_sorted());
             return self;
         }
 
@@ -245,7 +250,8 @@ pub fn OrderedSet(comptime K: type, comptime name: []const u8) type {
         }
 
         pub fn write(self: Self, writer: *Writer) void {
-            assert(self.is_sorted());
+            // `write_items` encodes in bulk, so the O(n) order check runs only with runtime safety.
+            if (std.debug.runtime_safety) assert(self.is_sorted());
             codec.write(usize, self.items.len, writer);
             codec.write_items(K, self.items, writer);
         }
