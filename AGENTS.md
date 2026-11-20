@@ -162,6 +162,10 @@ Read this whole file before you change anything. These rules are not optional.
   64-byte bool-vector reduce): 96 bytes cost about 120 ns, against 4 to 14 ns on x86_64_v3.
   On a hot path, compare fixed-size values by XOR-ORing 32-byte vectors, as
   `certificate.Deferred.eql` does (beaf4df5, attestation_eq 4.68× to 0.28× commonware).
+- `std.debug.assert(cond)` evaluates `cond` in every build mode, including ReleaseFast. An
+  assert that calls a hash, a scan, or `contains` runs that work on the hot path
+  (bloomfilter `insert` hashed every item twice, f56321ac). Assert the cheap invariant
+  directly, or put the expensive check behind `std.debug.runtime_safety`.
 - The build runner prints `run test test-X stderr` and a `failed command: ...` line for any
   test step that wrote to stderr, even when every test in it passed. That alone is not a
   failure: look for a step line with `fail`, `crash`, `timeout`, or `leaks`, an `error:`
