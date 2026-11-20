@@ -77,6 +77,24 @@ fn msm_split(comptime C: type, points: []const C.Affine, scalars: []const u256) 
     const nbits = scalar_bits / parts;
     var split_points: [chunk_points_max * parts]C.Affine = undefined;
     var split_scalars: [chunk_points_max * parts]u256 = undefined;
+    const count = split_terms(C, points, scalars, &split_points, &split_scalars);
+    if (count == 0) return C.identity;
+    assert(count % parts == 0);
+    const bits = split_window_bits(C, count, nbits);
+    return pippenger(C, split_points[0..count], split_scalars[0..count], bits, nbits);
+}
+
+/// Writes each finite point's endomorphism images and scalar parts; returns their count.
+fn split_terms(
+    comptime C: type,
+    points: []const C.Affine,
+    scalars: []const u256,
+    split_points: []C.Affine,
+    split_scalars: []u256,
+) usize {
+    const parts = comptime split_parts(C);
+    assert(points.len == scalars.len);
+    assert(split_points.len >= points.len * parts and split_scalars.len == split_points.len);
     var count: usize = 0;
     for (points, scalars) |point, scalar| {
         if (point.infinity) continue;
@@ -89,10 +107,8 @@ fn msm_split(comptime C: type, points: []const C.Affine, scalars: []const u256) 
         }
         count += parts;
     }
-    if (count == 0) return C.identity;
-    assert(count % parts == 0);
-    const bits = split_window_bits(C, count, nbits);
-    return pippenger(C, split_points[0..count], split_scalars[0..count], bits, nbits);
+    assert(count % parts == 0 and count <= points.len * parts);
+    return count;
 }
 
 /// The window width with the fewest bucket additions for `count` scalars of `nbits` bits:
@@ -114,7 +130,7 @@ fn split_window_bits(comptime C: type, count: usize, nbits: u32) u32 {
     return best;
 }
 
-/// Pippenger over scalars below 2^nbits with `bits`-wide windows; G1 counts from
+/// Pippenger over scalars below 2^nbits with `bits`-wide windows; counts from
 /// `batch_affine_points_min` share inversions across bucket additions.
 fn pippenger(
     comptime C: type,
@@ -125,7 +141,7 @@ fn pippenger(
 ) C {
     assert(points.len == scalars.len and points.len > 0);
     assert(nbits <= scalar_bits);
-    if (C == g1.G1 and points.len >= batch_affine_points_min) {
+    if (points.len >= batch_affine_points_min) {
         return msm_batch_affine(C, points, scalars, bits, nbits);
     }
     const bucket_count = @as(usize, 1) << @intCast(bits - 1);
@@ -200,7 +216,7 @@ fn msm_straus(comptime C: type, points: []const C.Affine, scalars: []const u256)
 }
 
 /// Below this many points the per-batch inversion does not pay off.
-const batch_affine_points_min = 256;
+const batch_affine_points_min = 64;
 /// Pending affine bucket additions that share one field inversion.
 const batch_size = 128;
 
@@ -273,12 +289,21 @@ fn BatchAffine(comptime C: type) type {
             self.count = 0;
         }
 
-        fn total(self: *Self, bucket_count: usize) C {
+        /// sum_j (j + 1) buckets[j]: the running sum takes each affine bucket by a mixed
+        /// addition and its side bucket only when that is not the identity.
+        fn total(self: *const Self, bucket_count: usize) C {
             assert(self.count == 0);
-            for (self.side[0..bucket_count], self.affine[0..bucket_count]) |*side, affine| {
-                side.* = side.add_affine(affine);
+            assert(bucket_count > 0 and bucket_count <= buckets_cap);
+            var running = C.identity;
+            var sum = C.identity;
+            var index = bucket_count;
+            while (index > 0) {
+                index -= 1;
+                running = running.add_affine(self.affine[index]);
+                running = running.add(self.side[index]);
+                sum = sum.add(running);
             }
-            return sum_buckets(C, self.side[0..bucket_count]);
+            return sum;
         }
     };
 }
@@ -510,10 +535,15 @@ fn CurveKernel(comptime C: type) type {
         const Self = @This();
         pub const window_max = window_bits_max(C);
         pub const zero = C.identity;
-        pub const State = struct { buckets: [1 << (window_max - 1)]C };
+        /// Jacobian buckets, and the batch-affine buckets of tiles from
+        /// `batch_affine_points_min` points.
+        pub const State = struct {
+            buckets: [1 << (window_max - 1)]C,
+            batch: BatchAffine(C),
+        };
 
         pub fn init(_: Self) State {
-            return .{ .buckets = undefined };
+            return .{ .buckets = undefined, .batch = .{} };
         }
 
         pub fn tile(
@@ -530,6 +560,9 @@ fn CurveKernel(comptime C: type) type {
             @memset(buckets, C.identity);
             const points = self.points[columns.start..columns.end];
             const scalars = self.scalars[columns.start..columns.end];
+            if (points.len >= batch_affine_points_min) {
+                return tile_batch_affine(&state.batch, points, scalars, row, window);
+            }
             for (points, scalars) |point, scalar| {
                 if (point.infinity) continue;
                 const digit = digit_at(scalar, row, window);
@@ -544,6 +577,27 @@ fn CurveKernel(comptime C: type) type {
             return sum_buckets(C, buckets);
         }
 
+        /// One window of a tile summed in batch-affine buckets.
+        fn tile_batch_affine(
+            batch: *BatchAffine(C),
+            points: []const C.Affine,
+            scalars: []const u256,
+            row: u32,
+            window: u32,
+        ) C {
+            assert(points.len == scalars.len and points.len >= batch_affine_points_min);
+            const bucket_count = @as(usize, 1) << @intCast(window - 1);
+            batch.reset(bucket_count);
+            for (points, scalars) |point, scalar| {
+                if (point.infinity) continue;
+                const digit = digit_at(scalar, row, window);
+                if (digit > 0) batch.add(@intCast(digit - 1), point);
+                if (digit < 0) batch.add(@intCast(-digit - 1), point.neg());
+            }
+            batch.flush();
+            return batch.total(bucket_count);
+        }
+
         pub fn add(_: Self, a: C, b: C) C {
             return a.add(b);
         }
@@ -555,7 +609,9 @@ fn CurveKernel(comptime C: type) type {
 }
 
 /// sum_i [scalars[i]] points[i] in tiles cut by `strategy` (commonware's `msm_parallel`), for
-/// at least two points with scalars below 2^`nbits`. Equal to `msm` for every cut.
+/// at least two points of the order-r subgroup with scalars below 2^`nbits`. Equal to `msm`
+/// for every cut. Scalars wider than the endomorphism split's parts are split first (GLV for
+/// G1, GLS for G2), so the tiles run a half or a quarter of the windows over more points.
 pub fn msm_tiled(
     comptime C: type,
     gpa: std.mem.Allocator,
@@ -568,8 +624,22 @@ pub fn msm_tiled(
     if (nbits < scalar_bits) {
         for (scalars) |scalar| assert(scalar >> @intCast(nbits) == 0);
     }
-    const kernel: CurveKernel(C) = .{ .points = points, .scalars = scalars };
-    return run_tiled(C, gpa, points.len, nbits, strategy, kernel);
+    const parts = comptime split_parts(C);
+    if (nbits <= scalar_bits / parts) {
+        const kernel: CurveKernel(C) = .{ .points = points, .scalars = scalars };
+        return run_tiled(C, gpa, points.len, nbits, strategy, kernel);
+    }
+    const split_points = try gpa.alloc(C.Affine, points.len * parts);
+    defer gpa.free(split_points);
+    const split_scalars = try gpa.alloc(u256, points.len * parts);
+    defer gpa.free(split_scalars);
+    const count = split_terms(C, points, scalars, split_points, split_scalars);
+    if (count == 0) return C.identity;
+    const kernel: CurveKernel(C) = .{
+        .points = split_points[0..count],
+        .scalars = split_scalars[0..count],
+    };
+    return run_tiled(C, gpa, count, scalar_bits / parts, strategy, kernel);
 }
 
 const parallel = @import("parallel");
@@ -639,7 +709,7 @@ test "msm: G2 matches the sum of scalar multiplications" {
 }
 
 test "msm: the endomorphism split matches across window widths" {
-    // 33..256 G1 and 17..256 G2 points split; 256 split G1 points reach batch-affine, and
+    // 33..256 G1 and 17..256 G2 points split; 64 split points reach batch-affine, and
     // full-width scalars (above r) exercise the reduction before the split.
     for ([_]usize{ 33, 67, 128, 256 }, 0..) |count, seed| {
         try check_msm(g1.G1, g1.generator, count, 40 + seed, max_scalar);
