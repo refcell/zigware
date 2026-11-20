@@ -300,3 +300,71 @@ test "ring: recv waits for a concurrent sender" {
     try future.await(io);
     try expect_recv(&pair.receiver, null);
 }
+
+/// Random sends, clones, drops, and receives against a model: a deque of at most `capacity`
+/// items that evicts its oldest item when full, plus the live sender count.
+fn ring_model(_: void, generator: *@import("../rng.zig").FuzzRng) anyerror!void {
+    const rng = @import("../rng.zig");
+    const capacity = rng.range_at_most(generator, usize, 1, 4);
+    var pair = try channel(u32, gpa_test, testing.io, capacity);
+    var senders: [4]Sender(u32) = undefined;
+    senders[0] = pair.sender;
+    var live: usize = 1;
+    var receiver_live = true;
+    var model: std.Deque(u32) = .empty;
+    defer model.deinit(gpa_test);
+    var next: u32 = 0;
+    for (0..rng.range_at_most(generator, u32, 0, 64)) |_| {
+        switch (rng.range_less_than(generator, u8, 0, 7)) {
+            0, 1 => if (live > 0) {
+                const sender = senders[rng.range_less_than(generator, usize, 0, live)];
+                try testing.expectEqual(!receiver_live, sender.is_closed());
+                try testing.expectEqual(receiver_live, sender.send_lossy(next));
+                if (receiver_live) {
+                    if (model.len == capacity) _ = model.popFront();
+                    try model.pushBack(gpa_test, next);
+                }
+                next += 1;
+            },
+            2 => if (live > 0 and live < senders.len) {
+                senders[live] = senders[0].clone();
+                live += 1;
+            },
+            3 => if (live > 0) {
+                const index = rng.range_less_than(generator, usize, 0, live);
+                senders[index].deinit();
+                live -= 1;
+                senders[index] = senders[live];
+            },
+            4 => if (receiver_live) {
+                const expected = model.popFront();
+                const actual = pair.receiver.try_recv();
+                if (expected) |item| {
+                    try testing.expectEqual(item, try actual);
+                } else {
+                    const err: TryRecvError = if (live == 0) error.Disconnected else error.Empty;
+                    try testing.expectError(err, actual);
+                }
+            },
+            5 => if (receiver_live) {
+                const terminated = live == 0 and model.len == 0;
+                try testing.expectEqual(terminated, pair.receiver.is_terminated());
+                // `recv` would block only with senders left and nothing buffered.
+                if (model.len > 0 or live == 0) {
+                    try testing.expectEqual(model.popFront(), try pair.receiver.recv());
+                }
+            },
+            else => if (receiver_live and rng.ratio(generator, 1, 4)) {
+                pair.receiver.deinit();
+                receiver_live = false;
+                while (model.popFront()) |_| {}
+            },
+        }
+    }
+    for (senders[0..live]) |*sender| sender.deinit();
+    if (receiver_live) pair.receiver.deinit();
+}
+
+test "fuzz: ring matches a lossy bounded queue" {
+    try @import("../fuzz.zig").run({}, ring_model, 0x72696e67, 1000);
+}
