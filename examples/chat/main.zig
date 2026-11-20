@@ -38,6 +38,10 @@ pub const mailbox_size = 1_000;
 pub const message_size_max: u32 = 16 * 1024;
 /// Messages per second each friend may send on the chat channel.
 pub const message_rate_per_second = 128;
+
+/// Allocate from `allocator.Heap` when runtime safety is off; safe builds keep `init.gpa`, which
+/// checks for leaks at exit.
+const release_heap = !std.debug.runtime_safety;
 /// The log target of `main`'s events.
 pub const target = "commonware_chat";
 
@@ -123,10 +127,16 @@ pub fn main(init: std.process.Init) !u8 {
         .usage_error => return 2,
         .run => |arguments| arguments,
     };
-    var collector: traces.Collector = .init(init.gpa, .{});
+    // Release builds allocate from `allocator.Heap` (mimalloc's design), as the bench
+    // harnesses do: chat frees each message on another thread than the one that received it,
+    // and `smp_allocator` keeps such slots, so its RSS grew about 2 MB/min under traffic.
+    var heap: zigware.allocator.Heap = if (release_heap) .init(io, .default) else undefined;
+    defer if (release_heap) heap.deinit();
+    const gpa = if (release_heap) heap.allocator() else init.gpa;
+    var collector: traces.Collector = .init(gpa, .{});
     defer collector.deinit();
     const configured = try setup(arena, arguments, collector.tracer(target));
-    var zone = clock.Zone.load(init.gpa, io, init.environ_map.get("TZ"));
+    var zone = clock.Zone.load(gpa, io, init.environ_map.get("TZ"));
     defer zone.deinit();
     var random: [8]u8 = undefined;
     io.random(&random);
@@ -134,7 +144,7 @@ pub fn main(init: std.process.Init) !u8 {
         std.mem.readInt(u64, &random, .little),
     });
     var runner: production.Runner = undefined;
-    try runner.init(init.gpa, .{ .storage_directory = storage_directory });
+    try runner.init(gpa, .{ .storage_directory = storage_directory });
     defer runner.deinit();
     // A root `Context`, as commonware's runner gives `main`: tasks spawned from it publish
     // `runtime_tasks_spawned` and `runtime_tasks_running` (`network`, `handler_keyboard`).

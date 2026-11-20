@@ -65,6 +65,15 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
 - commonware's chat README points at a `p2p_connections` gauge that commonware removed
   (#3324); the Metrics pane shows `network_tracker_directory_connected` samples, one per
   connected friend, instead.
+- chat runs under `runner.start_context`, so `network` and `handler_keyboard` show in
+  `runtime_tasks_spawned` and `runtime_tasks_running` as in commonware. p2p's own tasks
+  (`network_dialer` and the like) do not: discovery's `Net` starts them on a bare `Io`.
+- chat's release builds allocate from `allocator.Heap`; Debug and ReleaseSafe keep `init.gpa`
+  for its leak check. commonware's chat uses the system allocator. Under `smp_allocator` a
+  peer's RSS grew without bound (2.2 MB/min at 5 lines/s each way, mostly on the listening
+  peer) while its live heap stayed flat: payloads are allocated on the peer's receive thread
+  and freed on the handler's, and `smp_allocator` keeps those slots. On `Heap` the same
+  traffic grows 0.5 to 0.9 MB/min, the messages and log lines chat keeps as commonware does.
 
 - log's Logs pane shows p2p's and simplex's events at debug and above (gui.rs's
   `with_max_level(DEBUG)`), through the runner's subscriber.
