@@ -529,41 +529,53 @@ fn finalize_parent(fixture: *Fixture, probes: *BuildProbes, gate: *Held, parent:
     try testing.expect(!acquiring.is_ready());
 }
 
+/// `finalization_completes_build(build, verify_first)` for `test_io.run_on_deterministic`. On
+/// threads the finalization cancels the gated acquisition just after it spawns; on Darwin a
+/// `testing.allocator` call there can swallow that cancel (AGENTS.md), so the pause never
+/// returns and `await_parked` timed out on macOS CI (runs 44810819613, 44814189507).
+fn completes_build(comptime build: Managed, comptime verify_first: ?bool) fn () anyerror!void {
+    return struct {
+        fn run() anyerror!void {
+            try finalization_completes_build(build, verify_first);
+        }
+    }.run;
+}
+
 // commonware `finalization_completes_build_processing_finalized_parent` (prepare case):
 // finalization waits for a prepare's execution of the parent and reuses its state; the
 // prepare then votes a child of the parent, whose state it cached.
 test "stateful processing: finalization completes a prepare processing its parent" {
-    try finalization_completes_build(.prepare, null);
+    try test_io.run_on_deterministic(completes_build(.prepare, null));
 }
 
 // commonware `finalization_completes_build_processing_finalized_parent` (propose case).
 test "stateful processing: finalization completes a proposal processing its parent" {
-    try finalization_completes_build(.propose, null);
+    try test_io.run_on_deterministic(completes_build(.propose, null));
 }
 
 // commonware `finalization_completes_build_processing_finalized_parent`
 // (verify_then_prepare case): the parent's verification starts the execution and a prepare
 // joins it.
 test "stateful processing: finalization completes a prepare joined to a verification" {
-    try finalization_completes_build(.prepare, true);
+    try test_io.run_on_deterministic(completes_build(.prepare, true));
 }
 
 // commonware `finalization_completes_build_processing_finalized_parent`
 // (verify_then_propose case).
 test "stateful processing: finalization completes a proposal joined to a verification" {
-    try finalization_completes_build(.propose, true);
+    try test_io.run_on_deterministic(completes_build(.propose, true));
 }
 
 // commonware `finalization_completes_build_processing_finalized_parent`
 // (prepare_then_verify case): the prepare starts the execution and the verification joins it.
 test "stateful processing: finalization completes a prepare a verification joined" {
-    try finalization_completes_build(.prepare, false);
+    try test_io.run_on_deterministic(completes_build(.prepare, false));
 }
 
 // commonware `finalization_completes_build_processing_finalized_parent`
 // (propose_then_verify case).
 test "stateful processing: finalization completes a proposal a verification joined" {
-    try finalization_completes_build(.propose, false);
+    try test_io.run_on_deterministic(completes_build(.propose, false));
 }
 
 const Handler = @import("verifications.zig").Verifications(harness.TestP);
