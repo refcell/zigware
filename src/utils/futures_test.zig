@@ -222,12 +222,25 @@ test "futures: try_join_all returns a later error and cancels a pending task" {
 
 const Pending = struct { aborter: futures.AbortablePool(i32).Aborter, id: i32 };
 
+/// Coverage fuzzing checks `testing.allocator` for leaks after every input without joining
+/// `testing.io`'s workers, and `testing.io` allocates tasks from `testing.allocator`. A group
+/// task frees itself just after its group sees it finish, so a pool on `testing.io` can look
+/// like it leaked one task (64 bytes) when the check runs first. Fuzzed pools run on an `Io`
+/// that lives across inputs and allocates elsewhere.
+var fuzz_threaded: ?Io.Threaded = null;
+
+fn fuzz_io() Io {
+    if (fuzz_threaded == null) fuzz_threaded = .init(std.heap.smp_allocator, .{});
+    return fuzz_threaded.?.io();
+}
+
 /// Model fuzz (commonware `utils/fuzz/fuzz_targets/futures.rs`), checking that every pushed
 /// value comes back once unless canceled or aborted.
 fn fuzz_pools(_: void, generator: *rng.FuzzRng) !void {
-    var pool = try futures.Pool(i32).init(gpa, io, 64);
+    const pool_io = fuzz_io();
+    var pool = try futures.Pool(i32).init(gpa, pool_io, 64);
     defer pool.deinit(gpa);
-    var abortable = try futures.AbortablePool(i32).init(gpa, io, 64);
+    var abortable = try futures.AbortablePool(i32).init(gpa, pool_io, 64);
     defer abortable.deinit(gpa);
     var pending: std.ArrayList(Pending) = .empty;
     defer pending.deinit(gpa);
