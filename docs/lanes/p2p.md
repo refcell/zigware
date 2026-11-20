@@ -1,5 +1,7 @@
 # Lane: p2p
 
+Owner thread: T-01a1d59c-49e5-74c3-bfa4-c383028ae0b3.
+
 Owns `src/p2p`, except `src/p2p/authenticated/lookup/`, which the parallel lane owns (split
 agreed 2026-11-16 to shorten this backlog). The shared authenticated core (data, dialing,
 throttle, outbox, router, channels) and discovery stay here; lookup builds on them and keeps
@@ -847,6 +849,10 @@ Patch 2 is the fix: the sender yields when a send is not accepted.
 ```
 
 ## Log
+- 2026-11-20: `etc/scripts/consensus-compare.py`, the end-to-end consensus head-to-head (4 log
+  validators per side, ABBA, verdicts; docs/BENCHMARKS.md). Two 4-round runs at load 85 to 119
+  disagreed (0.61× then 1.28× finalized views/s), so no verdict yet. consensus-marshal owns the
+  dkg late-joiner catch-up scenario in the same script.
 - 2026-11-20: secp256r1 verify, from crypto's long list (2.35× in its sweep, 2.80× here):
   an aws-lc-shaped verify plus `mulx`/`adx` field multiplication in
   `cryptography/secp256r1/{verify,field}.zig` takes it to 1.01× commonware (0.80× recoverable;

@@ -471,6 +471,39 @@ Re-run: build commonware's `flood` with those two changes, then `zig build insta
 -Doptimize=ReleaseFast`, `examples/flood/local.sh 4 <dir> 1024 <rate>`, and
 `etc/scripts/flood-compare.py <commonware-flood> zig-out/bin/flood <dir> 20 3 8`.
 
+## End to end: consensus, 4 log validators (2026-11-20, p2p lane)
+
+`etc/scripts/consensus-compare.py` runs four validators of commonware's `log` example
+(`a9ffc25f3`, built with `RUSTFLAGS="-C target-cpu=native"`), then four of zigware's
+(ReleaseFast, main at `167c52cd`), on loopback in ABBA order, each run 20 s of warm-up and a
+60 s window. It counts the views each validator shows finalized and nullified, from the
+examples' Activity panes, and reports medians over the validators. The ratio is the median of
+the per-round ratios, oriented so that below 1 means zigware is better; "faster" needs that
+median below 0.95 and every round below 1.
+
+| run | load (1 min) | metric | commonware | zigware | ratio | verdict |
+|---|---|---|---|---|---|---|
+| 1 | 85 to 100 | finalized views/s | 1.93 | 3.23 | 0.61× | faster |
+| 1 | 85 to 100 | nullified per finalized | 0.282 | 0.229 | 0.81× | faster |
+| 2 | 100 to 119 | finalized views/s | 3.64 | 2.95 | 1.28× | not yet faster |
+| 2 | 100 to 119 | nullified per finalized | 0.236 | 0.228 | 0.96× | not yet faster |
+
+(Run 1 measured nullified views per second; its row here is recomputed per finalized view from
+the same raw counts, so it shows what the script now prints.)
+
+The two runs disagree: each side was ahead in every round of one run, and commonware's rate
+nearly doubled between them while zigware's stayed near 3. At a load average of about 100 on
+32 cores, a view needs several scheduler hops across four processes, so this row measures CPU
+contention more than either engine, and it gets no verdict until a quiet run. What holds in
+both: neither side is quota-bound (at 3 to 4 views/s a connection carries about 6 to 8 of the
+10 messages per second each channel allows), and both nullify about one view in four to five.
+
+Propose-to-finalize latency is not measured. Both examples print timestamps to the second and
+serve no metrics, so simplex's `finalization_latency` histogram (which both register with the
+same 36 buckets) cannot be read from outside, and on loopback nearly every view finalizes
+within the second it was proposed. Measuring it, or the engines' speed without the example's
+quota, needs the same local patch to both examples, as flood's comparison does.
+
 ## Storage: partitioned ordered index inserts, mimalloc against smp_allocator (2026-11-19, clearing lane)
 
 `index::insert/variant=partitioned_ordered_2` stays 1.2 to 1.4× commonware's, and the reason
