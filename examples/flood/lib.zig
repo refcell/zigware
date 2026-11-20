@@ -15,6 +15,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const zigware = @import("zigware");
+const ui = @import("ui");
 pub const yaml = @import("yaml.zig");
 
 const p2p = zigware.p2p;
@@ -183,18 +184,18 @@ pub fn write_json_event(
         .@"error" => "ERROR",
     };
     try writer.print("\",\"level\":\"{s}\",\"fields\":{{\"message\":", .{level_name});
-    try write_json_string(writer, message);
+    try ui.logger.write_string(writer, message);
     inline for (@typeInfo(@TypeOf(fields)).@"struct".field_names) |name| {
         try writer.print(",\"{s}\":", .{name});
         const value = @field(fields, name);
         switch (@typeInfo(@TypeOf(value))) {
             .int, .comptime_int => try writer.print("{d}", .{value}),
             .bool => try writer.writeAll(if (value) "true" else "false"),
-            else => try write_json_string(writer, value),
+            else => try ui.logger.write_string(writer, value),
         }
     }
     try writer.writeAll("},\"target\":");
-    try write_json_string(writer, target);
+    try ui.logger.write_string(writer, target);
     try writer.writeAll("}\n");
 }
 
@@ -215,23 +216,6 @@ fn write_timestamp(writer: *Io.Writer, timestamp_ns: u64) Io.Writer.Error!void {
         day_seconds.getSecondsIntoMinute(),
         micros,
     });
-}
-
-/// A JSON string as serde_json writes it.
-pub fn write_json_string(writer: *Io.Writer, value: []const u8) Io.Writer.Error!void {
-    try writer.writeByte('"');
-    for (value) |byte| switch (byte) {
-        '"' => try writer.writeAll("\\\""),
-        '\\' => try writer.writeAll("\\\\"),
-        0x08 => try writer.writeAll("\\b"),
-        0x0c => try writer.writeAll("\\f"),
-        '\n' => try writer.writeAll("\\n"),
-        '\r' => try writer.writeAll("\\r"),
-        '\t' => try writer.writeAll("\\t"),
-        0x00...0x07, 0x0b, 0x0e...0x1f => try writer.print("\\u{x:0>4}", .{byte}),
-        else => try writer.writeByte(byte),
-    };
-    try writer.writeByte('"');
 }
 
 /// Fills `message` with its send time and random bytes (commonware's flood sender loop body).

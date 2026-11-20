@@ -46,6 +46,20 @@ test "xoshiro256++ reference vectors" {
     for (expected) |value| try testing.expectEqual(value, rng.next_u64());
 }
 
+test "events print as tracing-subscriber's JSON, strings escaped as serde_json does" {
+    var buffer: [256]u8 = undefined;
+    var writer: Io.Writer = .fixed(&buffer);
+    try lib.write_json_event(&writer, 1_500_000, .warn, "flood", "say \"hi\"\n\x01", .{
+        .count = 3,
+        .ok = true,
+        .peer = "a\\b\t\x1f",
+    });
+    const expected = "{\"timestamp\":\"1970-01-01T00:00:00.001500Z\"," ++
+        "\"level\":\"WARN\",\"fields\":{\"message\":\"say \\\"hi\\\"\\n\\u0001\"," ++
+        "\"count\":3,\"ok\":true,\"peer\":\"a\\\\b\\t\\u001f\"},\"target\":\"flood\"}\n";
+    try testing.expectEqualStrings(expected, writer.buffered());
+}
+
 test "message carries its send time" {
     var rng = lib.SmallRng.seed_from_u64(0);
     var message: [24]u8 = undefined;

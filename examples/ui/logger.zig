@@ -181,7 +181,7 @@ pub fn is_json_literal(value: []const u8) bool {
 }
 
 /// A JSON string as serde_json writes it.
-fn write_string(writer: *Writer, value: []const u8) Writer.Error!void {
+pub fn write_string(writer: *Writer, value: []const u8) Writer.Error!void {
     try writer.writeByte('"');
     for (value) |byte| switch (byte) {
         '"' => try writer.writeAll("\\\""),
