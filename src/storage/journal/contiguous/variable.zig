@@ -881,14 +881,25 @@ fn encode_items(
     comptime V: type,
     gpa: Allocator,
     compression: ?u8,
+    slot: *CompressorSlot,
     nested: []const []const V,
     out: *std.ArrayList(u8),
     starts: *std.ArrayList(usize),
 ) Error!void {
-    // One encoder for the whole batch, as commonware's thread-local `CCtx`.
-    var compressor: frame.zstd.Compressor = .{};
-    defer compressor.deinit(gpa);
-    const reused: ?*frame.zstd.Compressor = if (compression != null) &compressor else null;
+    // One encoder for the whole batch: the journal's, as commonware keeps a thread-local
+    // `CCtx`, or the batch's own while another batch holds it.
+    var own: frame.zstd.Compressor = .{};
+    defer own.deinit(gpa);
+    const borrowed = compression != null and
+        slot.busy.cmpxchgStrong(false, true, .acquire, .monotonic) == null;
+    defer if (borrowed) slot.busy.store(false, .release);
+    assert(!borrowed or slot.busy.load(.monotonic));
+    const reused: ?*frame.zstd.Compressor = if (compression == null)
+        null
+    else if (borrowed)
+        &slot.compressor
+    else
+        &own;
     for (nested) |items| {
         try starts.ensureUnusedCapacity(gpa, items.len);
         for (items) |item| {
@@ -934,6 +945,8 @@ pub fn Journal(comptime V: type) type {
         scratch: std.ArrayList(u8) = .empty,
         /// Staging bytes `read_many` reuses across calls (commonware's per-thread scratch).
         read_scratch: ReadScratch = .{},
+        /// The zstd encoder batches reuse (`encode_items`).
+        compressor_slot: CompressorSlot = .{},
         starts: std.ArrayList(usize) = .empty,
         positions: std.ArrayList(u64) = .empty,
         failed: bool = false,
@@ -1013,6 +1026,8 @@ pub fn Journal(comptime V: type) type {
             self.metrics.deinit();
             self.scratch.deinit(self.gpa);
             self.read_scratch.bytes.deinit(self.gpa);
+            assert(!self.compressor_slot.busy.load(.monotonic));
+            self.compressor_slot.compressor.deinit(self.gpa);
             self.starts.deinit(self.gpa);
             self.positions.deinit(self.gpa);
             self.names.deinit(self.gpa);
@@ -1061,7 +1076,9 @@ pub fn Journal(comptime V: type) type {
             assert(!self.failed);
             self.scratch.clearRetainingCapacity();
             self.starts.clearRetainingCapacity();
-            try encode_items(V, self.gpa, self.compression, nested, &self.scratch, &self.starts);
+            const slot = &self.compressor_slot;
+            const scratch = &self.scratch;
+            try encode_items(V, self.gpa, self.compression, slot, nested, scratch, &self.starts);
             return self.write_encoded(self.scratch.items, self.starts.items);
         }
 
@@ -1072,7 +1089,9 @@ pub fn Journal(comptime V: type) type {
             defer out.deinit(self.gpa);
             var starts: std.ArrayList(usize) = .empty;
             defer starts.deinit(self.gpa);
-            try encode_items(V, self.gpa, self.compression, nested, &out, &starts);
+            // A shared encoder like `read_scratch`: `encode_items` borrows it atomically.
+            const slot: *CompressorSlot = @constCast(&self.compressor_slot);
+            try encode_items(V, self.gpa, self.compression, slot, nested, &out, &starts);
             const len = out.items.len;
             const spare = out.capacity - len;
             if (spare > prepared_spare_limit and len <= out.capacity / 4) {
@@ -1896,6 +1915,12 @@ fn merge_spans(ranges: []const paged.Writer.Range, spans: []paged.Writer.Range) 
 }
 
 /// The staging buffer `read_many` reuses, held by one reader at a time.
+/// A journal's zstd encoder and whether a batch holds it.
+const CompressorSlot = struct {
+    busy: std.atomic.Value(bool) = .init(false),
+    compressor: frame.zstd.Compressor = .{},
+};
+
 const ReadScratch = struct {
     busy: std.atomic.Value(bool) = .init(false),
     bytes: std.ArrayList(u8) = .empty,
