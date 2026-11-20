@@ -269,7 +269,7 @@ fn bench_list(
 }
 
 /// Runs one stage over `case`'s payments and the same payments with nonces, on one thread and
-/// on a pool of `concurrency` threads.
+/// on a pool of `concurrency` threads with an adaptive policy.
 fn bench_case(
     runner: *bench.Runner,
     stage: Stage,
@@ -282,7 +282,9 @@ fn bench_case(
         .threads = concurrency - 1,
     });
     defer pool.destroy();
-    const strategy = parallel.Rayon.init(pool);
+    // commonware's `Rayon::new` is adaptive: its policy learns to run small batches serially.
+    var policy = parallel.Policy.init(runner.io);
+    const strategy = parallel.Rayon.init(pool).with_policy(&policy);
     var pooled = case;
     pooled.conc = concurrency;
     try bench_list(runner, stage, case, list, parallel.sequential);
