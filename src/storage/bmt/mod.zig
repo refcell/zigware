@@ -226,22 +226,28 @@ pub fn Tree(comptime D: type) type {
             if (self.empty or position >= self.leaf_count()) {
                 return fail(diagnostic, error.InvalidPosition, position);
             }
-            var siblings: [max_levels]D = undefined;
+            // Count the path's siblings first, so they go straight into an exact allocation
+            // (commonware pushes into a `Vec` sized for every level).
             var count: usize = 0;
             var index: usize = position;
             for (0..self.levels - 1) |depth| {
-                const nodes = self.level(depth);
-                if ((index ^ 1) < nodes.len) {
-                    siblings[count] = nodes[index ^ 1];
-                    count += 1;
-                }
+                count += @intFromBool((index ^ 1) < self.level(depth).len);
                 index /= 2;
             }
             assert(index == 0);
-            return .{
-                .leaf_count = self.leaf_count(),
-                .siblings = try gpa.dupe(D, siblings[0..count]),
-            };
+            const siblings = try gpa.alloc(D, count);
+            var written: usize = 0;
+            index = position;
+            for (0..self.levels - 1) |depth| {
+                const nodes = self.level(depth);
+                if ((index ^ 1) < nodes.len) {
+                    siblings[written] = nodes[index ^ 1];
+                    written += 1;
+                }
+                index /= 2;
+            }
+            assert(written == count);
+            return .{ .leaf_count = self.leaf_count(), .siblings = siblings };
         }
 
         /// The proof for the contiguous leaves `start..=end`: at most two siblings per level.
