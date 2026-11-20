@@ -208,7 +208,7 @@ golden DKG rows use 10 samples (commonware's own sample size for them).
 | bench | parameters | commonware | zigware | zigware / commonware |
 |---|---|---|---|---|
 | `bls12381::signature_generation` | `ns_len=9 msg_len=32` | 270 µs | 368 µs | 1.36× (re-run, open) |
-| `bls12381::hash_to_curve` | `n=100 conc=1` | 4.33 ms | 7.37 ms | 1.70× (open) |
+| `bls12381::hash_to_curve` | `n=100 conc=1` | 4.33 ms | 7.37 ms | 1.70× (now 1.22×, see below) |
 | `bls12381::tle_encrypt` | | 1.29 ms | 1.04 ms | 0.80× |
 | `bls12381::tle_decrypt` | | 704 µs | 901 µs | 1.28× |
 | `bls12381::combine_public_keys` | `pks=1000` | 1.27 ms | 1.22 ms | 0.96× |
@@ -741,6 +741,83 @@ vectors pass, and every change below computes the same group elements.
 - Landed beside these on main, from another lane: 52d0b401 merges synthetic free terms in
   one pass, and 3d7a069c sums a sequential MSM of more than 256 points in one Pippenger,
   which covers `verify` n=128's 272-point MSM at conc=1.
+
+## formatting, codec, bls12381 hash and signing (2026-11-19, consensus-simplex lane)
+
+commonware's whole `formatting` and `codec` bench binaries against zigware's benches of the
+same names, at `bench-compare.sh`'s settings (1 s warm-up, 3 s measurement, 50 samples). The
+two sides alternated per crate in three rounds at a 1-minute load of 32 to 72. Each round's
+zigware/commonware ratio is one sample. The table gives the median of the three ratios and
+their range, next to each side's median time. These ran on `smp_allocator`, before 0ea389fd;
+none of the rows allocates in its timed loop.
+
+| bench | parameters | commonware | zigware | zigware / commonware | per-round range |
+|---|---|---|---|---|---|
+| `formatting::encode` | `size=16` | 16.1 ns | 17.3 ns | 1.08× | 1.07–2.62× (3) |
+| `formatting::encode` | `size=32` | 16.6 ns | 20.2 ns | 1.33× | 0.86–5.25× (3) |
+| `formatting::encode` | `size=64` | 17.9 ns | 16.6 ns | 0.93× | 0.51–1.14× (3) |
+| `formatting::encode` | `size=256` | 21.5 ns | 24.2 ns | 1.25× | 0.74–2.21× (3) |
+| `formatting::encode` | `size=1024` | 66.2 ns | 30.7 ns | 0.51× | 0.38–1.04× (3) |
+| `formatting::encode` | `size=16384` | 587 ns | 319 ns | 0.58× | 0.35–0.63× (3) |
+| `formatting::decode` | `input=pristine size=16` | 43.9 ns | 20.5 ns | 0.36× | 0.32–0.49× (3) |
+| `formatting::decode` | `input=ugly size=16` | 82.8 ns | 51.7 ns | 0.59× | 0.42–0.64× (3) |
+| `formatting::decode` | `input=pristine size=32` | 67.3 ns | 25.5 ns | 0.42× | 0.26–1.75× (3) |
+| `formatting::decode` | `input=ugly size=32` | 182 ns | 88.3 ns | 0.70× | 0.49–3.84× (3) |
+| `formatting::decode` | `input=pristine size=64` | 101 ns | 38.1 ns | 0.26× | 0.25–0.39× (3) |
+| `formatting::decode` | `input=ugly size=64` | 199 ns | 83.3 ns | 0.47× | 0.42–0.48× (3) |
+| `formatting::decode` | `input=pristine size=256` | 319 ns | 75.8 ns | 0.29× | 0.24–0.38× (3) |
+| `formatting::decode` | `input=ugly size=256` | 692 ns | 251 ns | 0.38× | 0.36–0.52× (3) |
+| `formatting::decode` | `input=pristine size=1024` | 1.22 µs | 262 ns | 0.20× | 0.20–0.22× (3) |
+| `formatting::decode` | `input=ugly size=1024` | 2.34 µs | 1.65 µs | 0.70× | 0.41–0.76× (3) |
+| `formatting::decode` | `input=pristine size=16384` | 28.5 µs | 5.17 µs | 0.22× | 0.14–0.37× (3) |
+| `formatting::decode` | `input=ugly size=16384` | 63.4 µs | 37.9 µs | 0.56× | 0.36–0.74× (3) |
+| `formatting::display` | `size=16` | 21.1 ns | 6.82 ns | 0.32× | 0.18–0.38× (3) |
+| `formatting::display` | `size=32` | 19 ns | 9.05 ns | 0.50× | 0.41–1.02× (3) |
+| `formatting::display` | `size=64` | 20.2 ns | 5.2 ns | 0.27× | 0.26–0.65× (3) |
+| `formatting::display` | `size=256` | 58.5 ns | 19.6 ns | 0.34× | 0.32–0.65× (3) |
+| `formatting::display` | `size=1024` | 216 ns | 122 ns | 0.46× | 0.15–0.57× (3) |
+| `formatting::display` | `size=16384` | 4.5 µs | 1.63 µs | 0.33× | 0.28–0.59× (3) |
+| `codec::lazy::get` | `source=shared txs=100000 conc=1` | 4.78 ms | 760 µs | 0.18× | 0.14–0.27× (3) |
+| `codec::lazy::get` | `source=private txs=100000 conc=1` | 4.77 ms | 1.99 ms | 0.40× | 0.30–0.48× (3) |
+| `codec::lazy::get` | `source=borrowed txs=100000 conc=1` | 918 µs | 234 µs | 0.26× | 0.19–0.28× (3) |
+| `codec::lazy::get` | `source=shared txs=100000 conc=8` | 1.04 ms | 443 µs | 0.28× | 0.22–0.45× (3) |
+| `codec::lazy::get` | `source=private txs=100000 conc=8` | 1.92 ms | 1.08 ms | 0.62× | 0.56–0.83× (3) |
+| `codec::lazy::get` | `source=borrowed txs=100000 conc=8` | 698 µs | 217 µs | 0.23× | 0.10–1.44× (3) |
+| `codec::lazy::get` | `value=memo_tx source=shared txs=100000 conc=1` | 4.85 ms | 1.2 ms | 0.24× | 0.19–0.29× (3) |
+| `codec::lazy::get` | `value=memo_tx source=shared txs=100000 conc=8` | 3.95 ms | 556 µs | 0.14× | 0.09–0.32× (3) |
+| `codec::lazy::get` | `value=key33 source=shared txs=100000 conc=1` | 2.18 ms | 123 µs | 0.04× | 0.04–0.09× (3) |
+| `codec::lazy::get` | `value=key33 source=shared txs=100000 conc=8` | 548 µs | 186 µs | 0.15× | 0.08–0.51× (3) |
+
+- **Hex (c8c682b0, 732258c1).** Decode and display are vectorized, and encode runs at the
+  target's widest vector width. `encode size=32`'s median of 1.33× comes from rounds of
+  0.86×, 1.33×, and 5.25×, which is noise around 3 ns of difference.
+- **Timing harness (5c5d48cd, parallel lane).** These rows were measured after
+  `bench.criterion` began timing a hook-less workload's iterations as one batch. Before that,
+  every row under about 50 ns measured the clock instead of the code.
+
+The bls12381 rows bls-math left open were re-run on main after 024c35d4 and 0ea389fd, with
+three alternating rounds at a load of 50 to 69:
+
+| bench | parameters | commonware | zigware | zigware / commonware | per-round range |
+|---|---|---|---|---|---|
+| `bls12381::hash_to_curve` | `n=100 conc=1` | 5.92 ms | 7 ms | 1.22× | 0.88–1.40× (3) |
+| `bls12381::hash_to_curve` | `n=100 conc=8` | 3.31 ms | 1.96 ms | 0.59× | 0.32–0.90× (3) |
+| `bls12381::signature_generation` | `ns_len=9 msg_len=32` | 571 µs | 383 µs | 0.71× | 0.67–0.79× (3) |
+| `bls12381::aggregate_verify_same_signer` | `conc=1 msgs=100` | 6.99 ms | 8.23 ms | 1.18× | 0.77–1.21× (3) |
+| `bls12381::aggregate_verify_same_signer` | `conc=8 msgs=100` | 6.09 ms | 4.11 ms | 0.61× | 0.52–0.85× (3) |
+
+- **G1 `hash_to_curve` (024c35d4), 1.70× before.** Its two SSWU inversions and two isogeny
+  inversions now share one inversion each (Montgomery's trick), and the sum before cofactor
+  clearing stays projective. By thread CPU time one hash costs 57 µs: two (p+1)/4 square-root
+  exponentiations (about 12 µs each) and cofactor clearing (18 µs), the rest polynomials and
+  SHA-256. All of these are Fp multiplies at 27 ns, against blst's hand-written
+  `mulx_mont_384`.
+- **Rejected: an assembly Fp multiply.** A mulx/adcx/adox CIOS in one inline-assembly block
+  measured 23 to 31 ns standalone against 37 ns for the same portable code. In the tree it
+  measured 32 to 35 ns against the portable 27 ns: the block reads its operands through
+  pointers, so it needs a memory clobber, and Zig's `"m"` operands pass an address rather
+  than the value. The branch was dropped. A dedicated Montgomery square (a 21-product wide
+  square, then `reduce_wide`) was no faster than `mul` either (39 against 38 ns).
 
 ## Appendix: bench coverage
 
