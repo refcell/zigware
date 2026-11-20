@@ -1077,6 +1077,13 @@ load of about 70. It is a single round, not yet ABBA, so these are not verdicts:
 
 The ABBA rounds for every glue `transfers` row follow once the bls12381 runs finish.
 
+The allocator explains settle's nonce row only. `transfers::plan` at n=16 is not
+allocator-bound (runtime lane, 2026-11-20). After 9f4eeba4, `Heap` costs 5.8–13 ns per
+alloc+free against `smp_allocator`'s 12–18 ns, with no mutex on the small path. The same glue
+bench binary built on each allocator read a median Heap/smp ratio of about 1.01 over seven
+A/B pairs. The plan rows' 1.27–1.49× (native ABBA, 8 rounds, conc=1, accounts=128 and 4096)
+come from plan's own code path, which the broadcast-resolver lane holds for now.
+
 ## Coding: Reed-Solomon scheme and engines (2026-11-20, coding lane)
 
 commonware's `coding_scheme_times` (`reed_solomon::encode`, `reed_solomon::decode`) and
