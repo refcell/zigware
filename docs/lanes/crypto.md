@@ -563,3 +563,13 @@ hold whole units of lanes" over coding's lane-aware `hash_batches`, and `sha512/
   and ran 1.5x slower than std, so each group size has its own unrolled copy. Planted bugs in a
   rotation, the padding boundary, the e update, the streamed length, a schedule rotation, and
   the lane order fail the std comparison tests.
+- 2026-11-20: ed25519 verify's `half_size` runs Lehmer's algorithm (Knuth 4.5.2 L): runs of
+  quotients from the remainders' leading 64 bits apply as one 2x2 matrix, with an exact step on
+  four-word remainders when the leading bits decide none. A step is taken only while the true
+  remainder provably stays at least 2^126, so the result is commonware's. The bit-at-a-time
+  reduction on `u256` took 3.8 us of a 16-19 us verify (LLVM lowers a variable `u256` shift
+  through the stack); this takes about 0.9 us. The test compares 4,106 inputs, including
+  quotients of 2^32 and more, against commonware's algorithm, and 2 million more matched in a
+  ReleaseFast check. Planted bugs in the Collins condition, the shifted-copy correction, a
+  cofactor update, and a coefficient shift fail it. The step-margin guard is a proof bound
+  that no sampled input reaches (dropping it still matched on 2 million).

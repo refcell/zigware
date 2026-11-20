@@ -123,37 +123,154 @@ pub fn naf(comptime width: u4, value: u128) [digits_len]i8 {
 
 /// `(u, v)` with `v = u x (mod l)`, `0 < |u| < 2^127`, and `v < 2^126` (commonware
 /// `Scalar::half_size`), by the extended Euclidean algorithm on `(l, x)` stopped early.
+///
+/// Lehmer's algorithm (Knuth, TAOCP vol. 2, 4.5.2, Algorithm L): runs of quotients come from
+/// the leading 64 bits of both remainders and apply to them as one 2x2 matrix, with a single
+/// exact step when the leading bits cannot decide a quotient. The quotients, and so the result,
+/// are commonware's; its one shifted subtraction per quotient bit on `u256` took 3.8 us here
+/// (LLVM lowers a variable `u256` shift through the stack), against about 0.9 us for this.
 pub fn half_size(x: u256) struct { u: i128, v: u128 } {
     assert(x < order);
-    var r0: u256 = order;
+    var r0: Words = @bitCast(order);
     // Coefficients alternate in sign and every partial one lies between two consecutive
     // ones, all below 2^127 in magnitude (commonware's bound), so `i128` never overflows.
     var t0: i128 = 0;
-    var r1: u256 = x;
+    var r1: Words = @bitCast(x);
     var t1: i128 = 1;
-    // Bounded: each pass reduces the larger remainder below the smaller.
-    while (bits(r1) > 126) {
-        // Reduces `r0` modulo `r1` by shifted copies of `r1`; every shift is below 127.
-        while (r0 >= r1) {
-            var shift: u8 = @intCast(bits(r0) - bits(r1));
-            var shifted = r1 << shift;
-            if (r0 < shifted) {
-                shift -= 1;
-                shifted = r1 << shift;
-            }
-            r0 -= shifted;
-            t0 -= t1 << @intCast(shift);
+    // Bounded: each pass takes at least one Euclidean step.
+    while (words_bits(r1) > 126) {
+        if (lehmer_cofactors(r0, r1)) |m| {
+            const a: u256 = @bitCast(r0);
+            const b: u256 = @bitCast(r1);
+            // Exact results in range, so wrapping arithmetic on the two's complement is exact.
+            r0 = @bitCast(a *% wide(m.a) +% b *% wide(m.b));
+            r1 = @bitCast(a *% wide(m.c) +% b *% wide(m.d));
+            const next_t0 = t0 *% m.a +% t1 *% m.b;
+            t1 = t0 *% m.c +% t1 *% m.d;
+            t0 = next_t0;
+        } else {
+            while (words_ge(r0, r1)) reduce_step(&r0, &t0, r1, t1);
+            std.mem.swap(Words, &r0, &r1);
+            std.mem.swap(i128, &t0, &t1);
         }
-        std.mem.swap(u256, &r0, &r1);
-        std.mem.swap(i128, &t0, &t1);
+        assert(words_ge(r0, r1));
     }
     assert(t1 != 0 and @abs(t1) < (1 << 127));
-    assert(r1 < (1 << 126));
-    return .{ .u = t1, .v = @intCast(r1) };
+    assert(words_bits(r1) <= 126);
+    return .{ .u = t1, .v = @as(u128, r1[1]) << 64 | r1[0] };
 }
 
-fn bits(x: u256) u16 {
-    return 256 - @as(u16, @clz(x));
+/// A 256-bit remainder as four little-endian 64-bit words.
+const Words = [4]u64;
+
+/// The matrix `[a b; c d]` taking `(r0, r1)` to the pair some Euclidean steps later.
+const Cofactors = struct { a: i128, b: i128, c: i128, d: i128 };
+
+fn wide(value: i128) u256 {
+    return @bitCast(@as(i256, value));
+}
+
+/// The steps of the Euclidean algorithm on `(r0, r1)` that the leading 64 bits decide, as a
+/// matrix, or null when they decide none. Every step's quotient is exact (Collins' condition:
+/// the quotients of both bounds on the true ratio agree), and every step leaves a remainder of
+/// at least 2^126, so the run never passes the remainder `half_size` stops at.
+fn lehmer_cofactors(r0: Words, r1: Words) ?Cofactors {
+    assert(words_ge(r0, r1));
+    assert(words_bits(r1) > 126);
+    const shift = words_bits(r0) - 64;
+    var x: i128 = words_window(r0, shift);
+    var y: i128 = words_window(r1, shift);
+    // The true remainder `c r0 + d r1` is within max(|c|, |d|) 2^shift of `y 2^shift` (c and d
+    // have opposite signs), so a step is safe while `y - max(|c|, |d|)` reaches this floor.
+    const floor: i128 = if (shift >= 126) 1 else @as(i128, 1) << @intCast(126 - shift);
+    var m: Cofactors = .{ .a = 1, .b = 0, .c = 0, .d = 1 };
+    const limit: i128 = 1 << 64;
+    // Bounded: y shrinks every step.
+    while (true) {
+        const low = .{ x + m.a, y + m.c };
+        const high = .{ x + m.b, y + m.d };
+        if (low[1] <= 0 or high[1] <= 0 or low[0] >= limit or high[0] >= limit) break;
+        // 64-bit divisions: an `i128` one is a library call.
+        const q: u64 = @as(u64, @intCast(low[0])) / @as(u64, @intCast(low[1]));
+        if (q != @as(u64, @intCast(high[0])) / @as(u64, @intCast(high[1]))) break;
+        const next_y = x - q * y;
+        const next_c = m.a - q * m.c;
+        const next_d = m.b - q * m.d;
+        if (next_y - @as(i128, @intCast(@max(@abs(next_c), @abs(next_d)))) < floor) break;
+        m = .{ .a = m.c, .b = m.d, .c = next_c, .d = next_d };
+        x = y;
+        y = next_y;
+    }
+    if (m.b == 0) return null;
+    return m;
+}
+
+/// Subtracts from `r0` (with `r0 >= r1 >= 2^126`) a multiple `q r1`, `q` at least one and at
+/// most the quotient, and `q t1` from `t0`.
+fn reduce_step(r0: *Words, t0: *i128, r1: Words, t1: i128) void {
+    assert(words_ge(r0.*, r1));
+    assert(words_bits(r1) > 126);
+    const shift = words_bits(r0.*) - 64;
+    const top1 = words_window(r1, shift);
+    if (top1 >= 1 << 32) {
+        // `floor(top0 / (top1 + 1))` never exceeds the quotient, and with a 33-bit divisor
+        // it is at most a few short, so the caller's loop repeats only a few times.
+        const top0 = words_window(r0.*, shift);
+        const q: u64 = if (top1 == std.math.maxInt(u64)) 0 else top0 / (top1 + 1);
+        const step = @max(q, 1);
+        r0.* = words_sub_mul(r0.*, r1, step);
+        t0.* -= t1 * step;
+    } else {
+        // A quotient of 2^32 or more: subtract the largest shifted copy of `r1` that fits.
+        const a: u256 = @bitCast(r0.*);
+        const b: u256 = @bitCast(r1);
+        var bit_shift: u8 = @intCast(words_bits(r0.*) - words_bits(r1));
+        if (a < b << bit_shift) bit_shift -= 1;
+        r0.* = @bitCast(a - (b << bit_shift));
+        t0.* -= t1 << @intCast(bit_shift);
+    }
+}
+
+fn words_bits(a: Words) u32 {
+    if (a[3] != 0) return 256 - @as(u32, @clz(a[3]));
+    if (a[2] != 0) return 192 - @as(u32, @clz(a[2]));
+    if (a[1] != 0) return 128 - @as(u32, @clz(a[1]));
+    return 64 - @as(u32, @clz(a[0]));
+}
+
+/// Bits `shift` to `shift + 63` of `a`, for `shift <= 192`.
+fn words_window(a: Words, shift: u32) u64 {
+    assert(shift <= 192);
+    const bit: u6 = @intCast(shift % 64);
+    const low: u64, const high: u64 = switch (shift / 64) {
+        0 => .{ a[0], a[1] },
+        1 => .{ a[1], a[2] },
+        2 => .{ a[2], a[3] },
+        else => .{ a[3], 0 },
+    };
+    if (bit == 0) return low;
+    return (low >> bit) | (high << @intCast(@as(u7, 64) - bit));
+}
+
+fn words_ge(a: Words, b: Words) bool {
+    return @as(u256, @bitCast(a)) >= @as(u256, @bitCast(b));
+}
+
+/// `a - b q`, which must not underflow.
+fn words_sub_mul(a: Words, b: Words, q: u64) Words {
+    var out: Words = undefined;
+    var carry: u64 = 0;
+    var borrow: u1 = 0;
+    inline for (0..4) |i| {
+        const product = @as(u128, b[i]) * q + carry;
+        carry = @intCast(product >> 64);
+        const low = @subWithOverflow(a[i], @as(u64, @truncate(product)));
+        const borrowed = @subWithOverflow(low[0], borrow);
+        out[i] = borrowed[0];
+        borrow = low[1] | borrowed[1];
+    }
+    assert(carry == 0 and borrow == 0);
+    return out;
 }
 
 /// `base[0] B + base[1] 2^128 B + sum(scalar point)`, with every scalar below 2^128, by
@@ -306,8 +423,11 @@ const testing = std.testing;
 
 test "half_size returns a short multiple" {
     var prng = std.Random.DefaultPrng.init(0x5eed);
-    const cases = [_]u256{ 0, 1, (1 << 126) - 1, 1 << 126, 1 << 127, 1 << 128, order - 1 };
-    for (0..cases.len + 256) |index| {
+    // Edges, then values whose early quotients are 2^32 or more (the shifted-copy branch).
+    const edges = [_]u256{ 0, 1, (1 << 126) - 1, 1 << 126, 1 << 127, 1 << 128, order - 1 };
+    const big_quotients = [_]u256{ (1 << 200) + 3, (1 << 220) - 5, (1 << 160) + (1 << 127) };
+    const cases = edges ++ big_quotients;
+    for (0..cases.len + 4096) |index| {
         const x = if (index < cases.len) cases[index] else prng.random().int(u256) % order;
         const split = half_size(x);
         try testing.expect(split.u != 0);
@@ -318,7 +438,30 @@ test "half_size returns a short multiple" {
         const product = (magnitude * x) % order;
         const residue = if (split.u < 0) (order - product) % order else product;
         try testing.expectEqual(@as(u512, split.v), residue);
+        // The same Euclidean sequence as commonware's bit-at-a-time reduction.
+        const expected = half_size_reference(x);
+        try testing.expectEqual(expected.u, split.u);
+        try testing.expectEqual(expected.v, split.v);
     }
+}
+
+/// commonware's `half_size`, one shifted subtraction per quotient bit.
+fn half_size_reference(x: u256) struct { u: i128, v: u128 } {
+    var r0: u256 = order;
+    var t0: i128 = 0;
+    var r1: u256 = x;
+    var t1: i128 = 1;
+    while (256 - @as(u16, @clz(r1)) > 126) {
+        while (r0 >= r1) {
+            var shift: u8 = @intCast(@as(u16, @clz(r1)) - @clz(r0));
+            if (r0 < r1 << shift) shift -= 1;
+            r0 -= r1 << shift;
+            t0 -= t1 << @intCast(shift);
+        }
+        std.mem.swap(u256, &r0, &r1);
+        std.mem.swap(i128, &t0, &t1);
+    }
+    return .{ .u = t1, .v = @intCast(r1) };
 }
 
 test "naf digits sum to the value and are odd and bounded" {
