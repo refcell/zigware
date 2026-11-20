@@ -13,11 +13,7 @@ pub fn Tests(comptime h: type) type {
         const epoch = h.default_epoch;
 
         fn run(comptime body: fn (Ctx) anyerror!void) !void {
-            var runner = try runtime.deterministic.Runner.init(testing.allocator, .{
-                .timeout_ns = 10 * std.time.ns_per_s,
-            });
-            defer runner.deinit();
-            try try runner.start_context(body, .{});
+            try h.soak(10 * std.time.ns_per_s, body);
         }
 
         /// Waits for our vote of `kind` at `view`, skipping other batcher messages.
@@ -155,11 +151,7 @@ pub fn Tests(comptime h: type) type {
         }
 
         fn run_long(comptime body: fn (Ctx) anyerror!void) !void {
-            var runner = try runtime.deterministic.Runner.init(testing.allocator, .{
-                .timeout_ns = 30 * std.time.ns_per_s,
-            });
-            defer runner.deinit();
-            try try runner.start_context(body, .{});
+            try h.soak(30 * std.time.ns_per_s, body);
         }
 
         // commonware finalize_resumes_after_same_term_heal: a leader-timeout nullify at view 1

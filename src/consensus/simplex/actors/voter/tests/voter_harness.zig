@@ -137,6 +137,19 @@ pub fn Harness(comptime F: type) type {
     return struct {
         pub const fixture_type = F;
 
+        /// Runs `body` on a deterministic runner with `timeout_ns`, once on the default seed
+        /// and once more per extra `-Dfuzz-soak` round, each on its own seed mixed with
+        /// `-Dfuzz-seed` (`runtime.deterministic.soak`, which prints the replay seed).
+        pub fn soak(timeout_ns: u64, comptime body: fn (Ctx) anyerror!void) !void {
+            const SoakRound = struct {
+                fn run(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+                    try try runner.start_context(body, .{});
+                }
+            };
+            const config: runtime.deterministic.Config = .{ .timeout_ns = timeout_ns };
+            try runtime.deterministic.soak(std.testing.allocator, config, {}, SoakRound.run);
+        }
+
         /// Skips the calling test unless it runs on this fixture.
         pub fn covers(comptime coverage: Coverage) error{SkipZigTest}!void {
             if (!comptime runs(F, coverage)) return error.SkipZigTest;
@@ -1436,11 +1449,7 @@ pub fn Harness(comptime F: type) type {
         }
 
         test "voter harness starts at genesis and announces view 1" {
-            var runner = try runtime.deterministic.Runner.init(std.testing.allocator, .{
-                .timeout_ns = 20 * std.time.ns_per_s,
-            });
-            defer runner.deinit();
-            try try runner.start_context(struct {
+            try soak(20 * std.time.ns_per_s, struct {
                 fn body(ctx: Ctx) anyerror!void {
                     var net: Network = undefined;
                     try net.start(ctx, 5, "voter_harness");
@@ -1453,7 +1462,7 @@ pub fn Harness(comptime F: type) type {
                     try std.testing.expect(message == .update);
                     try std.testing.expectEqual(@as(u64, 1), message.update.current.get());
                 }
-            }.body, .{});
+            }.body);
         }
     };
 }

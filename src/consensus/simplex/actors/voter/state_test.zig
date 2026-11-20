@@ -144,10 +144,15 @@ pub fn timeout_count(state: *State, view: View, reason: TimeoutReason) u64 {
     return counter.get();
 }
 
+/// Runs `function` on a deterministic runner per `-Dfuzz-soak` round
+/// (`runtime.deterministic.soak`).
 pub fn run(comptime function: fn (Io) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start(function, .{runner.io()}));
+    const SoakRound = struct {
+        fn run(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start(function, .{runner.io()}));
+        }
+    };
+    try runtime.deterministic.soak(gpa, .{}, {}, SoakRound.run);
 }
 
 pub fn expect_err(result: anytype, expected: state_mod.ParentPayloadError) !void {

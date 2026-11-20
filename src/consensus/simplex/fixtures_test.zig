@@ -783,14 +783,16 @@ fn unclean_run(comptime F: type, ctx: Context, required: u64) !bool {
 /// first crashes storage, keeping only synced journal contents) until one run finalizes
 /// `required` views on all of them.
 fn unclean_shutdown(comptime F: type) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{ .seed = 0 });
-    defer runner.deinit();
-    const restarts_max = 200;
-    const required: u64 = if (full) 100 else 15;
-    const restarts = for (0..restarts_max) |restart| {
-        if (try (try runner.start_context(UncleanRun(F).run, .{required}))) break restart;
-    } else return error.TestUnexpectedResult;
-    try testing.expect(restarts > 0);
+    try runtime.deterministic.soak(gpa, .{ .seed = 0 }, {}, struct {
+        fn run(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            const restarts_max = 200;
+            const required: u64 = if (full) 100 else 15;
+            const restarts = for (0..restarts_max) |restart| {
+                if (try (try runner.start_context(UncleanRun(F).run, .{required}))) break restart;
+            } else return error.TestUnexpectedResult;
+            try testing.expect(restarts > 0);
+        }
+    }.run);
 }
 
 /// commonware `slow_and_lossy_links_seeded`: the run's auditor state.
@@ -847,10 +849,11 @@ fn run_all(comptime scenario: anytype, args: anytype) !void {
             fn call(ctx: Context, inner: @TypeOf(args)) !void {
                 return @call(.auto, scenario, .{ F, ctx } ++ inner);
             }
+            fn run(inner: @TypeOf(args), runner: *runtime.deterministic.Runner) anyerror!void {
+                try (try runner.start_context(call, .{inner}));
+            }
         };
-        var runner = try runtime.deterministic.Runner.init(gpa, .{ .seed = 0 });
-        defer runner.deinit();
-        try (try runner.start_context(Bound.call, .{args}));
+        try runtime.deterministic.soak(gpa, .{ .seed = 0 }, args, Bound.run);
     }
 }
 

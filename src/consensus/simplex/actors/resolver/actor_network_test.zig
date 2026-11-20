@@ -620,10 +620,15 @@ test "resolver actor member without a share does not fetch from itself" {
     try run(member_without_share, .{});
 }
 
+/// Runs `scenario` with `args` on a deterministic runner per `-Dfuzz-soak` round, the first on
+/// seed 0 (`runtime.deterministic.soak`).
 fn run(comptime scenario: anytype, args: anytype) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{ .seed = 0 });
-    defer runner.deinit();
-    try (try runner.start_context(scenario, args));
+    const SoakRound = struct {
+        fn run(round_args: @TypeOf(args), runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start_context(scenario, round_args));
+        }
+    };
+    try runtime.deterministic.soak(gpa, .{ .seed = 0 }, args, SoakRound.run);
 }
 
 test "resolver actor targeted fetch does not restrict existing backfill" {

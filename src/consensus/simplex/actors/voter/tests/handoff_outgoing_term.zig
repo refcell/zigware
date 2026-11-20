@@ -13,11 +13,7 @@ pub fn Tests(comptime h: type) type {
         const epoch = h.default_epoch;
 
         fn run(comptime body: fn (Ctx) anyerror!void) !void {
-            var runner = try runtime.deterministic.Runner.init(testing.allocator, .{
-                .timeout_ns = 60 * std.time.ns_per_s,
-            });
-            defer runner.deinit();
-            try try runner.start_context(body, .{});
+            try h.soak(60 * std.time.ns_per_s, body);
         }
 
         /// commonware `OutgoingTermHandoff`. Must not move after `start`.

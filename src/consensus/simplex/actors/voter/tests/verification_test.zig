@@ -15,11 +15,7 @@ pub fn Tests(comptime h: type) type {
         const RoundRobin = @FieldType(h.Options, "elector");
 
         fn run(timeout_s: u64, comptime body: fn (Ctx) anyerror!void) !void {
-            var runner = try runtime.deterministic.Runner.init(testing.allocator, .{
-                .timeout_ns = timeout_s * std.time.ns_per_s,
-            });
-            defer runner.deinit();
-            try try runner.start_context(body, .{});
+            try h.soak(timeout_s * std.time.ns_per_s, body);
         }
 
         /// The leader `elector` picks for `view` among `n` validators.

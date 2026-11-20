@@ -15,11 +15,7 @@ pub fn Tests(comptime h: type) type {
         const epoch = h.default_epoch;
 
         fn run(timeout_s: u64, comptime body: fn (Ctx) anyerror!void) !void {
-            var runner = try runtime.deterministic.Runner.init(testing.allocator, .{
-                .timeout_ns = timeout_s * std.time.ns_per_s,
-            });
-            defer runner.deinit();
-            try try runner.start_context(body, .{});
+            try h.soak(timeout_s * std.time.ns_per_s, body);
         }
 
         /// The voter of these tests: a 500 ms leader timeout, 1 s otherwise, on `partition`.

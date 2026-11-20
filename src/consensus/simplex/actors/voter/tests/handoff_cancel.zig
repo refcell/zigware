@@ -12,11 +12,7 @@ pub fn Tests(comptime h: type) type {
         const Fixture = @import("handoff_fixture.zig").Fixture(h);
 
         fn run(comptime body: fn (Ctx) anyerror!void, timeout_s: u64) !void {
-            var runner = try runtime.deterministic.Runner.init(testing.allocator, .{
-                .timeout_ns = timeout_s * std.time.ns_per_s,
-            });
-            defer runner.deinit();
-            try try runner.start_context(body, .{});
+            try h.soak(timeout_s * std.time.ns_per_s, body);
         }
 
         // commonware test_pipelined_handoff_wait_response_during_certification_sync: a

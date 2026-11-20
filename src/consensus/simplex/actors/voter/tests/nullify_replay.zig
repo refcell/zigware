@@ -13,11 +13,7 @@ pub fn Tests(comptime h: type) type {
         const target = 3;
 
         fn run(comptime body: fn (Ctx) anyerror!void, timeout_s: u64) !void {
-            var runner = try runtime.deterministic.Runner.init(testing.allocator, .{
-                .timeout_ns = timeout_s * std.time.ns_per_s,
-            });
-            defer runner.deinit();
-            try try runner.start_context(body, .{});
+            try h.soak(timeout_s * std.time.ns_per_s, body);
         }
 
         fn options(partition: []const u8) h.Options {

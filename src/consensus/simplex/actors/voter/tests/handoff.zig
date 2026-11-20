@@ -13,11 +13,7 @@ pub fn Tests(comptime h: type) type {
         const Fixture = @import("handoff_fixture.zig").Fixture(h);
 
         fn run(comptime body: fn (Ctx) anyerror!void) !void {
-            var runner = try runtime.deterministic.Runner.init(testing.allocator, .{
-                .timeout_ns = 20 * std.time.ns_per_s,
-            });
-            defer runner.deinit();
-            try try runner.start_context(body, .{});
+            try h.soak(20 * std.time.ns_per_s, body);
         }
 
         /// Relays and hands the voter `sender`'s proposal at `view` over `view - 1`,

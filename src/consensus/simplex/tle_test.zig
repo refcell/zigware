@@ -224,9 +224,12 @@ fn run_variant(comptime V: type) !void {
             return run(V, ctx);
         }
     }.call;
-    var runner = try runtime.deterministic.Runner.init(gpa, .{ .seed = 0 });
-    defer runner.deinit();
-    try (try runner.start_context(scenario, .{}));
+    const SoakRound = struct {
+        fn run(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start_context(scenario, .{}));
+        }
+    };
+    try runtime.deterministic.soak(gpa, .{ .seed = 0 }, {}, SoakRound.run);
 }
 
 test "tle: the target round's seed decrypts a message encrypted before it" {

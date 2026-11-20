@@ -15,11 +15,7 @@ pub fn Tests(comptime h: type) type {
         const n = 4;
 
         fn run(comptime body: fn (Ctx) anyerror!void) !void {
-            var runner = try runtime.deterministic.Runner.init(testing.allocator, .{
-                .timeout_ns = 5 * std.time.ns_per_s,
-            });
-            defer runner.deinit();
-            try try runner.start_context(body, .{});
+            try h.soak(5 * std.time.ns_per_s, body);
         }
 
         fn options(local: usize, scope: []const u8) h.Options {

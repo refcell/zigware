@@ -359,15 +359,17 @@ pub fn Suite(comptime F: type) type {
 
         test "unclean shutdown with a stable leader optimistic" {
             if (comptime !ed25519 or !slow_variants) return error.SkipZigTest;
-            var runner = try runtime.deterministic.Runner.init(E.gpa, .{ .seed = 0 });
-            defer runner.deinit();
-            const restarts_max = 200;
-            const required: u64 = if (E.quick) 15 else 100;
-            const args = .{ required, optimistic_terms() };
-            const restarts = for (0..restarts_max) |restart| {
-                if (try (try runner.start_context(E.unclean_run, args))) break restart;
-            } else return error.TestUnexpectedResult;
-            try testing.expect(restarts > 0);
+            try runtime.deterministic.soak(E.gpa, .{ .seed = 0 }, {}, struct {
+                fn run(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+                    const restarts_max = 200;
+                    const required: u64 = if (E.quick) 15 else 100;
+                    const args = .{ required, optimistic_terms() };
+                    const restarts = for (0..restarts_max) |restart| {
+                        if (try (try runner.start_context(E.unclean_run, args))) break restart;
+                    } else return error.TestUnexpectedResult;
+                    try testing.expect(restarts > 0);
+                }
+            }.run);
         }
 
         test "backfill with a stable leader optimistic" {

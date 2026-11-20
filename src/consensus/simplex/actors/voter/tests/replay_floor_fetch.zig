@@ -246,15 +246,11 @@ pub fn Tests(comptime h: type) type {
         }
 
         fn run_case(comptime case: Case) !void {
-            var runner = try runtime.deterministic.Runner.init(testing.allocator, .{
-                .timeout_ns = 30 * std.time.ns_per_s,
-            });
-            defer runner.deinit();
-            try try runner.start_context(struct {
+            try h.soak(30 * std.time.ns_per_s, struct {
                 fn body(ctx: Ctx) anyerror!void {
                     try case_body(ctx, case);
                 }
-            }.body, .{});
+            }.body);
         }
 
         fn case_body(ctx: Ctx, case: Case) !void {

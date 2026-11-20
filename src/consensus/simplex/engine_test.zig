@@ -783,9 +783,11 @@ pub fn Suite(comptime F: type) type {
             var subscriber = collector.subscriber();
             subscriber.level = .debug;
             const config: runtime.deterministic.Config = .{ .seed = 0, .subscriber = subscriber };
-            var runner = try runtime.deterministic.Runner.init(gpa, config);
-            defer runner.deinit();
-            try (try runner.start_context(all_online, .{ 4, 5 }));
+            try runtime.deterministic.soak(gpa, config, {}, struct {
+                fn run(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+                    try (try runner.start_context(all_online, .{ 4, 5 }));
+                }
+            }.run);
             try collector.get_by_level(.info).expect_message_exact("consensus initialized");
             try collector.get_by_level(.debug).expect_message_exact("broadcasting finalization");
             try collector.get_by_level(.debug).expect_message_exact("broadcasting notarize");
@@ -1472,9 +1474,11 @@ pub fn Suite(comptime F: type) type {
 
         test "engine: a voter storage fault ends the engine with an error" {
             if (comptime !fixture_enabled) return error.SkipZigTest;
-            var runner = try runtime.deterministic.Runner.init(gpa, .{ .seed = 0 });
-            defer runner.deinit();
-            try (try runner.start_context(voter_storage_fault_scenario, .{&runner}));
+            try runtime.deterministic.soak(gpa, .{ .seed = 0 }, {}, struct {
+                fn run(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+                    try (try runner.start_context(voter_storage_fault_scenario, .{runner}));
+                }
+            }.run);
         }
 
         /// commonware `attributable_reporter_filtering`: every engine reports through the
@@ -1664,16 +1668,19 @@ pub fn Suite(comptime F: type) type {
 
         test "unclean shutdown: repeated crashes recover from the journal" {
             if (comptime !primary) return error.SkipZigTest;
-            var runner = try runtime.deterministic.Runner.init(gpa, .{ .seed = 0 });
-            defer runner.deinit();
-            const restarts_max = 200;
-            // Each start after the first crashes storage, keeping only synced journal contents.
-            const restarts = for (0..restarts_max) |restart| {
-                const required: u64 = if (quick) 15 else 100;
-                const args = .{ required, RoundRobin.default() };
-                if (try (try runner.start_context(unclean_run, args))) break restart;
-            } else return error.TestUnexpectedResult;
-            try testing.expect(restarts > 0);
+            try runtime.deterministic.soak(gpa, .{ .seed = 0 }, {}, struct {
+                fn run(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+                    const restarts_max = 200;
+                    // Each start after the first crashes storage, keeping only synced journal
+                    // contents.
+                    const restarts = for (0..restarts_max) |restart| {
+                        const required: u64 = if (quick) 15 else 100;
+                        const args = .{ required, RoundRobin.default() };
+                        if (try (try runner.start_context(unclean_run, args))) break restart;
+                    } else return error.TestUnexpectedResult;
+                    try testing.expect(restarts > 0);
+                }
+            }.run);
         }
 
         /// commonware `slow_certifiers_finalize_without_nullification`: the last two of five

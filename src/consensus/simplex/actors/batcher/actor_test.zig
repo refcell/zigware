@@ -53,10 +53,15 @@ pub fn proposal(view: u64) types.Proposal(Digest) {
     return .init(.new(.new(0), .new(view)), .new(view - 1), .fill(@intCast(view)));
 }
 
+/// Runs `function` on a deterministic runner per `-Dfuzz-soak` round
+/// (`runtime.deterministic.soak`).
 pub fn run_deterministic(comptime function: fn (Io) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start(function, .{runner.io()}));
+    const SoakRound = struct {
+        fn run(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start(function, .{runner.io()}));
+        }
+    };
+    try runtime.deterministic.soak(gpa, .{}, {}, SoakRound.run);
 }
 
 pub fn notarize_bytes(fixture: anytype, signer: usize, view: u64) ![]u8 {

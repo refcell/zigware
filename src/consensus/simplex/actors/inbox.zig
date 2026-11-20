@@ -189,9 +189,10 @@ fn Payload(comptime Source: type) type {
 
 test "inbox: an expired deadline wins over a queued event" {
     const runtime = @import("runtime");
-    var runner = try runtime.deterministic.Runner.init(std.testing.allocator, .{});
-    defer runner.deinit();
-    try try runner.start_context(struct {
+    try runtime.deterministic.soak(std.testing.allocator, .{}, {}, struct {
+        fn run(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start_context(body, .{});
+        }
         const Event = union(enum) { value: u32, closed };
         fn release(_: Event) void {}
         fn body(ctx: runtime.deterministic.Context) anyerror!void {
@@ -210,5 +211,5 @@ test "inbox: an expired deadline wins over a queued event" {
             // With nothing queued, the deadline ends the wait.
             try std.testing.expectEqual(null, try inbox.next_until(now + std.time.ns_per_s));
         }
-    }.body, .{});
+    }.run);
 }
