@@ -3,7 +3,6 @@
 [![Zig](https://img.shields.io/badge/Zig-0.17.1-F7A41D?style=for-the-badge&logo=zig&logoColor=white)](#installation)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey?style=for-the-badge&logo=linux&logoColor=white)](#installation)
 [![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen?style=for-the-badge)](#design)
-[![Status](https://img.shields.io/badge/status-pre--alpha-orange?style=for-the-badge)](#packages)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
 
 zigware is the [Commonware Library](https://github.com/commonwarexyz/monorepo) rewritten from
@@ -88,8 +87,9 @@ encrypted group chat over authenticated p2p, including a session with commonware
 [log](examples/log), four Simplex validators over TCP; [flood](examples/flood), p2p load; and
 [estimator](examples/estimator), simulated consensus latency across AWS regions.
 
-> [!WARNING]
-> zigware is pre-alpha and being ported now. Do not use it in production.
+> [!NOTE]
+> zigware has not been audited and has no tagged releases. Most of commonware's primitives
+> are ALPHA or BETA upstream, and each package's README gives its stability.
 
 ## Packages
 
