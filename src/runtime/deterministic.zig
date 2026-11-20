@@ -1223,10 +1223,88 @@ pub const Runner = struct {
     }
 };
 
+/// How far apart `soak` spaces a base seed's rounds, so callers that soak several small base
+/// seeds (0, 1, 2, ...) never run the same seed twice.
+pub const soak_stride: u64 = 1 << 32;
+
+/// Runs `run(context, &runner)` on `-Dfuzz-soak` fresh runners built from `config`, the
+/// `index`-th seeded `(config.seed + index * soak_stride) ^ -Dfuzz-seed`. A plain
+/// `zig build test` runs once on `config.seed`. A failing round prints its runner seed and the
+/// flag that replays it alone at the default soak, `-Dfuzz-seed=<seed ^ config.seed>`, then
+/// returns the error. `run` starts the runner itself, so it can reach `runner.network()` or
+/// swap a test's global `Io`.
+pub fn soak(
+    gpa: std.mem.Allocator,
+    config: Config,
+    context: anytype,
+    comptime run: fn (@TypeOf(context), *Runner) anyerror!void,
+) anyerror!void {
+    const rounds: u64 = build_options.fuzz_soak;
+    assert(rounds > 0);
+    for (0..rounds) |index| {
+        var round = config;
+        round.seed = (config.seed +% index *% soak_stride) ^ build_options.fuzz_seed;
+        assert(index > 0 or build_options.fuzz_seed != 0 or round.seed == config.seed);
+        soak_round(gpa, round, context, run) catch |err| {
+            std.debug.print("deterministic: runner seed={d} failed (replay: -Dfuzz-seed={d})\n", .{
+                round.seed, round.seed ^ config.seed,
+            });
+            return err;
+        };
+    }
+}
+
+fn soak_round(
+    gpa: std.mem.Allocator,
+    config: Config,
+    context: anytype,
+    comptime run: fn (@TypeOf(context), *Runner) anyerror!void,
+) anyerror!void {
+    var runner = try Runner.init(gpa, config);
+    defer runner.deinit();
+    assert(runner.config.seed == config.seed);
+    try run(context, &runner);
+}
+
 const testing = std.testing;
 
 fn test_runner(config: Config) !Runner {
     return Runner.init(testing.allocator, config);
+}
+
+test "soak runs -Dfuzz-soak rounds, the first on the base seed when -Dfuzz-seed is 0" {
+    const Seeds = struct {
+        list: std.ArrayList(u64) = .empty,
+
+        fn record(seeds: *@This(), runner: *Runner) anyerror!void {
+            try seeds.list.append(testing.allocator, runner.config.seed);
+            try (try runner.start(struct {
+                fn run(io: Io) !void {
+                    try io.sleep(.fromMilliseconds(1), .awake);
+                }
+            }.run, .{runner.io()}));
+        }
+    };
+    var seeds: Seeds = .{};
+    defer seeds.list.deinit(testing.allocator);
+    try soak(testing.allocator, .{ .seed = 7 }, &seeds, Seeds.record);
+    try testing.expectEqual(@as(usize, build_options.fuzz_soak), seeds.list.items.len);
+    for (seeds.list.items, 0..) |seed, index| {
+        const expected = (7 + index * soak_stride) ^ build_options.fuzz_seed;
+        try testing.expectEqual(@as(u64, expected), seed);
+    }
+}
+
+test "soak returns the first failing round's error" {
+    const Count = struct {
+        fn fail(rounds: *u32, _: *Runner) anyerror!void {
+            rounds.* += 1;
+            return error.Planted;
+        }
+    };
+    var rounds: u32 = 0;
+    try testing.expectError(error.Planted, soak(testing.allocator, .{}, &rounds, Count.fail));
+    try testing.expectEqual(@as(u32, 1), rounds);
 }
 
 test "root result is returned" {
