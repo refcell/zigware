@@ -85,9 +85,7 @@ fn observes_clean_start_sync_failure(ctx: Context) !void {
 
 test "full sync observes a clean start_sync failure" {
     // commonware `test_full_sync_observes_clean_start_sync_failure`.
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(observes_clean_start_sync_failure, .{}));
+    try soak_body(observes_clean_start_sync_failure);
 }
 
 fn DestroyObservesFailedSync(comptime F: type) type {
@@ -138,16 +136,20 @@ fn DestroyObservesFailedSync(comptime F: type) type {
 
 test "issue 5668: destroy observes a failed sync before removal (mmr)" {
     // commonware `issue_5668_regression_destroy_observes_failed_sync_before_removal_mmr`.
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    const body = DestroyObservesFailedSync(merkle.mmr.Family).body;
-    try (try runner.start_context(body, .{}));
+    try soak_body(DestroyObservesFailedSync(merkle.mmr.Family).body);
 }
 
 test "issue 5668: destroy observes a failed sync before removal (mmb)" {
     // commonware `issue_5668_regression_destroy_observes_failed_sync_before_removal_mmb`.
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    const body = DestroyObservesFailedSync(merkle.mmb.Family).body;
-    try (try runner.start_context(body, .{}));
+    try soak_body(DestroyObservesFailedSync(merkle.mmb.Family).body);
+}
+
+/// Runs `body` on `-Dfuzz-soak` deterministic runners (one, the default seed, in a plain
+/// `zig build test`) through `runtime.deterministic.soak`, which names a failing seed.
+fn soak_body(comptime body: fn (Context) anyerror!void) !void {
+    try runtime.deterministic.soak(gpa, .{}, {}, struct {
+        fn run(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start_context(body, .{}));
+        }
+    }.run);
 }
