@@ -7,6 +7,7 @@ const client_module = @import("client.zig");
 const destroy = @import("destroy.zig");
 const Session = @import("session.zig").Session;
 
+const Home = @import("commands_test.zig").Home;
 const Outcome = client_module.Outcome;
 const Route = client_module.RoutedReplay.Route;
 
@@ -21,51 +22,19 @@ fn none(comptime action: []const u8, comptime set: []const u8) Outcome {
 }
 
 const Harness = struct {
-    tmp: testing.TmpDir,
-    arena_state: std.heap.ArenaAllocator,
+    home: Home,
     replay: client_module.RoutedReplay,
     session: Session,
-    quiet: std.log.Level,
 
     fn init(harness: *Harness, routes: []Route) !void {
-        harness.quiet = testing.log_level;
-        testing.log_level = .err; // Skipped cleanups and failed revokes log warnings.
-        harness.tmp = testing.tmpDir(.{});
-        harness.arena_state = .init(testing.allocator);
-        const arena = harness.arena_state.allocator();
+        harness.home = .init(true); // Skipped cleanups and failed revokes log warnings.
+        const arena = harness.home.arena();
         harness.replay = .{ .routes = routes, .allocator = arena };
-        harness.session = .{
-            .io = testing.io,
-            .gpa = testing.allocator,
-            .arena = arena,
-            .home = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{harness.tmp.sub_path}),
-            .credentials = .{ .access_key_id = "access-key", .secret_access_key = "secret-key" },
-            .transport = harness.replay.transport(),
-        };
+        harness.session = try harness.home.session(harness.replay.transport());
     }
 
     fn deinit(harness: *Harness) void {
-        harness.arena_state.deinit();
-        harness.tmp.cleanup();
-        testing.log_level = harness.quiet;
-    }
-
-    fn write(harness: *Harness, relative: []const u8, data: []const u8) !void {
-        if (std.fs.path.dirname(relative)) |parent| {
-            try harness.tmp.dir.createDirPath(testing.io, parent);
-        }
-        try harness.tmp.dir.writeFile(testing.io, .{ .sub_path = relative, .data = data });
-    }
-
-    fn exists(harness: *Harness, relative: []const u8) bool {
-        harness.tmp.dir.access(testing.io, relative, .{}) catch return false;
-        return true;
-    }
-
-    fn home_path(harness: *Harness, relative: []const u8) ![]const u8 {
-        return std.fmt.allocPrint(harness.arena_state.allocator(), "{s}/{s}", .{
-            harness.session.home, relative,
-        });
+        harness.home.deinit();
     }
 };
 
@@ -167,11 +136,11 @@ test "destroy: tears down every region, then marks the deployment destroyed" {
     var harness: Harness = undefined;
     try harness.init(&routes);
     defer harness.deinit();
-    try harness.write("t.yaml", config_yaml);
-    try harness.write(".commonware_deployer/t/created", "");
-    try harness.write(".commonware_deployer/bucket", "b");
-    try destroy.destroy(&harness.session, .{ .config = try harness.home_path("t.yaml") });
-    try testing.expect(harness.exists(".commonware_deployer/t/destroyed"));
+    try harness.home.write("t.yaml", config_yaml);
+    try harness.home.write(".commonware_deployer/t/created", "");
+    try harness.home.write(".commonware_deployer/bucket", "b");
+    try destroy.destroy(&harness.session, .{ .config = try harness.home.path("t.yaml") });
+    try testing.expect(harness.home.exists(".commonware_deployer/t/destroyed"));
 
     const sent = routes[0].recorded();
     try testing.expectEqual(monitoring_script.len, sent.len);
@@ -199,7 +168,7 @@ test "destroy: by tag reads the regions from the metadata" {
     defer harness.deinit();
     try testing.expectError(error.Failed, destroy.destroy(&harness.session, .{ .tag = "t" }));
     try testing.expectEqualStrings("t", harness.session.failure.?.metadata_not_found);
-    try harness.write(
+    try harness.home.write(
         ".commonware_deployer/t/metadata.yaml",
         "tag: t\ncreated_at: 1\nregions:\n- us-west-2\ninstance_count: 1\n",
     );
@@ -225,11 +194,11 @@ test "destroy: a refused region fails the command and leaves no destroyed marker
     var harness: Harness = undefined;
     try harness.init(&routes);
     defer harness.deinit();
-    try harness.write("t.yaml", config_yaml);
-    try harness.write(".commonware_deployer/t/created", "");
-    const target: destroy.Target = .{ .config = try harness.home_path("t.yaml") };
+    try harness.home.write("t.yaml", config_yaml);
+    try harness.home.write(".commonware_deployer/t/created", "");
+    const target: destroy.Target = .{ .config = try harness.home.path("t.yaml") };
     try testing.expectError(error.Failed, destroy.destroy(&harness.session, target));
     const failure = harness.session.failure.?.aws_ec2;
     try testing.expectEqualStrings("UnauthorizedOperation", failure.service_code().?);
-    try testing.expect(!harness.exists(".commonware_deployer/t/destroyed"));
+    try testing.expect(!harness.home.exists(".commonware_deployer/t/destroyed"));
 }

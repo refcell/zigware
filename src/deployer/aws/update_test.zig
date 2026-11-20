@@ -8,6 +8,7 @@ const services = @import("services.zig");
 const session_module = @import("session.zig");
 const update = @import("update.zig");
 
+const Home = @import("commands_test.zig").Home;
 const Outcome = client_module.Outcome;
 const Route = client_module.RoutedReplay.Route;
 
@@ -84,58 +85,31 @@ pub const Recorder = struct {
 };
 
 const Harness = struct {
-    tmp: testing.TmpDir,
-    arena_state: std.heap.ArenaAllocator,
+    home: Home,
     replay: client_module.RoutedReplay,
     recorder: Recorder,
     session: session_module.Session,
-    quiet: std.log.Level,
 
     fn init(harness: *Harness, routes: []Route) !void {
-        harness.quiet = testing.log_level;
-        testing.log_level = .err; // The unknown instance logs a warning.
-        harness.tmp = testing.tmpDir(.{});
-        harness.arena_state = .init(testing.allocator);
-        const arena = harness.arena_state.allocator();
+        harness.home = .init(true); // The unknown instance logs a warning.
+        const arena = harness.home.arena();
         harness.replay = .{ .routes = routes, .allocator = arena };
         harness.recorder = .{ .allocator = arena };
-        harness.session = .{
-            .io = testing.io,
-            .gpa = testing.allocator,
-            .arena = arena,
-            .home = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{harness.tmp.sub_path}),
-            .credentials = .{ .access_key_id = "access-key", .secret_access_key = "secret-key" },
-            .transport = harness.replay.transport(),
-            .remote = harness.recorder.remote(),
-        };
+        harness.session = try harness.home.session(harness.replay.transport());
+        harness.session.remote = harness.recorder.remote();
     }
 
     fn deinit(harness: *Harness) void {
-        harness.arena_state.deinit();
-        harness.tmp.cleanup();
-        testing.log_level = harness.quiet;
-    }
-
-    fn write(harness: *Harness, relative: []const u8, data: []const u8) !void {
-        if (std.fs.path.dirname(relative)) |parent| {
-            try harness.tmp.dir.createDirPath(testing.io, parent);
-        }
-        try harness.tmp.dir.writeFile(testing.io, .{ .sub_path = relative, .data = data });
-    }
-
-    fn home_path(harness: *Harness, relative: []const u8) ![]const u8 {
-        return std.fmt.allocPrint(harness.arena_state.allocator(), "{s}/{s}", .{
-            harness.session.home, relative,
-        });
+        harness.home.deinit();
     }
 
     /// A deployment `t` with instances `node0` and `node1` in us-west-2 sharing a binary.
     fn deploy(harness: *Harness) ![]const u8 {
-        try harness.write("bin", "binary");
-        try harness.write("conf0", "a");
-        try harness.write("conf1", "b");
+        try harness.home.write("bin", "binary");
+        try harness.home.write("conf0", "a");
+        try harness.home.write("conf1", "b");
         const home = harness.session.home;
-        const config = try std.fmt.allocPrint(harness.arena_state.allocator(),
+        const config = try std.fmt.allocPrint(harness.home.arena(),
             \\tag: t
             \\monitoring:
             \\  instance_type: c7g.medium
@@ -162,11 +136,11 @@ const Harness = struct {
             \\ports: []
             \\
         , .{home});
-        try harness.write("t.yaml", config);
-        try harness.write(".commonware_deployer/t/created", "");
-        try harness.write(".commonware_deployer/t/id_rsa_t", "key");
-        try harness.write(".commonware_deployer/bucket", "b");
-        return harness.home_path("t.yaml");
+        try harness.home.write("t.yaml", config);
+        try harness.home.write(".commonware_deployer/t/created", "");
+        try harness.home.write(".commonware_deployer/t/id_rsa_t", "key");
+        try harness.home.write(".commonware_deployer/bucket", "b");
+        return harness.home.path("t.yaml");
     }
 };
 
@@ -269,11 +243,11 @@ test "update: refuses incomplete deployments and reports SSH failures" {
     try harness.init(&routes);
     defer harness.deinit();
     const config = try harness.deploy();
-    try harness.tmp.dir.deleteFile(testing.io, ".commonware_deployer/t/id_rsa_t");
+    try harness.home.tmp.dir.deleteFile(testing.io, ".commonware_deployer/t/id_rsa_t");
     try testing.expectError(error.Failed, update.update(&harness.session, config, 4));
     try testing.expect(harness.session.failure.? == .private_key_not_found);
     harness.session.failed = .init(false);
-    try harness.write(".commonware_deployer/t/id_rsa_t", "key");
+    try harness.home.write(".commonware_deployer/t/id_rsa_t", "key");
     harness.recorder.fail_on = "rm -f";
     try testing.expectError(error.Failed, update.update(&harness.session, config, 4));
     try testing.expect(harness.session.failure.? == .ssh_failed);

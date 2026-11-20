@@ -8,6 +8,7 @@ const client_module = @import("client.zig");
 const profile = @import("profile.zig");
 const services = @import("services.zig");
 const Harness = @import("commands_test.zig").Harness;
+const expect_failure = @import("commands_test.zig").expect_failure;
 const Recorder = @import("update_test.zig").Recorder;
 
 const Outcome = client_module.Outcome;
@@ -46,13 +47,13 @@ const arm64 = respond(200, "<DescribeInstanceTypesResponse><instanceTypeSet><ite
 
 /// A created deployment `t` with its key, and a debug binary at `bin`.
 fn deployment(harness: *Harness, recorder: *Recorder) !void {
-    recorder.* = .{ .allocator = harness.arena_state.allocator() };
+    recorder.* = .{ .allocator = harness.home.arena() };
     harness.session.remote = recorder.remote();
     harness.session.temp = harness.session.home;
-    try harness.write("t.yaml", config_yaml);
-    try harness.write("bin", "debug binary");
-    try harness.write(".commonware_deployer/t/created", "");
-    try harness.write(".commonware_deployer/t/id_rsa_t", "key");
+    try harness.home.write("t.yaml", config_yaml);
+    try harness.home.write("bin", "debug binary");
+    try harness.home.write(".commonware_deployer/t/created", "");
+    try harness.home.write(".commonware_deployer/t/id_rsa_t", "key");
 }
 
 test "profile: the script matches commonware's" {
@@ -98,8 +99,8 @@ test "profile: captures with samply already cached in S3" {
     defer harness.deinit();
     var recorder: Recorder = undefined;
     try deployment(&harness, &recorder);
-    const config = try harness.home_path("t.yaml");
-    const binary = try harness.home_path("bin");
+    const config = try harness.home.path("t.yaml");
+    const binary = try harness.home.path("bin");
     const captured = try profile.capture(&harness.session, config, "node0", 30, binary);
 
     const sent = harness.sent();
@@ -116,14 +117,14 @@ test "profile: captures with samply already cached in S3" {
     try testing.expectEqual(@as(usize, 2), lines.len);
     try testing.expect(std.mem.startsWith(u8, lines[0], "1.2.3.4 set -e\n"));
     try testing.expect(std.mem.indexOf(u8, lines[0], "X-Amz-Signature=") != null);
-    const scp = try std.fmt.allocPrint(harness.arena_state.allocator(), "1.2.3.4 scp {s} {s}", .{
+    const scp = try std.fmt.allocPrint(harness.home.arena(), "1.2.3.4 scp {s} {s}", .{
         profile.remote_profile_path, captured.profile_path,
     });
     try testing.expectEqualStrings(scp, lines[1]);
-    const prefix = try harness.home_path("profile-node0-");
+    const prefix = try harness.home.path("profile-node0-");
     try testing.expect(std.mem.startsWith(u8, captured.profile_path, prefix));
     try testing.expect(std.mem.endsWith(u8, captured.profile_path, ".json"));
-    const copy = try std.fs.path.join(harness.arena_state.allocator(), &.{
+    const copy = try std.fs.path.join(harness.home.arena(), &.{
         captured.symbol_dir, "binary",
     });
     const limit: std.Io.Limit = .limited(64);
@@ -149,8 +150,8 @@ test "profile: downloads samply through redirects and caches it when S3 lacks it
     defer harness.deinit();
     var recorder: Recorder = undefined;
     try deployment(&harness, &recorder);
-    const config = try harness.home_path("t.yaml");
-    _ = try profile.capture(&harness.session, config, "node0", 5, try harness.home_path("bin"));
+    const config = try harness.home.path("t.yaml");
+    _ = try profile.capture(&harness.session, config, "node0", 5, try harness.home.path("bin"));
     const sent = harness.sent();
     try testing.expectEqual(@as(usize, 8), sent.len);
     try testing.expectEqualStrings("github.com", sent[4].host);
@@ -170,24 +171,24 @@ test "profile: refuses unknown, incomplete, destroyed, and keyless deployments" 
         "</DescribeInstancesResponse>")});
     defer harness.deinit();
     const session = &harness.session;
-    try harness.write("t.yaml", config_yaml);
-    try harness.write("bin", "debug binary");
-    const config = try harness.home_path("t.yaml");
-    const binary = try harness.home_path("bin");
+    try harness.home.write("t.yaml", config_yaml);
+    try harness.home.write("bin", "debug binary");
+    const config = try harness.home.path("t.yaml");
+    const binary = try harness.home.path("bin");
     try testing.expectError(error.Failed, profile.capture(session, config, "x", 1, binary));
-    try harness.expect_failure("instance not found: x");
+    try expect_failure(&harness.session, "instance not found: x");
     try testing.expectError(error.Failed, profile.capture(session, config, "node0", 1, binary));
-    try harness.expect_failure("deployment is not complete: t");
-    try harness.write(".commonware_deployer/t/created", "");
-    try harness.write(".commonware_deployer/t/destroyed", "");
+    try expect_failure(&harness.session, "deployment is not complete: t");
+    try harness.home.write(".commonware_deployer/t/created", "");
+    try harness.home.write(".commonware_deployer/t/destroyed", "");
     try testing.expectError(error.Failed, profile.capture(session, config, "node0", 1, binary));
-    try harness.expect_failure("deployment already destroyed: t");
-    try harness.tmp.dir.deleteFile(testing.io, ".commonware_deployer/t/destroyed");
+    try expect_failure(&harness.session, "deployment already destroyed: t");
+    try harness.home.tmp.dir.deleteFile(testing.io, ".commonware_deployer/t/destroyed");
     try testing.expectError(error.Failed, profile.capture(session, config, "node0", 1, binary));
-    try harness.expect_failure("private key not found");
-    try harness.write(".commonware_deployer/t/id_rsa_t", "key");
+    try expect_failure(&harness.session, "private key not found");
+    try harness.home.write(".commonware_deployer/t/id_rsa_t", "key");
     try testing.expectError(error.Failed, profile.capture(session, config, "node0", 1, binary));
-    try harness.expect_failure("instance not found: node0");
+    try expect_failure(&harness.session, "instance not found: node0");
     try testing.expectEqual(@as(usize, 1), harness.sent().len);
 }
 
@@ -201,9 +202,9 @@ test "download: retries failed attempts, then fails the command" {
     try harness.init(&outcomes);
     defer harness.deinit();
     const url = "https://example.com/file";
-    const arena = harness.arena_state.allocator();
+    const arena = harness.home.arena();
     try testing.expectError(error.Failed, harness.session.download(arena, url));
-    try harness.expect_failure("download failed: " ++ url);
+    try expect_failure(&harness.session, "download failed: " ++ url);
     try testing.expectEqual(outcomes.len, harness.sent().len);
 }
 
@@ -217,7 +218,7 @@ test "download: a relative redirect stays on the host; a body arrives after a fa
     } } };
     try harness.init(&.{ .io_failure, redirect, respond(200, "data") });
     defer harness.deinit();
-    const arena = harness.arena_state.allocator();
+    const arena = harness.home.arena();
     const body = try harness.session.download(arena, "https://h.example");
     try testing.expectEqualStrings("data", body);
     const sent = harness.sent();

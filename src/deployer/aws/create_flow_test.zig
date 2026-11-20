@@ -12,7 +12,9 @@ const services = @import("services.zig");
 const session_module = @import("session.zig");
 const Recorder = @import("update_test.zig").Recorder;
 
+const Home = @import("commands_test.zig").Home;
 const Outcome = client_module.Outcome;
+const expect_failure = @import("commands_test.zig").expect_failure;
 const Route = client_module.RoutedReplay.Route;
 
 fn ok(body: []const u8) Outcome {
@@ -63,61 +65,35 @@ const Local = struct {
 };
 
 const Harness = struct {
-    tmp: testing.TmpDir,
-    arena_state: std.heap.ArenaAllocator,
+    home: Home,
     replay: client_module.RoutedReplay,
     recorder: Recorder,
     local: Local = .{},
     session: session_module.Session,
-    quiet: std.log.Level,
 
     fn init(harness: *Harness, routes: []Route) !void {
-        harness.quiet = testing.log_level;
-        testing.log_level = .err; // Failure paths log warnings.
-        harness.tmp = testing.tmpDir(.{});
-        harness.arena_state = .init(testing.allocator);
-        const arena = harness.arena_state.allocator();
+        harness.home = .init(true); // Failure paths log warnings.
+        const arena = harness.home.arena();
         harness.replay = .{ .routes = routes, .allocator = arena };
         harness.recorder = .{ .allocator = arena };
         harness.local = .{};
-        harness.session = .{
-            .io = testing.io,
-            .gpa = testing.allocator,
-            .arena = arena,
-            .home = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}", .{harness.tmp.sub_path}),
-            .credentials = .{ .access_key_id = "access-key", .secret_access_key = "secret-key" },
-            .transport = harness.replay.transport(),
-            .remote = harness.recorder.remote(),
-            .local = harness.local.local(),
-        };
-        try harness.write(".commonware_deployer/bucket", "b");
-        try harness.write("bin", "binary");
-        try harness.write("conf", "config");
-        try harness.write("dashboard.json", "{}");
+        harness.session = try harness.home.session(harness.replay.transport());
+        harness.session.remote = harness.recorder.remote();
+        harness.session.local = harness.local.local();
+        try harness.home.write(".commonware_deployer/bucket", "b");
+        try harness.home.write("bin", "binary");
+        try harness.home.write("conf", "config");
+        try harness.home.write("dashboard.json", "{}");
     }
 
     fn deinit(harness: *Harness) void {
-        harness.arena_state.deinit();
-        harness.tmp.cleanup();
-        testing.log_level = harness.quiet;
-    }
-
-    fn write(harness: *Harness, relative: []const u8, data: []const u8) !void {
-        if (std.fs.path.dirname(relative)) |parent| {
-            try harness.tmp.dir.createDirPath(testing.io, parent);
-        }
-        try harness.tmp.dir.writeFile(testing.io, .{ .sub_path = relative, .data = data });
-    }
-
-    fn read(harness: *Harness, relative: []const u8) ![]const u8 {
-        const arena = harness.arena_state.allocator();
-        return harness.tmp.dir.readFileAlloc(testing.io, relative, arena, .limited(1 << 20));
+        harness.home.deinit();
     }
 
     /// A configuration with one binary instance in `region`, its files in the home.
     fn config(harness: *Harness, tag: []const u8, region: []const u8) ![]const u8 {
         const home = harness.session.home;
-        const text = try std.fmt.allocPrint(harness.arena_state.allocator(),
+        const text = try std.fmt.allocPrint(harness.home.arena(),
             \\tag: {s}
             \\monitoring:
             \\  instance_type: c7g.medium
@@ -136,17 +112,8 @@ const Harness = struct {
             \\ports: []
             \\
         , .{ tag, home, region, home, home });
-        try harness.write("config.yaml", text);
-        return std.fmt.allocPrint(harness.arena_state.allocator(), "{s}/config.yaml", .{home});
-    }
-
-    fn expect_failure(harness: *Harness, expected: []const u8) !void {
-        var buffer: [256]u8 = undefined;
-        var writer: Io.Writer = .fixed(&buffer);
-        try writer.print("{f}", .{harness.session.failure.?});
-        try testing.expectEqualStrings(expected, writer.buffered());
-        harness.session.failure = null;
-        harness.session.failed = .init(false);
+        try harness.home.write("config.yaml", text);
+        return std.fmt.allocPrint(harness.home.arena(), "{s}/config.yaml", .{home});
     }
 };
 
@@ -260,10 +227,10 @@ test "create: deploys one region end to end with every object cached" {
         "&IpPermissions.3.ToPort=4318&IpPermissions.3.Groups.1.GroupId=sg-b", sent[25].body);
     for (routes[1].recorded()) |request| try testing.expectEqualStrings("HEAD", request.method);
 
-    try testing.expectEqualStrings("", try harness.read(".commonware_deployer/t/created"));
+    try testing.expectEqualStrings("", try harness.home.read(".commonware_deployer/t/created"));
     const hosts = try aws.Hosts.parse(
-        harness.arena_state.allocator(),
-        try harness.read(".commonware_deployer/t/hosts.yaml"),
+        harness.home.arena(),
+        try harness.home.read(".commonware_deployer/t/hosts.yaml"),
     );
     var buffer: [64]u8 = undefined;
     const private = try std.fmt.bufPrint(&buffer, "{f}", .{hosts.monitoring.private});
@@ -271,13 +238,13 @@ test "create: deploys one region end to end with every object cached" {
     try testing.expectEqual(@as(usize, 1), hosts.hosts.len);
     try testing.expectEqualStrings("node0", hosts.hosts[0].name);
     const metadata = try aws.Metadata.parse(
-        harness.arena_state.allocator(),
-        try harness.read(".commonware_deployer/t/metadata.yaml"),
+        harness.home.arena(),
+        try harness.home.read(".commonware_deployer/t/metadata.yaml"),
     );
     try testing.expectEqual(@as(u64, 1), metadata.instance_count);
-    _ = try harness.read(".commonware_deployer/t/promtail_node0.yml");
-    _ = try harness.read(".commonware_deployer/t/pyroscope-agent_node0.sh");
-    const prometheus = try harness.read(".commonware_deployer/t/prometheus.yml");
+    _ = try harness.home.read(".commonware_deployer/t/promtail_node0.yml");
+    _ = try harness.home.read(".commonware_deployer/t/pyroscope-agent_node0.sh");
+    const prometheus = try harness.home.read(".commonware_deployer/t/prometheus.yml");
     try testing.expect(contains(prometheus, "4.4.4.4"));
 
     // Both instances were set up and every service polled.
@@ -306,20 +273,20 @@ test "create: refuses invalid, disabled, attempted, and keyless deployments" {
     const session = &harness.session;
     const invalid = try harness.config("a b", "us-east-1");
     try testing.expectError(error.Failed, create_flow.create_deployment(session, invalid, 1));
-    try harness.expect_failure("invalid tag (must match [A-Za-z0-9_-]+): a b");
+    try expect_failure(&harness.session, "invalid tag (must match [A-Za-z0-9_-]+): a b");
     // us-west-2 is not enabled; nothing is written.
     const west = try harness.config("t", "us-west-2");
     try testing.expectError(error.Failed, create_flow.create_deployment(session, west, 1));
-    try harness.expect_failure("regions not enabled: [\"us-west-2\"]");
-    const directory = harness.tmp.dir.access(testing.io, ".commonware_deployer/t", .{});
+    try expect_failure(&harness.session, "regions not enabled: [\"us-west-2\"]");
+    const directory = harness.home.tmp.dir.access(testing.io, ".commonware_deployer/t", .{});
     try testing.expectError(error.FileNotFound, directory);
     // ssh-keygen fails after the directory exists, so the tag cannot be retried.
     harness.local.fail_on = "ssh-keygen";
     const config = try harness.config("t", "us-east-1");
     try testing.expectError(error.Failed, create_flow.create_deployment(session, config, 1));
-    try harness.expect_failure("keygen failed");
+    try expect_failure(&harness.session, "keygen failed");
     try testing.expectError(error.Failed, create_flow.create_deployment(session, config, 1));
-    try harness.expect_failure("creation already attempted");
+    try expect_failure(&harness.session, "creation already attempted");
     try testing.expectEqual(script.len, routes[0].recorded().len);
 }
 
@@ -340,11 +307,11 @@ test "images: a missing image is pulled, saved, compressed, and uploaded" {
     try testing.expectEqual(@as(usize, 3), lines.len);
     try testing.expectEqualStrings("docker pull --platform linux/arm64 " ++ image, lines[0]);
     const tar = try std.fmt.allocPrint(
-        harness.arena_state.allocator(),
+        harness.home.arena(),
         "{s}/prom_prometheus_v3.2.0-arm64.tar",
         .{home},
     );
-    const save = try std.fmt.allocPrint(harness.arena_state.allocator(), "docker save " ++
+    const save = try std.fmt.allocPrint(harness.home.arena(), "docker save " ++
         "--platform linux/arm64 " ++ image ++ " -o {s}", .{tar});
     try testing.expectEqualStrings(save, lines[1]);
     try testing.expect(std.mem.startsWith(u8, lines[2], "gzip -f "));
@@ -352,7 +319,7 @@ test "images: a missing image is pulled, saved, compressed, and uploaded" {
     try testing.expectEqualStrings("PUT", sent[2].method);
     try testing.expectEqualStrings("tarball", sent[2].body);
     // The compressed scratch file is removed after the upload.
-    try testing.expectError(error.FileNotFound, harness.tmp.dir.access(
+    try testing.expectError(error.FileNotFound, harness.home.tmp.dir.access(
         testing.io,
         "prom_prometheus_v3.2.0-arm64.tar.gz",
         .{},
@@ -361,6 +328,6 @@ test "images: a missing image is pulled, saved, compressed, and uploaded" {
     harness.local.fail_on = "docker";
     const failed = images.cache_image(session, client, "b", home, image, .x86_64);
     try testing.expectError(error.Failed, failed);
-    try harness.expect_failure("command failed: docker pull --platform linux/amd64 " ++ image ++
-        ": no space left\nstdout");
+    try expect_failure(&harness.session, "command failed: docker pull --platform linux/amd64 " ++
+        image ++ ": no space left\nstdout");
 }
