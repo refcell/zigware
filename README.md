@@ -127,17 +127,19 @@ to its package and lists the dependency order.
 
 Twelve of commonware's criterion benchmarks, run against the zigware benchmark of the same
 name and parameters on the same machine ([docs/BENCHMARKS.md](docs/BENCHMARKS.md) has the
-setup, the commands, and the caveats). Below 1× means zigware is faster.
+setup, the commands, and the caveats). Below 1× means zigware is faster. commonware is built
+with `target-cpu=native`, rounds run in ABBA order, and a row is "faster" only when the median
+of the per-round ratios is below 0.95 with at most n/8 rounds at or above 1.
 
 | bench | zigware / commonware |
 | --- | --- |
-| `codec::lazy::get` (100k shared) | 0.17× |
-| `journal::append_sync` (fixed) / `fixed_append` (10k) / `fixed_replay` (100k) | 0.11× / 0.23× / 0.76× |
-| `buffer_paged::append` (4 KiB) | 0.43× |
-| `bls12381::aggregate_verify_same_message` (1000 keys) / single verify | 0.98× / 0.79× |
-| `sha256::hash_message` (4 KiB / 1 MiB) | 1.11× / 1.12× |
-| `ed25519::signature_verification` / `batch_verify_same_message` (100 keys) | 0.55× / 0.52× |
-| `qmdb::apply_batch` (16384 updates) | 0.97× |
+| `codec::lazy::get` (100k shared) | 0.17× faster |
+| `journal::append_sync` (fixed) / `fixed_append` (10k) / `fixed_replay` (100k) | 0.09× / 0.26× / 0.76×, all faster |
+| `buffer_paged::append` (4 KiB) | 0.46× faster |
+| `bls12381::aggregate_verify_same_message` (1000 keys) / single verify | 1.04× tie / 1.20× slower |
+| `sha256::hash_message` (4 KiB / 1 MiB) | 0.99× / 1.00×, both tie |
+| `ed25519::signature_verification` / `batch_verify_same_message` (100 keys) | 0.86× / 0.94×, both faster |
+| `qmdb::apply_batch` (16384 updates) | 1.14× slower |
 
 End to end, four local [flood](examples/flood) peers over authenticated p2p at
 262144 msg/s each, both built for the native CPU: zigware receives 768–774k msg/s per peer
