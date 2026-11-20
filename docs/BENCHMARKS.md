@@ -221,23 +221,41 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
   tree, counters around the whole apply: `smp_allocator` 177 faults per batch, all in the tip
   copy; `allocator.Heap` 0 in two runs, as it keeps the freed block mapped.
 
-## qmdb: apply_batch, immutable (2026-11-20, storage-qmdb lane)
+## qmdb: every bench group, pinned ABBA (2026-11-20, storage-qmdb lane)
 
-`qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384`, after
-b3528252 (measured as bf0525c8, its tree before the rebase). `bench-compare.sh 8` (ABBA,
-commonware native in target-native), commonware/zigware per round with the load at the round's
-start: 0.970/1.077 ms (1.11×, load 119.6), 1.251/0.879 (0.70×, 56.6), 1.416/0.848 (0.60×, 73.1),
-1.150/0.736 (0.64×, 74.6), 1.038/0.857 (0.83×, 80.2), 1.193/0.849 (0.71×, 92.4), 1.309/0.778
-(0.59×, 74.0), 1.515/0.696 (0.46×, 43.8). Median of the per-round ratios 0.67×, one round of
-eight at or above 1: **faster** (was 2.04×, slower, in the first ABBA round before the fix). Raw
-rounds: docs/bench/storage-qmdb.tsv.
+One row per qmdb group and family, `BENCH_FILTER=qmdb:: BENCH_WARMUP_MS=300
+BENCH_MEASURE_MS=1000 BENCH_SAMPLES=10 bench-compare.sh 8` (commonware's own `sample_size(10)`
+for these groups), on the CCD-pinned bench queue, at ad4d3ac0 (main c7935b0c, same code), after
+the runner plans its samples from wall time as criterion does. Load 0.8 to 78.3. Raw rounds:
+docs/bench/storage-qmdb.tsv. Verdicts: 5 faster, 4 tie, 8 slower.
 
-The time was the snapshot's table inserts: about 520 cycles each, one cache miss per random
-key (rdtsc counters, 8.6M of 9.9M index cycles per batch). `index_diff` now prefetches the
-home slot of the set 16 entries ahead, so a batch's misses overlap. At equal load the same
-counters read 4.40M table cycles per batch before and 1.67M after (1.78 ms to 0.91 ms per
-batch). Commonware joins the inserts with the journal append on one task, which hides only
-I/O waits; zigware still runs them before the append.
+| bench | parameters | commonware | zigware | zigware / commonware | rounds | verdict |
+|---|---|---|---|---|---|---|
+| `qmdb::apply_batch` | `case=direct variant=any::unordered::fixed::mmb chunk=32 updates=16384` | 610 µs | 705 µs | 1.05× | 0.50–1.28× (8) | slower |
+| `qmdb::apply_batch` | `case=direct variant=immutable::fixed::mmb chunk=32 updates=16384` | 423 µs | 1.51 ms | 3.50× | 1.60–3.78× (8) | slower |
+| `qmdb::apply_batch` | `case=direct variant=any::ordered::p256::fixed::mmb chunk=32 updates=16384` | 1.07 ms | 1.02 ms | 0.91× | 0.64–1.21× (8) | tie |
+| `qmdb::apply_batch` | `case=uncomm_ancestor variant=any::unordered::fixed::mmb chunk=32 updates=16384` | 1.63 ms | 1.73 ms | 1.06× | 1.03–1.13× (8) | slower |
+| `qmdb::chained_growth` | `variant=current::unordered::fixed::mmb chunk=32 batches=100` | 1.35 ms | 965 µs | 0.71× | 0.68–0.76× (8) | faster |
+| `qmdb::generate` | `variant=any::unordered::fixed::mmb elements=1000 operations=10000` | 7.9 ms | 7.91 ms | 1.00× | 0.98–1.05× (8) | tie |
+| `qmdb::generate` | `variant=any::ordered::variable::mmb elements=1000 operations=10000` | 12.4 ms | 12.4 ms | 1.01× | 0.99–1.03× (8) | tie |
+| `qmdb::generate` | `variant=current::unordered::fixed::mmb elements=1000 operations=10000` | 8.74 ms | 8.29 ms | 0.96× | 0.93–1.07× (8) | tie |
+| `qmdb::generate` | `variant=keyless::mmb operations=10000` | 5.7 ms | 2.9 ms | 0.51× | 0.50–0.54× (8) | faster |
+| `qmdb::generate` | `variant=store::variable elements=1000 operations=10000` | 6.35 ms | 3.98 ms | 0.63× | 0.62–0.64× (8) | faster |
+| `qmdb::init` | `variant=any::unordered::fixed::mmb cache=0 elements=100000` | 25.1 ms | 11.6 ms | 0.46× | 0.44–0.49× (8) | faster |
+| `qmdb::init` | `variant=current::ordered::fixed::mmb cache=262144 elements=100000` | 15.1 ms | 17.3 ms | 1.15× | 1.08–1.24× (8) | slower |
+| `qmdb::init` | `variant=store::variable cache=0 elements=100000` | 51.2 ms | 27.4 ms | 0.52× | 0.49–0.55× (8) | faster |
+| `qmdb::merkleize` | `v=any::unordered::fixed::mmb k=10000 ch=false s=false cc=false` | 313 µs | 707 µs | 2.27× | 2.21–2.37× (8) | slower |
+| `qmdb::merkleize` | `v=any::ordered::variable::mmr k=10000 ch=true s=false cc=false` | 479 µs | 1.08 ms | 2.22× | 2.18–2.27× (8) | slower |
+| `qmdb::merkleize` | `v=current::unordered::fixed::mmb chunk=32 k=10000 ch=false s=false cc=false` | 369 µs | 736 µs | 1.98× | 1.93–2.15× (8) | slower |
+| `qmdb::merkleize` | `variant=any::unordered::fixed::mmb keys=10000 churn=50 cache_pages=32` | 536 µs | 1.08 ms | 2.01× | 1.92–2.07× (8) | slower |
+
+The immutable `apply_batch` row replaces the 0.67× recorded earlier the same day (8 unpinned
+rounds at load 44 to 120, under the old planner). That run's commonware side read 0.97 to 1.52
+ms, against 0.42 to 0.63 ms here at low load, so its ratio measured commonware under load, not
+zigware's speed. Pinning does not explain the gap: the same binaries on one CCD and on all 32
+CPUs read commonware 0.63/0.63 and 0.60/0.58 ms, zigware 1.65/1.48 and 1.54/1.60 ms (load
+about 10). b3528252's prefetch still halves zigware's table-insert cycles; the rest of the gap is
+open.
 
 ## bls12381: the remaining benches (2026-11-19, bls-math lane)
 

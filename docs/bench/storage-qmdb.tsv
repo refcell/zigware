@@ -1,12 +1,140 @@
 # date: 2026-11-20
-# zigware: bf0525c8
+# zigware: ad4d3ac0
 # commonware: a9ffc25f3
-# method: ABBA rounds=8, --bench --noplot --warm-up-time 1 --measurement-time 3 --sample-size 50 | --bench --warm-up-ms 1000 --measurement-ms 3000 --samples 50, commonware target-cpu=native
-1	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	970290.0	1076600.0	119.56
-2	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	1250600.0	878500.0	56.62
-3	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	1416100.0	848200.0	73.06
-4	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	1150200.0	735990.0	74.55
-5	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	1038100.0	857030.0	80.23
-6	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	1193400.0	848730.0	92.44
-7	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	1309400.0	778040.0	73.95
-8	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	1514700.0	696190.0	43.76
+# method: ABBA rounds=8, --bench --noplot --warm-up-time 0.3 --measurement-time 1 --sample-size 10 | --bench --warm-up-ms 300 --measurement-ms 1000 --samples 10, commonware target-cpu=native
+1	storage	qmdb::apply_batch/case=direct variant=any::unordered::fixed::mmb chunk=32 updates=16384	1621300.0	811050.0	34.20
+1	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	1573900.0	2510800.0	78.30
+1	storage	qmdb::apply_batch/case=direct variant=any::ordered::p256::fixed::mmb chunk=32 updates=16384	2059800.0	1319600.0	53.10
+1	storage	qmdb::apply_batch/case=uncomm_ancestor variant=any::unordered::fixed::mmb chunk=32 updates=16384	1652200.0	1753100.0	41.24
+1	storage	qmdb::chained_growth/variant=current::unordered::fixed::mmb chunk=32 batches=100	1403400.0	964770.0	3.10
+1	storage	qmdb::generate/variant=any::unordered::fixed::mmb elements=1000 operations=10000	7999700.0	8391300.0	2.17
+1	storage	qmdb::generate/variant=any::ordered::variable::mmb elements=1000 operations=10000	12824000.0	12697000.0	1.81
+1	storage	qmdb::generate/variant=current::unordered::fixed::mmb elements=1000 operations=10000	8617500.0	8236200.0	1.44
+1	storage	qmdb::generate/variant=keyless::mmb operations=10000	5723300.0	2893300.0	1.65
+1	storage	qmdb::generate/variant=store::variable elements=1000 operations=10000	6343900.0	3939400.0	0.85
+1	storage	qmdb::init/variant=any::unordered::fixed::mmb cache=0 elements=100000	25226000.0	11573000.0	1.23
+1	storage	qmdb::init/variant=current::ordered::fixed::mmb cache=262144 elements=100000	14746000.0	18221000.0	1.19
+1	storage	qmdb::init/variant=store::variable cache=0 elements=100000	51208000.0	27368000.0	1.07
+1	storage	qmdb::merkleize/v=any::unordered::fixed::mmb k=10000 ch=false s=false cc=false	303630.0	692150.0	1.07
+1	storage	qmdb::merkleize/v=any::ordered::variable::mmr k=10000 ch=true s=false cc=false	472580.0	1047700.0000000001	2.59
+1	storage	qmdb::merkleize/v=current::unordered::fixed::mmb chunk=32 k=10000 ch=false s=false cc=false	351390.0	756260.0	2.28
+1	storage	qmdb::merkleize/variant=any::unordered::fixed::mmb keys=10000 churn=50 cache_pages=32	521990.0	1079200.0	1.52
+2	storage	qmdb::apply_batch/case=direct variant=any::unordered::fixed::mmb chunk=32 updates=16384	615240.0	639750.0	0.99
+2	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	422030.0	1465500.0	1.52
+2	storage	qmdb::apply_batch/case=direct variant=any::ordered::p256::fixed::mmb chunk=32 updates=16384	1082100.0	947090.0	1.32
+2	storage	qmdb::apply_batch/case=uncomm_ancestor variant=any::unordered::fixed::mmb chunk=32 updates=16384	1673500.0	1724000.0	1.10
+2	storage	qmdb::chained_growth/variant=current::unordered::fixed::mmb chunk=32 batches=100	1273000.0	965640.0	1.10
+2	storage	qmdb::generate/variant=any::unordered::fixed::mmb elements=1000 operations=10000	7987800.0	7799900.0	1.57
+2	storage	qmdb::generate/variant=any::ordered::variable::mmb elements=1000 operations=10000	12126000.0	12390000.0	2.74
+2	storage	qmdb::generate/variant=current::unordered::fixed::mmb elements=1000 operations=10000	8872000.0	8331300.000000001	1.19
+2	storage	qmdb::generate/variant=keyless::mmb operations=10000	5701200.0	2892100.0	1.77
+2	storage	qmdb::generate/variant=store::variable elements=1000 operations=10000	6621100.0	4225300.0	1.10
+2	storage	qmdb::init/variant=any::unordered::fixed::mmb cache=0 elements=100000	24878000.0	11519000.0	1.53
+2	storage	qmdb::init/variant=current::ordered::fixed::mmb cache=262144 elements=100000	15321000.0	17259000.0	1.82
+2	storage	qmdb::init/variant=store::variable cache=0 elements=100000	50430000.0	26014000.0	1.99
+2	storage	qmdb::merkleize/v=any::unordered::fixed::mmb k=10000 ch=false s=false cc=false	326320.0	725990.0	2.46
+2	storage	qmdb::merkleize/v=any::ordered::variable::mmr k=10000 ch=true s=false cc=false	484620.0	1081400.0	2.25
+2	storage	qmdb::merkleize/v=current::unordered::fixed::mmb chunk=32 k=10000 ch=false s=false cc=false	380610.0	755700.0	2.17
+2	storage	qmdb::merkleize/variant=any::unordered::fixed::mmb keys=10000 churn=50 cache_pages=32	534600.0	1104700.0	2.21
+3	storage	qmdb::apply_batch/case=direct variant=any::unordered::fixed::mmb chunk=32 updates=16384	603810.0	627510.0	2.20
+3	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	424060.0	1266400.0	3.04
+3	storage	qmdb::apply_batch/case=direct variant=any::ordered::p256::fixed::mmb chunk=32 updates=16384	1071300.0	1038800.0	2.28
+3	storage	qmdb::apply_batch/case=uncomm_ancestor variant=any::unordered::fixed::mmb chunk=32 updates=16384	1639500.0	1729100.0	2.38
+3	storage	qmdb::chained_growth/variant=current::unordered::fixed::mmb chunk=32 batches=100	1384800.0	961240.0	2.70
+3	storage	qmdb::generate/variant=any::unordered::fixed::mmb elements=1000 operations=10000	8204800.000000001	8185700.000000001	3.04
+3	storage	qmdb::generate/variant=any::ordered::variable::mmb elements=1000 operations=10000	12054000.0	12410000.0	2.72
+3	storage	qmdb::generate/variant=current::unordered::fixed::mmb elements=1000 operations=10000	8608100.0	8248600.0	2.57
+3	storage	qmdb::generate/variant=keyless::mmb operations=10000	5616700.0	2897400.0	2.45
+3	storage	qmdb::generate/variant=store::variable elements=1000 operations=10000	6255000.0	3972400.0	2.16
+3	storage	qmdb::init/variant=any::unordered::fixed::mmb cache=0 elements=100000	24829000.0	11371000.0	2.08
+3	storage	qmdb::init/variant=current::ordered::fixed::mmb cache=262144 elements=100000	15287000.0	17267000.0	2.08
+3	storage	qmdb::init/variant=store::variable cache=0 elements=100000	58638000.0	28668000.0	2.76
+3	storage	qmdb::merkleize/v=any::unordered::fixed::mmb k=10000 ch=false s=false cc=false	309800.0	693300.0	5.11
+3	storage	qmdb::merkleize/v=any::ordered::variable::mmr k=10000 ch=true s=false cc=false	533890.0	1162500.0	4.40
+3	storage	qmdb::merkleize/v=current::unordered::fixed::mmb chunk=32 k=10000 ch=false s=false cc=false	367940.0	724530.0	7.36
+3	storage	qmdb::merkleize/variant=any::unordered::fixed::mmb keys=10000 churn=50 cache_pages=32	582140.0	1119700.0	6.74
+4	storage	qmdb::apply_batch/case=direct variant=any::unordered::fixed::mmb chunk=32 updates=16384	622140.0	774450.0	3.20
+4	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	433130.0	1527000.0	2.34
+4	storage	qmdb::apply_batch/case=direct variant=any::ordered::p256::fixed::mmb chunk=32 updates=16384	1074900.0	1000699.9999999999	2.41
+4	storage	qmdb::apply_batch/case=uncomm_ancestor variant=any::unordered::fixed::mmb chunk=32 updates=16384	1634500.0	1843000.0	2.22
+4	storage	qmdb::chained_growth/variant=current::unordered::fixed::mmb chunk=32 batches=100	1454900.0	995070.0	2.51
+4	storage	qmdb::generate/variant=any::unordered::fixed::mmb elements=1000 operations=10000	7939200.0	8199299.999999999	2.31
+4	storage	qmdb::generate/variant=any::ordered::variable::mmb elements=1000 operations=10000	12532000.0	12436000.0	2.61
+4	storage	qmdb::generate/variant=current::unordered::fixed::mmb elements=1000 operations=10000	8943000.0	8638600.0	3.20
+4	storage	qmdb::generate/variant=keyless::mmb operations=10000	5629700.0	3024100.0	2.39
+4	storage	qmdb::generate/variant=store::variable elements=1000 operations=10000	6355600.0	3982300.0	2.69
+4	storage	qmdb::init/variant=any::unordered::fixed::mmb cache=0 elements=100000	24625000.0	11749000.0	2.95
+4	storage	qmdb::init/variant=current::ordered::fixed::mmb cache=262144 elements=100000	14791000.0	17267000.0	4.68
+4	storage	qmdb::init/variant=store::variable cache=0 elements=100000	53123000.0	27574000.0	3.61
+4	storage	qmdb::merkleize/v=any::unordered::fixed::mmb k=10000 ch=false s=false cc=false	316450.0	721500.0	2.91
+4	storage	qmdb::merkleize/v=any::ordered::variable::mmr k=10000 ch=true s=false cc=false	489070.0	1075600.0	2.58
+4	storage	qmdb::merkleize/v=current::unordered::fixed::mmb chunk=32 k=10000 ch=false s=false cc=false	380380.0	766220.0	2.42
+4	storage	qmdb::merkleize/variant=any::unordered::fixed::mmb keys=10000 churn=50 cache_pages=32	557680.0	1149700.0	2.82
+5	storage	qmdb::apply_batch/case=direct variant=any::unordered::fixed::mmb chunk=32 updates=16384	605600.0	770950.0	2.35
+5	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	412560.0	1467900.0	2.78
+5	storage	qmdb::apply_batch/case=direct variant=any::ordered::p256::fixed::mmb chunk=32 updates=16384	1060700.0	1286900.0	2.64
+5	storage	qmdb::apply_batch/case=uncomm_ancestor variant=any::unordered::fixed::mmb chunk=32 updates=16384	1631200.0	1728800.0	3.28
+5	storage	qmdb::chained_growth/variant=current::unordered::fixed::mmb chunk=32 batches=100	1309000.0	965960.0	2.49
+5	storage	qmdb::generate/variant=any::unordered::fixed::mmb elements=1000 operations=10000	7862800.0	7781700.0	2.94
+5	storage	qmdb::generate/variant=any::ordered::variable::mmb elements=1000 operations=10000	12852000.0	13001000.0	2.35
+5	storage	qmdb::generate/variant=current::unordered::fixed::mmb elements=1000 operations=10000	8522600.0	8255500.0	3.44
+5	storage	qmdb::generate/variant=keyless::mmb operations=10000	5688400.0	2893800.0	2.55
+5	storage	qmdb::generate/variant=store::variable elements=1000 operations=10000	6530200.0	4211700.0	2.41
+5	storage	qmdb::init/variant=any::unordered::fixed::mmb cache=0 elements=100000	26204000.0	11630000.0	2.10
+5	storage	qmdb::init/variant=current::ordered::fixed::mmb cache=262144 elements=100000	15844000.0	17045000.0	2.20
+5	storage	qmdb::init/variant=store::variable cache=0 elements=100000	49988000.0	27376000.0	2.28
+5	storage	qmdb::merkleize/v=any::unordered::fixed::mmb k=10000 ch=false s=false cc=false	322330.0	732420.0	2.38
+5	storage	qmdb::merkleize/v=any::ordered::variable::mmr k=10000 ch=true s=false cc=false	479030.0	1085300.0	2.12
+5	storage	qmdb::merkleize/v=current::unordered::fixed::mmb chunk=32 k=10000 ch=false s=false cc=false	364960.0	717630.0	3.25
+5	storage	qmdb::merkleize/variant=any::unordered::fixed::mmb keys=10000 churn=50 cache_pages=32	530000.0	1071400.0	2.75
+6	storage	qmdb::apply_batch/case=direct variant=any::unordered::fixed::mmb chunk=32 updates=16384	606370.0	774150.0	2.98
+6	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	432430.0	1492700.0	2.51
+6	storage	qmdb::apply_batch/case=direct variant=any::ordered::p256::fixed::mmb chunk=32 updates=16384	1070000.0	957170.0	2.42
+6	storage	qmdb::apply_batch/case=uncomm_ancestor variant=any::unordered::fixed::mmb chunk=32 updates=16384	1620100.0	1671700.0	3.91
+6	storage	qmdb::chained_growth/variant=current::unordered::fixed::mmb chunk=32 batches=100	1352000.0	965640.0	2.59
+6	storage	qmdb::generate/variant=any::unordered::fixed::mmb elements=1000 operations=10000	7847800.0	7831600.0	2.30
+6	storage	qmdb::generate/variant=any::ordered::variable::mmb elements=1000 operations=10000	12264000.0	12330000.0	3.19
+6	storage	qmdb::generate/variant=current::unordered::fixed::mmb elements=1000 operations=10000	9195400.0	9821500.0	2.98
+6	storage	qmdb::generate/variant=keyless::mmb operations=10000	5846300.0	3000400.0	2.82
+6	storage	qmdb::generate/variant=store::variable elements=1000 operations=10000	6612900.0	4158500.0	2.39
+6	storage	qmdb::init/variant=any::unordered::fixed::mmb cache=0 elements=100000	25232000.0	12240000.0	2.21
+6	storage	qmdb::init/variant=current::ordered::fixed::mmb cache=262144 elements=100000	15293000.0	17335000.0	2.24
+6	storage	qmdb::init/variant=store::variable cache=0 elements=100000	52668000.0	27456000.0	2.12
+6	storage	qmdb::merkleize/v=any::unordered::fixed::mmb k=10000 ch=false s=false cc=false	311170.0	738460.0	2.22
+6	storage	qmdb::merkleize/v=any::ordered::variable::mmr k=10000 ch=true s=false cc=false	479540.0	1087100.0	2.17
+6	storage	qmdb::merkleize/v=current::unordered::fixed::mmb chunk=32 k=10000 ch=false s=false cc=false	386510.0	747120.0	2.12
+6	storage	qmdb::merkleize/variant=any::unordered::fixed::mmb keys=10000 churn=50 cache_pages=32	538410.0	1079500.0	2.67
+7	storage	qmdb::apply_batch/case=direct variant=any::unordered::fixed::mmb chunk=32 updates=16384	592950.0	631330.0	2.34
+7	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	416140.0	1537200.0	3.07
+7	storage	qmdb::apply_batch/case=direct variant=any::ordered::p256::fixed::mmb chunk=32 updates=16384	1062900.0	1146000.0	4.01
+7	storage	qmdb::apply_batch/case=uncomm_ancestor variant=any::unordered::fixed::mmb chunk=32 updates=16384	1591000.0	1798200.0	2.84
+7	storage	qmdb::chained_growth/variant=current::unordered::fixed::mmb chunk=32 batches=100	1326400.0	958870.0	2.07
+7	storage	qmdb::generate/variant=any::unordered::fixed::mmb elements=1000 operations=10000	7859200.0	7983200.0	2.08
+7	storage	qmdb::generate/variant=any::ordered::variable::mmb elements=1000 operations=10000	12506000.0	12402000.0	2.35
+7	storage	qmdb::generate/variant=current::unordered::fixed::mmb elements=1000 operations=10000	8940800.0	8359299.999999999	2.13
+7	storage	qmdb::generate/variant=keyless::mmb operations=10000	5731000.0	2887700.0	2.00
+7	storage	qmdb::generate/variant=store::variable elements=1000 operations=10000	6292300.0	3955900.0	2.18
+7	storage	qmdb::init/variant=any::unordered::fixed::mmb cache=0 elements=100000	24643000.0	11578000.0	2.12
+7	storage	qmdb::init/variant=current::ordered::fixed::mmb cache=262144 elements=100000	14888000.0	17280000.0	2.79
+7	storage	qmdb::init/variant=store::variable cache=0 elements=100000	51154000.0	26533000.0	2.24
+7	storage	qmdb::merkleize/v=any::unordered::fixed::mmb k=10000 ch=false s=false cc=false	314120.0	692930.0	2.47
+7	storage	qmdb::merkleize/v=any::ordered::variable::mmr k=10000 ch=true s=false cc=false	466140.0	1053700.0	2.49
+7	storage	qmdb::merkleize/v=current::unordered::fixed::mmb chunk=32 k=10000 ch=false s=false cc=false	369210.0	723420.0	2.24
+7	storage	qmdb::merkleize/variant=any::unordered::fixed::mmb keys=10000 churn=50 cache_pages=32	532700.0	1064000.0	2.15
+8	storage	qmdb::apply_batch/case=direct variant=any::unordered::fixed::mmb chunk=32 updates=16384	613610.0	627560.0	2.27
+8	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	409720.0	1547600.0	2.37
+8	storage	qmdb::apply_batch/case=direct variant=any::ordered::p256::fixed::mmb chunk=32 updates=16384	1097400.0	941060.0	2.36
+8	storage	qmdb::apply_batch/case=uncomm_ancestor variant=any::unordered::fixed::mmb chunk=32 updates=16384	1623900.0	1685600.0	2.53
+8	storage	qmdb::chained_growth/variant=current::unordered::fixed::mmb chunk=32 batches=100	1351800.0	964260.0	2.49
+8	storage	qmdb::generate/variant=any::unordered::fixed::mmb elements=1000 operations=10000	7761800.0	7794200.0	2.70
+8	storage	qmdb::generate/variant=any::ordered::variable::mmb elements=1000 operations=10000	12309000.0	12429000.0	2.32
+8	storage	qmdb::generate/variant=current::unordered::fixed::mmb elements=1000 operations=10000	8596300.0	8232699.999999999	2.16
+8	storage	qmdb::generate/variant=keyless::mmb operations=10000	5691200.0	2949400.0	2.33
+8	storage	qmdb::generate/variant=store::variable elements=1000 operations=10000	6281500.0	3932400.0	2.16
+8	storage	qmdb::init/variant=any::unordered::fixed::mmb cache=0 elements=100000	25576000.0	11514000.0	2.10
+8	storage	qmdb::init/variant=current::ordered::fixed::mmb cache=262144 elements=100000	14806000.0	17140000.0	2.07
+8	storage	qmdb::init/variant=store::variable cache=0 elements=100000	50561000.0	25952000.0	2.17
+8	storage	qmdb::merkleize/v=any::unordered::fixed::mmb k=10000 ch=false s=false cc=false	304740.0	692990.0	2.08
+8	storage	qmdb::merkleize/v=any::ordered::variable::mmr k=10000 ch=true s=false cc=false	468390.0	1033199.9999999999	2.04
+8	storage	qmdb::merkleize/v=current::unordered::fixed::mmb chunk=32 k=10000 ch=false s=false cc=false	350350.0	712530.0	2.26
+8	storage	qmdb::merkleize/variant=any::unordered::fixed::mmb keys=10000 churn=50 cache_pages=32	537840.0	1075200.0	2.49
