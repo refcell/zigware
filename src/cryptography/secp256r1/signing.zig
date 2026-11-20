@@ -190,6 +190,8 @@ fn power(
     comptime square: anytype,
     one: T,
 ) T {
+    // The unrolled loop inlines 256 squarings, whose own limb loops unroll at compile time.
+    @setEvalBranchQuota(200_000);
     var powers: [16]T = undefined;
     powers[0] = one;
     powers[1] = base;

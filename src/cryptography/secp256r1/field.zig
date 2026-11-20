@@ -1,53 +1,127 @@
-//! P-256 field arithmetic for verify.zig. Multiplication on x86_64 with BMI2 and ADX runs as
-//! aws-lc's `ecp_nistz256_mul_mont` does it: Montgomery multiplication (R = 2^256) that
-//! interleaves `mulx` with two carry chains (`adcx`, `adox`) and reduces each limb with
-//! shifts, since `-p^-1 = 1 mod 2^64` and `p = 2^256 - 2^224 + 2^192 + 2^96 - 1`. The limbs
-//! are std's (fiat-crypto's) Montgomery limbs, fully reduced, so `mul` returns exactly std's
-//! `Fe.mul`; other builds call std. Addition and subtraction are plain u256 arithmetic, about
-//! twice as fast as std's, with the same limbs. Everything here is branch-free, since
-//! signing.zig runs it on secret values.
+//! P-256 field arithmetic for verify.zig and signing.zig. On x86_64, multiplication and
+//! squaring are word-by-word Montgomery (R = 2^256) in plain Zig, so LLVM schedules the
+//! `mulx`/`adc` chains of neighboring operations together. Each reduction step adds `m p` for
+//! `m` = the low limb with shifts and one multiplication, since `-p^-1 = 1 mod 2^64` and
+//! `p = 2^256 - 2^224 + 2^192 + 2^96 - 1`, as aws-lc's `ecp_nistz256_mul_mont` does; squaring
+//! computes each cross product once. The limbs are std's (fiat-crypto's) Montgomery limbs,
+//! fully reduced, so `mul` and `sq` return exactly std's `Fe.mul` and `Fe.sq`; other targets
+//! call std. Addition and subtraction are plain u256 arithmetic, about twice as fast as std's,
+//! with the same limbs. Everything here is branch-free, since signing.zig runs it on secret
+//! values.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 const Fe = std.crypto.ecc.P256.Fe;
 
-/// The self-hosted backend (Debug on x86_64) does not accept the memory operands.
-const accelerated = builtin.zig_backend == .stage2_llvm and builtin.cpu.arch == .x86_64 and
-    builtin.cpu.has(.x86, .bmi2) and builtin.cpu.has(.x86, .adx);
+/// Targets where the Zig Montgomery multiplication below beats std's (measured on x86_64).
+const accelerated = builtin.cpu.arch == .x86_64;
+
+/// `p`'s limbs, least significant first.
+const modulus_limbs = [4]u64{ 0xffffffffffffffff, 0x00000000ffffffff, 0, 0xffffffff00000001 };
 
 /// `a b` in the field: the same limbs as `a.mul(b)`.
 pub inline fn mul(a: Fe, b: Fe) Fe {
     if (!accelerated) return a.mul(b);
-    var l0: u64 = undefined;
-    var l1: u64 = undefined;
-    var l2: u64 = undefined;
-    var l3: u64 = undefined;
-    asm volatile (mul_text
-        : [l0] "=&{rax}" (l0),
-          [l1] "=&{rcx}" (l1),
-          [l2] "=&{r14}" (l2),
-          [l3] "=&{r11}" (l3),
-        : [a] "r" (&a.limbs),
-          [b] "r" (&b.limbs),
-          // The asm reads `a` and `b` through their pointers.
-        : .{
-          .rdx = true,
-          .r8 = true,
-          .r9 = true,
-          .r10 = true,
-          .r12 = true,
-          .r13 = true,
-          .cc = true,
-          .memory = true,
-        });
-    return .{ .limbs = .{ l0, l1, l2, l3 } };
+    const x = a.limbs;
+    const y = b.limbs;
+    // Limbs 0 to 4 of the running sum; each round adds `x y[i]`, then `m p`, and drops limb 0.
+    var t: [5]u64 = @splat(0);
+    inline for (0..4) |i| {
+        var carry: u64 = 0;
+        inline for (0..4) |k| {
+            const product: u128 = @as(u128, x[k]) * y[i] + t[k] + carry;
+            t[k] = @truncate(product);
+            carry = @truncate(product >> 64);
+        }
+        const top = @addWithOverflow(t[4], carry);
+        const step = reduce_step(t[0], .{ t[1], t[2], t[3], top[0] });
+        t = .{ step.limbs[0], step.limbs[1], step.limbs[2], step.limbs[3], top[1] + step.carry };
+    }
+    return subtract_modulus(t);
 }
 
-/// `a^2` in the field: the same limbs as `a.sq()`. A dedicated squaring (aws-lc's
-/// `sqr_mont`) measured no faster here: the four serial reductions bound both.
+/// `a^2` in the field: the same limbs as `a.sq()`.
 pub inline fn sq(a: Fe) Fe {
-    return mul(a, a);
+    if (!accelerated) return a.sq();
+    const x = a.limbs;
+    var t: [8]u64 = @splat(0);
+    // The cross products `x_i x_j` (i < j), doubled, plus the squares `x_i^2`.
+    inline for (0..3) |i| {
+        var carry: u64 = 0;
+        inline for (i + 1..4) |j| {
+            const product: u128 = @as(u128, x[i]) * x[j] + t[i + j] + carry;
+            t[i + j] = @truncate(product);
+            carry = @truncate(product >> 64);
+        }
+        t[i + 4] = carry;
+    }
+    var shifted: u64 = 0;
+    inline for (1..8) |k| {
+        const limb = t[k];
+        t[k] = (limb << 1) | shifted;
+        shifted = limb >> 63;
+    }
+    var carry: u1 = 0;
+    inline for (0..4) |i| {
+        const square: u128 = @as(u128, x[i]) * x[i];
+        const low = add_carry(t[2 * i], @truncate(square), carry);
+        const high = add_carry(t[2 * i + 1], @truncate(square >> 64), low[1]);
+        t[2 * i] = low[0];
+        t[2 * i + 1] = high[0];
+        carry = high[1];
+    }
+    assert(carry == 0); // Proof: x^2 < 2^512.
+    // Four reduction steps over the 512-bit square, carrying into its upper limbs.
+    var spill: u64 = 0;
+    inline for (0..4) |i| {
+        const step = reduce_step(t[i], t[i + 1 ..][0..4].*);
+        t[i + 1 ..][0..4].* = step.limbs;
+        var rest: u1 = step.carry;
+        inline for (i + 5..8) |k| {
+            const sum = @addWithOverflow(t[k], @as(u64, rest));
+            t[k] = sum[0];
+            rest = sum[1];
+        }
+        spill += rest;
+    }
+    return subtract_modulus(.{ t[4], t[5], t[6], t[7], spill });
+}
+
+const ReduceStep = struct { limbs: [4]u64, carry: u1 };
+
+/// `(m + upper 2^64 + m p) / 2^64` for the low limb `m`, as `upper + m 2^32 + m p_3 2^128`
+/// (the low part `m (p mod 2^128) + m` is `m 2^96`), with its carry out.
+inline fn reduce_step(m: u64, upper: [4]u64) ReduceStep {
+    const high: u128 = @as(u128, m) * modulus_limbs[3];
+    const l1 = add_carry(upper[0], m << 32, 0);
+    const l2 = add_carry(upper[1], m >> 32, l1[1]);
+    const l3 = add_carry(upper[2], @truncate(high), l2[1]);
+    const l4 = add_carry(upper[3], @truncate(high >> 64), l3[1]);
+    return .{ .limbs = .{ l1[0], l2[0], l3[0], l4[0] }, .carry = l4[1] };
+}
+
+inline fn add_carry(a: u64, b: u64, carry: u1) struct { u64, u1 } {
+    const first = @addWithOverflow(a, b);
+    const second = @addWithOverflow(first[0], @as(u64, carry));
+    return .{ second[0], first[1] | second[1] };
+}
+
+/// The value below `2 p` in limbs 0 to 4, less `p` when it is at least `p`, by masking.
+inline fn subtract_modulus(t: [5]u64) Fe {
+    var difference: [4]u64 = undefined;
+    var borrow: u1 = 0;
+    inline for (0..4) |k| {
+        const first = @subWithOverflow(t[k], modulus_limbs[k]);
+        const second = @subWithOverflow(first[0], @as(u64, borrow));
+        difference[k] = second[0];
+        borrow = first[1] | second[1];
+    }
+    const below = @subWithOverflow(t[4], @as(u64, borrow))[1];
+    const keep: u64 = 0 -% @as(u64, below);
+    var result: [4]u64 = undefined;
+    inline for (0..4) |k| result[k] = (t[k] & keep) | (difference[k] & ~keep);
+    return .{ .limbs = result };
 }
 
 /// `a + b`: the same limbs as `a.add(b)` (both fully reduced). Branch-free: signing uses it on
@@ -95,83 +169,6 @@ inline fn wide(a: Fe) u256 {
 inline fn narrow(value: u256) Fe {
     assert(value < Fe.field_order);
     return .{ .limbs = @bitCast(value) };
-}
-
-/// The six accumulator registers; round `i` treats `accumulator[(i + k) % 6]` as limb `k`, so
-/// dropping the reduced low limb renames registers instead of moving them.
-const accumulator = [6][]const u8{ "%%r8", "%%r9", "%%r10", "%%r11", "%%r12", "%%r13" };
-
-fn limb(comptime round: usize, comptime k: usize) []const u8 {
-    comptime assert(k < 6);
-    return accumulator[(round + k) % 6];
-}
-
-const mul_text = product(0) ++ reduce(0) ++ product(1) ++ reduce(1) ++
-    product(2) ++ reduce(2) ++ product(3) ++ reduce(3) ++ subtract_modulus(4);
-
-/// Limbs 0 to 5 += `a b[round]`; limb 5 starts at zero. `r14` holds zero for the carries.
-fn product(comptime round: usize) []const u8 {
-    const b = std.fmt.comptimePrint("{d}(%[b])", .{round * 8});
-    if (round == 0) return "movq " ++ b ++ ", %%rdx\n" ++
-        "mulxq 0(%[a]), " ++ limb(0, 0) ++ ", " ++ limb(0, 1) ++ "\n" ++
-        "mulxq 8(%[a]), %%rax, " ++ limb(0, 2) ++ "\n" ++
-        "mulxq 16(%[a]), %%rcx, " ++ limb(0, 3) ++ "\n" ++
-        "addq %%rax, " ++ limb(0, 1) ++ "\n" ++
-        "mulxq 24(%[a]), %%rax, " ++ limb(0, 4) ++ "\n" ++
-        "adcq %%rcx, " ++ limb(0, 2) ++ "\n" ++
-        "adcq %%rax, " ++ limb(0, 3) ++ "\n" ++
-        "adcq $0, " ++ limb(0, 4) ++ "\n" ++
-        "xorl %%r14d, %%r14d\n" ++
-        "movq %%r14, " ++ limb(0, 5) ++ "\n";
-    var text: []const u8 = "movq " ++ b ++ ", %%rdx\n" ++
-        "xorl %%r14d, %%r14d\n" ++
-        "movq %%r14, " ++ limb(round, 5) ++ "\n";
-    for (0..4) |k| {
-        text = text ++ std.fmt.comptimePrint("mulxq {d}(%[a]), %%rax, %%rcx\n", .{k * 8}) ++
-            "adcxq %%rax, " ++ limb(round, k) ++ "\n" ++
-            "adoxq %%rcx, " ++ limb(round, k + 1) ++ "\n";
-    }
-    return text ++ "adcxq %%r14, " ++ limb(round, 4) ++ "\n" ++
-        "adoxq %%r14, " ++ limb(round, 5) ++ "\n" ++
-        "adcxq %%r14, " ++ limb(round, 5) ++ "\n";
-}
-
-/// Limbs += `m p` for `m` = limb 0, which zeroes limb 0: `m (p mod 2^128) + m = m 2^96`
-/// lands on limbs 1 and 2, and `m p_3` on limbs 3 and 4.
-fn reduce(comptime round: usize) []const u8 {
-    const m = limb(round, 0);
-    return "movabsq $0xffffffff00000001, %%rdx\n" ++
-        "mulxq " ++ m ++ ", %%rax, %%rcx\n" ++
-        "movq " ++ m ++ ", %%r14\n" ++
-        "shlq $32, %%r14\n" ++
-        "movq " ++ m ++ ", %%rdx\n" ++
-        "shrq $32, %%rdx\n" ++
-        "addq %%r14, " ++ limb(round, 1) ++ "\n" ++
-        "adcq %%rdx, " ++ limb(round, 2) ++ "\n" ++
-        "adcq %%rax, " ++ limb(round, 3) ++ "\n" ++
-        "adcq %%rcx, " ++ limb(round, 4) ++ "\n" ++
-        "adcq $0, " ++ limb(round, 5) ++ "\n";
-}
-
-/// Stores limbs 0 to 3 less `p` when limbs 0 to 4 (below `2 p`) are at least `p`. Limb 5 is
-/// free by now and holds the top difference.
-fn subtract_modulus(comptime round: usize) []const u8 {
-    const top = limb(round, 5);
-    return "movq " ++ limb(round, 0) ++ ", %%rax\n" ++
-        "movq " ++ limb(round, 1) ++ ", %%rcx\n" ++
-        "movq " ++ limb(round, 2) ++ ", %%r14\n" ++
-        "movq " ++ limb(round, 3) ++ ", " ++ top ++ "\n" ++
-        "movl $0xffffffff, %%edx\n" ++
-        "subq $-1, %%rax\n" ++
-        "sbbq %%rdx, %%rcx\n" ++
-        "movabsq $0xffffffff00000001, %%rdx\n" ++
-        "sbbq $0, %%r14\n" ++
-        "sbbq %%rdx, " ++ top ++ "\n" ++
-        "sbbq $0, " ++ limb(round, 4) ++ "\n" ++
-        "cmovcq " ++ limb(round, 0) ++ ", %%rax\n" ++
-        "cmovcq " ++ limb(round, 1) ++ ", %%rcx\n" ++
-        "cmovcq " ++ limb(round, 2) ++ ", %%r14\n" ++
-        "cmovcq " ++ limb(round, 3) ++ ", " ++ top ++ "\n";
 }
 
 const testing = std.testing;
