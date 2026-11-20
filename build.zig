@@ -124,12 +124,6 @@ pub fn build(b: *std.Build) void {
     add_test_options(b, options);
     const fuzz_soak = b.option(u32, "fuzz-soak", "Multiply seeded fuzz iterations") orelse 1;
     options.addOption(u32, "fuzz_soak", fuzz_soak);
-    const fuzz_soak_budget_s = b.option(
-        u32,
-        "fuzz-soak-budget-s",
-        "Seconds a soaked minifuzz target may run past its unsoaked cases (0: no limit)",
-    ) orelse 0;
-    options.addOption(u32, "fuzz_soak_budget_s", fuzz_soak_budget_s);
     const fuzz_seed = b.option(u64, "fuzz-seed", "Mixed into every seeded fuzz seed") orelse 0;
     options.addOption(u64, "fuzz_seed", fuzz_seed);
     const minifuzz_branch = b.option([]const u8, "minifuzz-branch", "Replay a minifuzz failure");
@@ -165,6 +159,7 @@ pub fn build(b: *std.Build) void {
             .name = b.fmt("test-{s}", .{package.name}),
             .root_module = modules[index],
             .filters = filters,
+            .test_runner = darwin_test_runner(b, target),
         });
         const run = b.addRunArtifact(tests);
         test_step.dependOn(&run.step);
@@ -180,8 +175,33 @@ pub fn build(b: *std.Build) void {
     add_deployer(b, modules[package_index("deployer")], target, optimize, check_step);
 }
 
-/// The test-run options: heavy-test sharding and the cancel audit.
+/// On Darwin, std's test runner with the debug-info allocator on `smp_allocator`
+/// (etc/darwin_test_runner.zig); elsewhere, std's runner as it is.
+fn darwin_test_runner(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+) ?std.Build.Step.Compile.TestRunner {
+    if (!target.result.os.tag.isDarwin()) return null;
+    if (darwin_runner_path == null) {
+        const files = b.addWriteFiles();
+        const std_runner = std.Build.LazyPath.zig_lib.path(b, "compiler/test_runner.zig");
+        _ = files.addCopyFile(std_runner, "std_runner.zig");
+        darwin_runner_path = files.addCopyFile(b.path("etc/darwin_test_runner.zig"), "runner.zig");
+    }
+    return .{ .path = darwin_runner_path.?, .mode = .server };
+}
+
+/// The generated Darwin runner, shared by every test binary.
+var darwin_runner_path: ?std.Build.LazyPath = null;
+
+/// The test-run options: the fuzz soak's time budget, heavy-test sharding, and the cancel audit.
 fn add_test_options(b: *std.Build, options: *std.Build.Step.Options) void {
+    const fuzz_soak_budget_s = b.option(
+        u32,
+        "fuzz-soak-budget-s",
+        "Seconds a soaked minifuzz target may run past its unsoaked cases (0: no limit)",
+    ) orelse 0;
+    options.addOption(u32, "fuzz_soak_budget_s", fuzz_soak_budget_s);
     add_heavy_shard_options(b, options);
     add_cancel_audit_option(b, options);
 }
@@ -381,6 +401,7 @@ fn add_qmdb_harnesses(
                 const tests = b.addTest(.{
                     .name = b.fmt("test-{s}", .{step_name}),
                     .root_module = root,
+                    .test_runner = darwin_test_runner(b, target),
                 });
                 test_step.dependOn(&b.addRunArtifact(tests).step);
             }
@@ -470,6 +491,7 @@ fn add_examples(
             .name = b.fmt("test-example-{s}", .{name}),
             .root_module = root,
             .filters = filters,
+            .test_runner = darwin_test_runner(b, target),
         });
         const run_tests = b.addRunArtifact(tests);
         test_step.dependOn(&run_tests.step);
