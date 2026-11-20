@@ -86,3 +86,8 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
 - 2026-11-19: the validator composition, resharing across epochs on 4 nodes (examples lane).
 - 2026-11-19: the dkg demo recording (examples lane).
 - 2026-11-19: `validator --state-sync` and floor startup, with a late joiner (examples lane).
+- 2026-11-20: `error: BootstrapDkgFailed` seen once in 8 rounds by consensus-marshal at load
+  about 100. The failed nodes' bootstrap stores hold about 60 finalized heights of the 64-block
+  epoch, so the ceremony ran to its final block, which carried a failed outcome (too few
+  dealings included under that load). Not a startup bug. commonware's bootstrap fails the same
+  way (`.expect("bootstrap DKG failed")`), so `complete` keeps returning the error.
