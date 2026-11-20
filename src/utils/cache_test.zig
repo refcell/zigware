@@ -1254,12 +1254,14 @@ test "cache: each operation hashes a key exactly once (shared_hashes_without_reh
     _ = cache.put(two, 2);
     try expectEqual([3]u32{ 1, 1, 0 }, counts);
     // Key 3 replaces Small's key 1: the incoming key and the victim moved to Ghost each hash
-    // once across their resident and Ghost operations.
+    // once across their resident and Ghost operations. Ghost reuses the victim's stored hash;
+    // the victim's hash comes from the eviction's safety check, so without it there is none.
+    const victim: u32 = @intFromBool(std.debug.runtime_safety);
     _ = cache.put(three, 3);
-    try expectEqual([3]u32{ 2, 1, 1 }, counts);
+    try expectEqual([3]u32{ 1 + victim, 1, 1 }, counts);
     // A nonresident removal shares the resident-miss hash with the Ghost discard.
     try expect(!cache.remove(one));
-    try expectEqual(@as(u32, 3), counts[0]);
+    try expectEqual(2 + victim, counts[0]);
     // Retain and clear work from slot ownership and hash nothing.
     const not_three = struct {
         pub fn keep(key: CountingKey, _: *const usize) bool {
@@ -1268,7 +1270,7 @@ test "cache: each operation hashes a key exactly once (shared_hashes_without_reh
     };
     cache.retain(not_three);
     cache.clear();
-    try expectEqual([3]u32{ 3, 1, 1 }, counts);
+    try expectEqual([3]u32{ 2 + victim, 1, 1 }, counts);
 }
 
 /// A key whose equality ignores `metadata` and whose hash is constant.

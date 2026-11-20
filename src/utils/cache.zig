@@ -717,7 +717,10 @@ pub fn Cache(comptime K: type, comptime V: type) type {
             const slot = if (plan.victim()) |victim| slot: {
                 // The slot keeps its key's hash, so the victim is not rehashed.
                 const victim_hash = self.slots.items[victim].hash;
-                assert(victim_hash == key_hash(K, self.slots.items[victim].key));
+                // Rehashing costs a hash per eviction, so it runs only with safety checks.
+                if (std.debug.runtime_safety) {
+                    assert(victim_hash == key_hash(K, self.slots.items[victim].key));
+                }
                 assert(self.index.remove(victim_hash, victim));
                 if (self.unlink_resident(victim) == .small) historical_hash = victim_hash;
                 break :slot victim;
