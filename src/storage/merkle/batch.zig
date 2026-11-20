@@ -458,8 +458,8 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
             const old_len = self.appended.items.len;
             const new_len: usize = @intCast(F.location_to_position(end) - self.parent.size());
             try self.appended.resize(gpa, new_len);
+            // Each range zeroes its own nodes (`AddRanges.map`), so the fill runs in parallel.
             const nodes = self.appended.items[old_len..];
-            @memset(nodes, std.mem.zeroes(Digest));
             const ranges: AddRanges(Item, @TypeOf(hasher)) = .{
                 .gpa = gpa,
                 .hasher = hasher,
@@ -767,6 +767,8 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
                         F.location_to_position(ranges.first);
                     assert(start < stop and stop <= ranges.nodes.len);
                     const nodes = ranges.nodes[@intCast(start)..@intCast(stop)];
+                    // Nodes a later merge hashes stay zero until then, as commonware's EMPTY.
+                    @memset(nodes, std.mem.zeroes(Digest));
                     const range_items = ranges.items[range.start..range.end];
                     var levels: Levels = @splat(.empty);
                     errdefer levels_deinit(ranges.gpa, &levels);
