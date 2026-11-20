@@ -119,3 +119,22 @@ test "double fast finds libzstd level 3's sequences" {
         try testing.expectEqualSlices(u8, &expected, &result.hash);
     }
 }
+
+// `count` agrees with a byte count for every equal length up to past eight vector steps and
+// every limit up to one past the difference, flipping each bit in turn, so the vector, word,
+// and byte loops each stop at the right byte.
+test "count matches a byte count" {
+    var src: [700]u8 = undefined;
+    @memset(&src, 7);
+    const b = 10;
+    const a = 300;
+    for (0..290) |equal| {
+        src[a + equal] = 7 ^ (@as(u8, 1) << @intCast(equal % 8)); // Each bit in turn.
+        var limit: usize = if (equal < 80) a else a + equal - 40;
+        while (limit <= a + equal + 1) : (limit += 1) {
+            try testing.expectEqual(@min(equal, limit - a), dfast.count(&src, a, b, limit));
+        }
+        try testing.expectEqual(equal, dfast.count(&src, a, b, src.len));
+        src[a + equal] = 7;
+    }
+}

@@ -7,6 +7,7 @@ const std = @import("std");
 const testing = std.testing;
 const corpus = @import("corpus.zig");
 const zstd = @import("../zstd.zig");
+const block_exact = @import("block_exact.zig");
 
 pub const Kind = enum { text, records, mixed, run, noise, sandwich };
 
@@ -101,5 +102,20 @@ test "exact frames match libzstd 1.5.7 level 3" {
         var want: [32]u8 = undefined;
         _ = try std.fmt.hexToBytes(&want, case.hash);
         try testing.expectEqualSlices(u8, &want, &hash);
+    }
+}
+
+// `is_rle` agrees with a byte scan at every length past two unrolled steps, with one
+// differing byte at every position, so neither the vector steps nor the tail miss one.
+test "is_rle matches a byte scan" {
+    var block: [300]u8 = undefined;
+    for (1..block.len + 1) |len| {
+        @memset(block[0..len], 0x5a);
+        try testing.expect(block_exact.is_rle(block[0..len]));
+        for (0..len) |at| {
+            block[at] = 0x5b;
+            try testing.expectEqual(len == 1, block_exact.is_rle(block[0..len]));
+            block[at] = 0x5a;
+        }
     }
 }

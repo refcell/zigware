@@ -122,9 +122,17 @@ fn hash_short(src: []const u8, position: usize, log: u6, min_match: u6) usize {
 /// `ZSTD_count`: equal bytes at `a` and `b`, counting only bytes of `a` before `limit`. Like
 /// libzstd, it compares eight bytes at a time and finds the first differing byte from the
 /// XOR's trailing zeros (the words are read little-endian), then finishes byte by byte.
-fn count(src: []const u8, a: usize, b: usize, limit: usize) u32 {
+pub fn count(src: []const u8, a: usize, b: usize, limit: usize) u32 {
     assert(b < a and limit <= src.len);
     var length: usize = 0;
+    // Skip 32 equal bytes at a time; the word loop below finds the difference in a block
+    // that has one.
+    const Lane = @Vector(32, u8);
+    while (a + length + 32 <= limit) : (length += 32) {
+        const left: Lane = src[a + length ..][0..32].*;
+        const right: Lane = src[b + length ..][0..32].*;
+        if (@reduce(.Or, left ^ right) != 0) break;
+    }
     while (a + length + 8 <= limit) {
         const difference = read64(src, a + length) ^ read64(src, b + length);
         if (difference != 0) return @intCast(length + @ctz(difference) / 8);

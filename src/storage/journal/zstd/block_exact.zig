@@ -257,10 +257,24 @@ const Fingerprint = struct {
     }
 };
 
-/// `ZSTD_isRLE`.
-fn is_rle(block: []const u8) bool {
+/// `ZSTD_isRLE`. Like libzstd's unrolled loop, it ORs the XOR of 128 bytes at a time against
+/// the first byte, then checks the tail byte by byte.
+pub fn is_rle(block: []const u8) bool {
     assert(block.len > 0);
-    for (block[1..]) |byte| {
+    const lanes = 32;
+    const Lane = @Vector(lanes, u8);
+    const first: Lane = @splat(block[0]);
+    var index: usize = 0;
+    while (index + 4 * lanes <= block.len) : (index += 4 * lanes) {
+        const chunk = block[index..][0 .. 4 * lanes];
+        var difference: Lane = @as(Lane, chunk[0..lanes].*) ^ first;
+        difference |= @as(Lane, chunk[lanes..][0..lanes].*) ^ first;
+        difference |= @as(Lane, chunk[2 * lanes ..][0..lanes].*) ^ first;
+        difference |= @as(Lane, chunk[3 * lanes ..][0..lanes].*) ^ first;
+        if (@reduce(.Or, difference) != 0) return false;
+    }
+    assert(block.len - index < 4 * lanes);
+    for (block[index..]) |byte| {
         if (byte != block[0]) return false;
     }
     return true;
