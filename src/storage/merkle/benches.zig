@@ -237,8 +237,10 @@ fn bench_proofs_on(
     n: usize,
 ) !void {
     const gpa = runner.allocator;
-    // Listing runs no workload, so it skips building the tree.
+    // Listing runs no workload, and a filtered run may select none of this tree's benchmarks;
+    // both skip building it.
     const unbuilt: Tree(F) = .{ .root = undefined, .elements = &.{} };
+    if (!runner.list and !proofs_wanted(runner, n, family)) return;
     var tree: Tree(F) = if (runner.list) unbuilt else try .build(gpa, n);
     defer tree.deinit(gpa);
     var locations: [SAMPLE_SIZE]u64 = undefined;
@@ -246,18 +248,9 @@ fn bench_proofs_on(
     sample_locations(&rng, n, &locations);
     var workload: ProofWorkload(F) = .{ .gpa = gpa, .tree = &tree, .kind = .multi };
     workload.locations = &locations;
-    const Case = struct { prefix: []const u8, kind: ProofKind, count: []const u8 };
-    const located = [_]Case{
-        .{ .prefix = "merkle::multi_proof", .kind = .multi, .count = "items" },
-        .{ .prefix = "merkle::proof", .kind = .single, .count = "samples" },
-        .{ .prefix = "merkle::verify_single_element", .kind = .verify_single, .count = "samples" },
-        .{ .prefix = "merkle::verify_multi", .kind = .verify_multi, .count = "items" },
-    };
-    for (located) |case| {
+    for (located_cases) |case| {
         workload.kind = case.kind;
-        const benchmark = bench.Benchmark.init(case.prefix).with_param("n", n)
-            .with_param(case.count, SAMPLE_SIZE).with_param("family", family);
-        try runner.run(benchmark, &workload);
+        try runner.run(case.benchmark(n, family), &workload);
     }
     var ranges: [SAMPLE_SIZE]merkle.Range = undefined;
     for (cases(u64, runner, &ranges_swept, 1)) |range| {
@@ -266,16 +259,51 @@ fn bench_proofs_on(
         workload.ranges = &ranges;
         for ([_]ProofKind{ .range, .verify_range }) |kind| {
             workload.kind = kind;
-            const prefix = switch (kind) {
-                .range => "merkle::range_proof",
-                else => "merkle::verify_many_elements",
-            };
-            const benchmark = bench.Benchmark.init(prefix).with_param("n", n)
-                .with_param("range", range).with_param("samples", SAMPLE_SIZE)
-                .with_param("family", family);
-            try runner.run(benchmark, &workload);
+            try runner.run(range_benchmark(kind, n, range, family), &workload);
         }
     }
+}
+
+/// The proof benchmarks of single leaves and leaf sets, named by prefix and sample count.
+const LocatedCase = struct {
+    prefix: []const u8,
+    kind: ProofKind,
+    count: []const u8,
+
+    fn benchmark(case: LocatedCase, n: usize, family: []const u8) bench.Benchmark {
+        return bench.Benchmark.init(case.prefix).with_param("n", n)
+            .with_param(case.count, SAMPLE_SIZE).with_param("family", family);
+    }
+};
+
+const located_cases = [_]LocatedCase{
+    .{ .prefix = "merkle::multi_proof", .kind = .multi, .count = "items" },
+    .{ .prefix = "merkle::proof", .kind = .single, .count = "samples" },
+    .{ .prefix = "merkle::verify_single_element", .kind = .verify_single, .count = "samples" },
+    .{ .prefix = "merkle::verify_multi", .kind = .verify_multi, .count = "items" },
+};
+
+fn range_benchmark(kind: ProofKind, n: usize, range: u64, family: []const u8) bench.Benchmark {
+    assert(kind == .range or kind == .verify_range);
+    const prefix = if (kind == .range) "merkle::range_proof" else "merkle::verify_many_elements";
+    return bench.Benchmark.init(prefix).with_param("n", n).with_param("range", range)
+        .with_param("samples", SAMPLE_SIZE).with_param("family", family);
+}
+
+/// Whether the filters select any benchmark of the tree of `n` leaves.
+fn proofs_wanted(runner: *const bench.Runner, n: usize, family: []const u8) bool {
+    assert(n > 0);
+    for (located_cases) |case| {
+        const benchmark = case.benchmark(n, family);
+        if (runner.matches(benchmark.name())) return true;
+    }
+    for (cases(u64, runner, &ranges_swept, 1)) |range| {
+        for ([_]ProofKind{ .range, .verify_range }) |kind| {
+            const benchmark = range_benchmark(kind, n, range, family);
+            if (runner.matches(benchmark.name())) return true;
+        }
+    }
+    return false;
 }
 
 fn bench_proofs(runner: *bench.Runner) !void {
@@ -393,6 +421,8 @@ fn bench_append_additional(runner: *bench.Runner) !void {
         if (family_index == 0 or !quick(runner)) {
             const F = family[0];
             for (n_leaves(runner)) |n| {
+                // A filter selecting no addition count skips this base entirely.
+                if (!runner.list and !additional_wanted(runner, n, family[1])) continue;
                 var rng = utils.test_rng();
                 const elements = try random_digests(gpa, &rng, n);
                 defer gpa.free(elements);
@@ -407,14 +437,26 @@ fn bench_append_additional(runner: *bench.Runner) !void {
                         .elements = additional[0..a],
                         .base = &base,
                     };
-                    const benchmark = bench.Benchmark.init("merkle::append_additional")
-                        .with_param("start", n).with_param("add", a)
-                        .with_param("family", family[1]);
-                    try runner.run(benchmark, &workload);
+                    try runner.run(additional_benchmark(n, a, family[1]), &workload);
                 }
             }
         }
     }
+}
+
+fn additional_benchmark(n: usize, add: usize, family: []const u8) bench.Benchmark {
+    return bench.Benchmark.init("merkle::append_additional").with_param("start", n)
+        .with_param("add", add).with_param("family", family);
+}
+
+/// Whether the filters select any addition count on the base of `n` leaves.
+fn additional_wanted(runner: *const bench.Runner, n: usize, family: []const u8) bool {
+    assert(n > 0);
+    for (cases(usize, runner, &additions, 1)) |add| {
+        const benchmark = additional_benchmark(n, add, family);
+        if (runner.matches(benchmark.name())) return true;
+    }
+    return false;
 }
 
 /// Leaves already in the tree for `add_many` (deliberately not a power of two).
@@ -495,10 +537,28 @@ fn bench_workers(
     var workload: AddManyWorkload(F) = .{ .gpa = runner.allocator, .mem = mem, .items = items };
     for (cases(usize, runner, &.{ 1, WORKERS }, 1)) |workers| {
         const benchmark = params.with_param("workers", workers).with_param("family", family);
+        if (!runner.list and !runner.matches(benchmark.name())) continue; // Skip the pool.
         workload.strategy = try worker_pool(runner, workers);
         defer if (workload.strategy) |strategy| strategy.pool.destroy();
         try runner.run(benchmark, &workload);
     }
+}
+
+/// Whether the filters select `params` for any worker count, in `families_named`.
+fn add_many_wanted(
+    runner: *const bench.Runner,
+    params: bench.Benchmark,
+    families_named: []const []const u8,
+) bool {
+    assert(families_named.len > 0);
+    if (runner.list) return true;
+    for (cases(usize, runner, &.{ 1, WORKERS }, 1)) |workers| {
+        for (families_named) |family| {
+            const benchmark = params.with_param("workers", workers).with_param("family", family);
+            if (runner.matches(benchmark.name())) return true;
+        }
+    }
+    return false;
 }
 
 /// `count` random items, item `i` of `len_of(i)` bytes, each in its own allocation.
@@ -532,8 +592,16 @@ fn small_len(_: void, _: usize) usize {
     return SMALL;
 }
 
+fn uniform_params(n: usize) bench.Benchmark {
+    return bench.Benchmark.init("merkle::add_many").with_param("items", n);
+}
+
 fn bench_add_many_uniform(runner: *bench.Runner) !void {
     const gpa = runner.allocator;
+    // A filtered run selecting none of these skips building the committed trees.
+    for (cases(usize, runner, &ITEMS, 1)) |n| {
+        if (add_many_wanted(runner, uniform_params(n), &.{ "mmr", "mmb" })) break;
+    } else return;
     var mmr = try committed(storage.mmr.Family, gpa);
     defer mmr.deinit(gpa);
     // A quick run skips MMB, so it skips building MMB's committed tree.
@@ -542,9 +610,10 @@ fn bench_add_many_uniform(runner: *bench.Runner) !void {
     defer mmb.deinit(gpa);
     var rng = utils.test_rng();
     for (cases(usize, runner, &ITEMS, 1)) |n| {
+        // Every case draws its items, so later cases see the same random bytes either way.
         const items = try random_items(gpa, &rng, n, {}, small_len);
         defer free_items(gpa, items);
-        const params = bench.Benchmark.init("merkle::add_many").with_param("items", n);
+        const params = uniform_params(n);
         try bench_workers(runner, storage.mmr.Family, params, "mmr", &mmr, items);
         if (quick(runner)) continue;
         try bench_workers(runner, storage.mmb.Family, params, "mmb", &mmb, items);
@@ -564,13 +633,15 @@ const Skew = struct {
         };
         return if (is_large) skew.large else SMALL;
     }
+
+    fn params(skew: Skew) bench.Benchmark {
+        return bench.Benchmark.init("merkle::add_many").with_param("items", SKEWED_ITEMS)
+            .with_param("payload", skew.payload).with_param("large", skew.large);
+    }
 };
 
 fn bench_add_many_skewed(runner: *bench.Runner) !void {
     const gpa = runner.allocator;
-    var mmr = try committed(storage.mmr.Family, gpa);
-    defer mmr.deinit(gpa);
-    var rng = utils.test_rng();
     const skews = [_]Skew{
         .{ .payload = "clustered", .large = MIB, .shape = .clustered },
         .{ .payload = "clustered", .large = 8 * KIB, .shape = .clustered },
@@ -579,11 +650,19 @@ fn bench_add_many_skewed(runner: *bench.Runner) !void {
     };
     // A quick run takes the 8 KiB clustered case, the cheapest to hash.
     const run_cases: []const Skew = if (quick(runner)) skews[1..2] else &skews;
+    // A filtered run selecting none of these skips building the committed tree.
     for (run_cases) |skew| {
+        if (add_many_wanted(runner, skew.params(), &.{"mmr"})) break;
+    } else return;
+    var mmr = try committed(storage.mmr.Family, gpa);
+    defer mmr.deinit(gpa);
+    var rng = utils.test_rng();
+    for (run_cases) |skew| {
+        // Every case draws its items, so later cases see the same random bytes either way.
         const items = try random_items(gpa, &rng, SKEWED_ITEMS, skew, Skew.len_of);
         defer free_items(gpa, items);
-        const params = bench.Benchmark.init("merkle::add_many").with_param("items", SKEWED_ITEMS)
-            .with_param("payload", skew.payload).with_param("large", skew.large);
+        const params = skew.params();
+        if (!add_many_wanted(runner, params, &.{"mmr"})) continue;
         try bench_workers(runner, storage.mmr.Family, params, "mmr", &mmr, items);
     }
 }

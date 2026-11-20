@@ -119,6 +119,15 @@ fn bench_prove(runner: *bench.Runner) !void {
     const gpa = runner.allocator;
     const sizes = runner.inputs.pick([]const usize, proof_sizes[0..1], &proof_sizes, &proof_sizes);
     for (sizes) |n| {
+        const single = bench.Benchmark.init("bmt::proof").with_param("n", n);
+        const range = bench.Benchmark.init("bmt::range_proof").with_param("n", n)
+            .with_param("items", SAMPLE_SIZE);
+        const multi = bench.Benchmark.init("bmt::multi_proof").with_param("n", n)
+            .with_param("items", SAMPLE_SIZE);
+        // A filtered run builds only the trees its benchmarks use.
+        const wanted = runner.matches(single.name()) or runner.matches(range.name()) or
+            runner.matches(multi.name());
+        if (!runner.list and !wanted) continue;
         var tree = try indexed_tree(gpa, n);
         defer tree.deinit(gpa);
         // Prove one leaf, and a range, away from the edges of the tree.
@@ -129,12 +138,10 @@ fn bench_prove(runner: *bench.Runner) !void {
             .kind = .single,
             .positions = &.{start},
         };
-        try runner.run(bench.Benchmark.init("bmt::proof").with_param("n", n), &workload);
+        try runner.run(single, &workload);
 
         workload.kind = .range;
         workload.positions = &.{ start, start + SAMPLE_SIZE - 1 };
-        const range = bench.Benchmark.init("bmt::range_proof").with_param("n", n)
-            .with_param("items", SAMPLE_SIZE);
         try runner.run(range, &workload);
 
         var positions: [SAMPLE_SIZE]u32 = undefined;
@@ -142,8 +149,6 @@ fn bench_prove(runner: *bench.Runner) !void {
         sample_positions(&rng, n, &positions);
         workload.kind = .multi;
         workload.positions = &positions;
-        const multi = bench.Benchmark.init("bmt::multi_proof").with_param("n", n)
-            .with_param("items", SAMPLE_SIZE);
         try runner.run(multi, &workload);
     }
 }
@@ -247,6 +252,10 @@ fn bench_verify(runner: *bench.Runner) !void {
     };
     for (names) |entry| {
         for (sizes) |n| {
+            const benchmark = bench.Benchmark.init(entry[1]).with_param("n", n)
+                .with_param("items", SAMPLE_SIZE);
+            // A filtered run builds only the trees its benchmarks use.
+            if (!runner.list and !runner.matches(benchmark.name())) continue;
             var rng = utils.test_rng();
             const leaves = try random_digests(gpa, &rng, n);
             defer gpa.free(leaves);
@@ -261,8 +270,6 @@ fn bench_verify(runner: *bench.Runner) !void {
                 .kind = entry[0],
             };
             defer workload.teardown();
-            const benchmark = bench.Benchmark.init(entry[1]).with_param("n", n)
-                .with_param("items", SAMPLE_SIZE);
             try runner.run(benchmark, &workload);
         }
     }
