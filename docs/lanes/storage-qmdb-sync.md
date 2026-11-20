@@ -307,3 +307,6 @@ Design:
   `Response`), with a drawn-field validity oracle (planted `start == size` bug caught). A
   30-minute `just fuzz` campaign (-j4) over it, `qmdb_any_{fixed,variable}_sync`, and
   storage-archive's targets found nothing.
+- 2026-11-20: qmdb conformance gaps closed: `Current*FloorConf` (8), and the
+  `StorageConformance` audits of current (8) and the compact databases (8), each with a planted
+  bug caught.

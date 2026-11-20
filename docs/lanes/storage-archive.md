@@ -218,3 +218,8 @@ Partial:
 - 2026-11-19: 30-minute `just fuzz` campaign (-j4, ReleaseSafe) over `archive_prunable_*`,
   `archive_immutable_recovery`, `ordinal_operations`, and qmdb-sync's targets: no crashes
   (corpora of 31 to 202 inputs per target).
+- 2026-11-20: crash-consistency soak (one hour, nice 19) over every fault-injected recovery
+  target, adding `journal_segmented_fixed_recovery`, `qmdb_any_recovery`, and
+  `qmdb_immutable_recovery`: 9.5M inputs, no failures; a planted recovery bug caught in each.
+  Segmented variable replay now asserts one repair per section, so a repair that leaves its
+  tear fails instead of spinning.
