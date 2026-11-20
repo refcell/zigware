@@ -303,6 +303,9 @@ fn RecoveryType(comptime V: type) type {
             reader: paged.Replay,
             /// End of the last decoded item, where the next item starts.
             offset: u64,
+            /// A repair truncated this section to its recoverable prefix, which leaves only
+            /// valid pages: a section is repaired at most once, which bounds the replay loop.
+            repaired: bool = false,
         };
 
         journal: ?J,
@@ -489,13 +492,19 @@ fn RecoveryType(comptime V: type) type {
                 return err;
             };
             errdefer self.clear_replays();
+            assert(!current.repaired); // A repaired section's pages are all valid.
+            const blob_size = current.reader.blob_size();
+            assert(target < blob_size);
             const buffer = (try self.journal.?.manager.get(section)).?;
             try buffer.truncate(target);
             var reader = try buffer.replay(self.replay_buffer, self.read_options);
             errdefer reader.deinit();
+            // The truncation must shrink the section, or the replay would re-read the tear.
+            assert(reader.blob_size() == target);
             try reader.seek_to(offset);
             self.replays.items[self.head].reader.deinit();
             self.replays.items[self.head].reader = reader;
+            self.replays.items[self.head].repaired = true;
             assert(self.replays.items[self.head].section == section);
         }
 
