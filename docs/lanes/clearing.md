@@ -312,3 +312,9 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   is called outside utils except `OptionFuture` (marshal, glue) and `Exclusive` (runtime
   handle), whose Zig ports use a plain optional and need no `Sync` wrapper. All recorded in
   utils.md Decisions as intentionally not ported; utils stays 75 not portable.
+- 2026-11-20: `bmt::build` SHA-256 (taken from crypto): `sha256_blocks.digest_shape` ports
+  commonware's `hash_36` leaf kernel and the 64-byte node kernels (fixed padding block from a
+  comptime W + K table), single and paired; `Core.hash_parts`/`hash_pair_parts` route the 4+32
+  and 32+32 shapes to them. Digests match std (new shape test, x86-64 and aarch64 under qemu);
+  planted wrong leaf length and wrong fixed-block length fail 4 and 5 tests. bmt::build
+  1.21× to 0.88× commonware (median of 11 paired rounds; 1.10× best of each side).

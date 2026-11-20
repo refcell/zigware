@@ -536,3 +536,7 @@ hold whole units of lanes" over coding's lane-aware `hash_batches`, and `sha512/
   `Rayon::new` does, so small batches run serially; without it sha512 `hash_many` conc=8 rows
   of 96 B to 1 KiB messages read 1.5 to 3.6x commonware (count=9 len=96: 3.74 µs, now 0.83 µs
   against 1.05 µs).
+- 2026-11-20 (clearing lane): `sha256_blocks.digest_shape(n, shape, ...)` serves the BMT leaf
+  (4+32, commonware `hash_36`) and node (32+32, message block then a constant-schedule padding
+  block) from register-built words, singly and paired; the per-arch block loops share
+  `block_n`/`rounds_wk`. bmt::build 0.72× of 356e1da9's time.

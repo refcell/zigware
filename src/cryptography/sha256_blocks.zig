@@ -58,15 +58,112 @@ pub fn digest_n(comptime n: usize, inputs: [n][]const u8, outs: [n]*[32]u8) void
     const len = inputs[0].len;
     for (inputs) |input| assert(input.len == len);
     assert(len % 64 == 0 and len > 0);
-    // ABEF and CDGH on x86 (sha256rnds2's layout); ABCD and EFGH on aarch64.
-    const x86 = builtin.cpu.arch == .x86_64;
-    var x: [n]V4u32 = @splat(if (x86) .{ iv[5], iv[4], iv[1], iv[0] } else iv[0..4].*);
-    var y: [n]V4u32 = @splat(if (x86) .{ iv[7], iv[6], iv[3], iv[2] } else iv[4..8].*);
-    switch (builtin.cpu.arch) {
-        .x86_64 => blocks_x86(n, &x, &y, inputs),
-        .aarch64 => blocks_aarch64(n, &x, &y, inputs),
-        else => comptime unreachable,
+    var x: [n]V4u32 = @splat(iv_x);
+    var y: [n]V4u32 = @splat(iv_y);
+    blocks_n(n, &x, &y, inputs);
+    store_digests(n, x, y, outs);
+}
+
+/// The Merkle shapes whose words load straight into registers, skipping the padded copy on
+/// the stack (commonware's `hash_36` and the 64-byte half of its `hash_64`/pair kernels):
+/// `leaf_36` is a 4-byte position then a digest, one block; `node_64` is two digests, one
+/// message block then a padding block whose schedule is a constant.
+pub const Shape = enum {
+    leaf_36,
+    node_64,
+
+    pub fn first_len(comptime shape: Shape) usize {
+        return switch (shape) {
+            .leaf_36 => 4,
+            .node_64 => 32,
+        };
     }
+};
+
+/// The digests of `firsts[j] || seconds[j]` in `shape`, `n` (1 or 2) interleaved.
+pub fn digest_shape(
+    comptime n: usize,
+    comptime shape: Shape,
+    firsts: [n]*const [shape.first_len()]u8,
+    seconds: [n]*const [32]u8,
+    outs: [n]*[32]u8,
+) void {
+    comptime assert(available);
+    comptime assert(n == 1 or n == 2);
+    var x: [n]V4u32 = @splat(iv_x);
+    var y: [n]V4u32 = @splat(iv_y);
+    var m: [n][4]V4u32 = undefined;
+    inline for (0..n) |j| m[j] = shape_words(shape, firsts[j], seconds[j]);
+    block_n(n, &x, &y, &m);
+    if (shape == .node_64) fixed_block_n(n, &x, &y, &fixed_wk_64);
+    store_digests(n, x, y, outs);
+}
+
+/// The big-endian words of the one message block of `first || second` in `shape`.
+inline fn shape_words(
+    comptime shape: Shape,
+    first: *const [shape.first_len()]u8,
+    second: *const [32]u8,
+) [4]V4u32 {
+    const lo = load(second, 0);
+    const hi = load(second, 16);
+    switch (shape) {
+        .node_64 => return .{ load(first, 0), load(first, 16), lo, hi },
+        .leaf_36 => {
+            // position, digest words 0 to 7, 0x80 then zeros, and the bit length 288.
+            const head: V4u32 = .{ std.mem.readInt(u32, first, .big), 0, 0, 0 };
+            const tail: V4u32 = .{ 0, 0x80000000, 0, 0 };
+            return .{
+                @shuffle(u32, head, lo, @Vector(4, i32){ 0, -1, -2, -3 }),
+                @shuffle(u32, lo, hi, @Vector(4, i32){ 3, -1, -2, -3 }),
+                @shuffle(u32, hi, tail, @Vector(4, i32){ 3, -2, -3, -4 }),
+                .{ 0, 0, 0, 36 * 8 },
+            };
+        },
+    }
+}
+
+/// W[t] + K[t] of the padding block that ends a 64-byte message (0x80, zeros, and the bit
+/// length 512): the schedule is constant, so its rounds take no message (commonware's
+/// `FIXED_ROUNDS4` table).
+const fixed_wk_64: [64]u32 = fixed: {
+    @setEvalBranchQuota(10_000);
+    var w: [64]u32 = @splat(0);
+    w[0] = 0x80000000;
+    w[15] = 64 * 8;
+    for (16..64) |t| {
+        const s0 = std.math.rotr(u32, w[t - 15], 7) ^ std.math.rotr(u32, w[t - 15], 18) ^
+            (w[t - 15] >> 3);
+        const s1 = std.math.rotr(u32, w[t - 2], 17) ^ std.math.rotr(u32, w[t - 2], 19) ^
+            (w[t - 2] >> 10);
+        w[t] = w[t - 16] +% s0 +% w[t - 7] +% s1;
+    }
+    var wk: [64]u32 = undefined;
+    for (&wk, w, K) |*out, word, k| out.* = word +% k;
+    break :fixed wk;
+};
+
+/// The 64 rounds of a block whose W + K is `wk`, then the feed-forward.
+inline fn fixed_block_n(comptime n: usize, x: *[n]V4u32, y: *[n]V4u32, wk: *const [64]u32) void {
+    const x_start = x.*;
+    const y_start = y.*;
+    inline for (0..16) |k| {
+        const w: V4u32 = wk[4 * k ..][0..4].*;
+        inline for (0..n) |j| rounds_wk(&x[j], &y[j], w);
+    }
+    inline for (0..n) |j| {
+        x[j] +%= x_start[j];
+        y[j] +%= y_start[j];
+    }
+}
+
+// ABEF and CDGH on x86 (sha256rnds2's layout); ABCD and EFGH on aarch64.
+const x86 = builtin.cpu.arch == .x86_64;
+const iv_x: V4u32 = if (x86) .{ iv[5], iv[4], iv[1], iv[0] } else iv[0..4].*;
+const iv_y: V4u32 = if (x86) .{ iv[7], iv[6], iv[3], iv[2] } else iv[4..8].*;
+
+/// Writes each state's digest bytes to `outs`.
+inline fn store_digests(comptime n: usize, x: [n]V4u32, y: [n]V4u32, outs: [n]*[32]u8) void {
     // Words A to H, from lanes of x (0 to 3) and y (-1 to -4).
     const order: @Vector(8, i32) = if (x86) .{ 3, 2, -4, -3, 1, 0, -2, -1 } else .{
         0, 1, 2, 3, -1, -2, -3, -4,
@@ -109,47 +206,54 @@ fn compress_x86(comptime n: usize, states: *[n]*[8]u32, inputs: [n][]const u8) v
         x[j] = .{ state[5], state[4], state[1], state[0] };
         y[j] = .{ state[7], state[6], state[3], state[2] };
     }
-    blocks_x86(n, &x, &y, inputs);
+    blocks_n(n, &x, &y, inputs);
     inline for (0..n) |j| {
         states[j].* = .{ x[j][3], x[j][2], y[j][3], y[j][2], x[j][1], x[j][0], y[j][1], y[j][0] };
     }
 }
 
-inline fn blocks_x86(comptime n: usize, x: *[n]V4u32, y: *[n]V4u32, inputs: [n][]const u8) void {
+/// Compresses each input's blocks into its state, the `n` inputs interleaved.
+inline fn blocks_n(comptime n: usize, x: *[n]V4u32, y: *[n]V4u32, inputs: [n][]const u8) void {
     const len = inputs[0].len;
     for (inputs) |input| assert(input.len == len);
     var offset: usize = 0;
     while (offset < len) : (offset += 64) {
-        const x_start = x.*;
-        const y_start = y.*;
         var m: [n][4]V4u32 = undefined;
         inline for (0..n) |j| m[j] = load_block(inputs[j], offset);
-        inline for (0..16) |k| {
-            inline for (0..n) |j| x86_rounds(k, &x[j], &y[j], &m[j]);
-        }
-        inline for (0..n) |j| {
-            x[j] +%= x_start[j];
-            y[j] +%= y_start[j];
-        }
+        block_n(n, x, y, &m);
     }
     assert(offset == len);
 }
 
+/// The 64 rounds of one block whose first sixteen words are `m`, then the feed-forward.
+inline fn block_n(comptime n: usize, x: *[n]V4u32, y: *[n]V4u32, m: *[n][4]V4u32) void {
+    const x_start = x.*;
+    const y_start = y.*;
+    inline for (0..16) |k| {
+        inline for (0..n) |j| switch (builtin.cpu.arch) {
+            .x86_64 => x86_rounds(k, &x[j], &y[j], &m[j]),
+            .aarch64 => aarch64_rounds(k, &x[j], &y[j], &m[j]),
+            else => comptime unreachable,
+        };
+    }
+    inline for (0..n) |j| {
+        x[j] +%= x_start[j];
+        y[j] +%= y_start[j];
+    }
+}
+
+/// Four rounds whose W + K is `w`.
+inline fn rounds_wk(x: *V4u32, y: *V4u32, w: V4u32) void {
+    switch (builtin.cpu.arch) {
+        .x86_64 => x86_rounds_wk(x, y, w),
+        .aarch64 => aarch64_rounds_wk(x, y, w),
+        else => comptime unreachable,
+    }
+}
+
 /// Rounds 4k to 4k+3, then (for k < 12) message words 4(k+4) to 4(k+4)+3.
 inline fn x86_rounds(comptime k: usize, x: *V4u32, y: *V4u32, m: *[4]V4u32) void {
-    const w: V4u32 = m[k % 4] +% @as(V4u32, K[4 * k ..][0..4].*);
-    y.* = asm ("sha256rnds2 %[x], %[y]"
-        : [y] "=x" (-> V4u32),
-        : [_] "0" (y.*),
-          [x] "x" (x.*),
-          [_] "{xmm0}" (w),
-    );
-    x.* = asm ("sha256rnds2 %[y], %[x]"
-        : [x] "=x" (-> V4u32),
-        : [_] "0" (x.*),
-          [y] "x" (y.*),
-          [_] "{xmm0}" (@as(V4u32, @bitCast(@as(u128, @bitCast(w)) >> 64))),
-    );
+    x86_rounds_wk(x, y, m[k % 4] +% @as(V4u32, K[4 * k ..][0..4].*));
     if (k < 12) {
         var tmp = m[k % 4];
         m[k % 4] = asm (
@@ -167,6 +271,21 @@ inline fn x86_rounds(comptime k: usize, x: *V4u32, y: *V4u32, m: *[4]V4u32) void
     }
 }
 
+inline fn x86_rounds_wk(x: *V4u32, y: *V4u32, w: V4u32) void {
+    y.* = asm ("sha256rnds2 %[x], %[y]"
+        : [y] "=x" (-> V4u32),
+        : [_] "0" (y.*),
+          [x] "x" (x.*),
+          [_] "{xmm0}" (w),
+    );
+    x.* = asm ("sha256rnds2 %[y], %[x]"
+        : [x] "=x" (-> V4u32),
+        : [_] "0" (x.*),
+          [y] "x" (y.*),
+          [_] "{xmm0}" (@as(V4u32, @bitCast(@as(u128, @bitCast(w)) >> 64))),
+    );
+}
+
 fn compress_aarch64(comptime n: usize, states: *[n]*[8]u32, inputs: [n][]const u8) void {
     var x: [n]V4u32 = undefined;
     var y: [n]V4u32 = undefined;
@@ -174,36 +293,11 @@ fn compress_aarch64(comptime n: usize, states: *[n]*[8]u32, inputs: [n][]const u
         x[j] = states[j][0..4].*;
         y[j] = states[j][4..8].*;
     }
-    blocks_aarch64(n, &x, &y, inputs);
+    blocks_n(n, &x, &y, inputs);
     inline for (0..n) |j| {
         states[j][0..4].* = x[j];
         states[j][4..8].* = y[j];
     }
-}
-
-inline fn blocks_aarch64(
-    comptime n: usize,
-    x: *[n]V4u32,
-    y: *[n]V4u32,
-    inputs: [n][]const u8,
-) void {
-    const len = inputs[0].len;
-    for (inputs) |input| assert(input.len == len);
-    var offset: usize = 0;
-    while (offset < len) : (offset += 64) {
-        const x_start = x.*;
-        const y_start = y.*;
-        var m: [n][4]V4u32 = undefined;
-        inline for (0..n) |j| m[j] = load_block(inputs[j], offset);
-        inline for (0..16) |k| {
-            inline for (0..n) |j| aarch64_rounds(k, &x[j], &y[j], &m[j]);
-        }
-        inline for (0..n) |j| {
-            x[j] +%= x_start[j];
-            y[j] +%= y_start[j];
-        }
-    }
-    assert(offset == len);
 }
 
 /// (For k > 3) message words 4k to 4k+3, then rounds 4k to 4k+3.
@@ -219,7 +313,10 @@ inline fn aarch64_rounds(comptime k: usize, x: *V4u32, y: *V4u32, m: *[4]V4u32) 
               [w12_15] "w" (m[(k + 3) % 4]),
         );
     }
-    const w: V4u32 = m[k % 4] +% @as(V4u32, K[4 * k ..][0..4].*);
+    aarch64_rounds_wk(x, y, m[k % 4] +% @as(V4u32, K[4 * k ..][0..4].*));
+}
+
+inline fn aarch64_rounds_wk(x: *V4u32, y: *V4u32, w: V4u32) void {
     var x_next: V4u32 = undefined;
     var y_next: V4u32 = undefined;
     asm volatile (

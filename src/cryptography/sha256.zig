@@ -62,9 +62,26 @@ pub const Core = struct {
         for (parts) |part| total +|= part.len;
         if (comptime !blocks.available) return stream(parts, out);
         if (total > short_max) return stream(parts, out);
+        if (shape_of(parts)) |shape| switch (shape) {
+            inline else => |s| {
+                const n = comptime s.first_len();
+                return blocks.digest_shape(1, s, .{parts[0][0..n]}, .{parts[1][0..32]}, .{out});
+            },
+        };
         var padded: [2 * block_length]u8 align(16) = @splat(0);
         const len = pad_short(parts, total, &padded);
         blocks.digest_n(1, .{padded[0..len]}, .{out});
+    }
+
+    /// The register-loaded kernel shape of `parts`, if it has one: a 4-byte position or a
+    /// digest, then a digest (commonware's `hash_single` dispatch for the BMT shapes).
+    fn shape_of(parts: []const []const u8) ?blocks.Shape {
+        if (parts.len != 2 or parts[1].len != 32) return null;
+        return switch (parts[0].len) {
+            4 => .leaf_36,
+            32 => .node_64,
+            else => null,
+        };
     }
 
     /// `parts` padded into `padded` (zeroed) as one or two final blocks; returns the padded
@@ -101,6 +118,15 @@ pub const Core = struct {
         const short = totals[0] <= short_max and totals[1] <= short_max;
         if (comptime !blocks.available) return separate(left, right, out);
         if (!short) return separate(left, right, out);
+        const shape_left = shape_of(left);
+        if (shape_left != null and shape_left == shape_of(right)) switch (shape_left.?) {
+            inline else => |s| {
+                const n = comptime s.first_len();
+                return blocks.digest_shape(2, s, .{ left[0][0..n], right[0][0..n] }, .{
+                    left[1][0..32], right[1][0..32],
+                }, .{ &out[0], &out[1] });
+            },
+        };
         var padded: [2][2 * block_length]u8 align(16) = @splat(@splat(0));
         const len_left = pad_short(left, totals[0], &padded[0]);
         const len_right = pad_short(right, totals[1], &padded[1]);
@@ -280,6 +306,38 @@ test "sha256 single-message shapes and near misses match streaming" {
         for (lengths) |length| total += length;
         const split_parts = split(counting[0..total], lengths, &parts);
         try testing.expect(Sha256.hash(split_parts).eql(streamed(split_parts)));
+    }
+}
+
+test "sha256 register-loaded BMT shapes match std" {
+    // The 4+32 leaf and 32+32 node kernels, alone and paired (also with one side a near
+    // miss), over random bytes at every start offset mod 16.
+    var prng = std.Random.DefaultPrng.init(0xb317);
+    var data: [576]u8 = undefined;
+    prng.random().bytes(&data);
+    const shapes = [_][2]usize{ .{ 4, 32 }, .{ 32, 32 } };
+    for (0..200) |round| {
+        for (shapes) |shape| {
+            const a = (round * 7) % 200;
+            const b = 250 + (round * 13) % 200;
+            const len = shape[0] + shape[1];
+            const left = [_][]const u8{ data[a..][0..shape[0]], data[a + shape[0] ..][0..32] };
+            const right = [_][]const u8{ data[b..][0..shape[0]], data[b + shape[0] ..][0..32] };
+            var expected: [2][32]u8 = undefined;
+            StdSha256.hash(data[a..][0..len], &expected[0], .{});
+            StdSha256.hash(data[b..][0..len], &expected[1], .{});
+            try testing.expectEqualSlices(u8, &expected[0], &Sha256.hash(&left).bytes);
+            const pair = Sha256.hash_pair(&left, &right, parallel.sequential);
+            try testing.expectEqualSlices(u8, &expected[0], &pair[0].bytes);
+            try testing.expectEqualSlices(u8, &expected[1], &pair[1].bytes);
+            // A right side of another shape takes the padded path.
+            const other = [_][]const u8{ data[b..][0..8], data[b + 8 ..][0..32] };
+            var expected_other: [32]u8 = undefined;
+            StdSha256.hash(data[b..][0..40], &expected_other, .{});
+            const mixed = Sha256.hash_pair(&left, &other, parallel.sequential);
+            try testing.expectEqualSlices(u8, &expected[0], &mixed[0].bytes);
+            try testing.expectEqualSlices(u8, &expected_other, &mixed[1].bytes);
+        }
     }
 }
 

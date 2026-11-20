@@ -555,7 +555,7 @@ benches ran on tmpfs, so per-run ratios swing: `merkle::append` mmr ran 0.91×, 
 | `merkle::verify_single_element` | `n=100000 samples=100 family=mmb` | 352 µs | 348 µs | 0.99× |
 | `merkle::verify_multi` | `n=100000 items=100 family=mmr` | 122 µs | 143 µs | 1.18× |
 | `merkle::verify_many_elements` | `n=100000 range=100 samples=100 family=mmr` | 1.53 ms | 1.8 ms | 1.17× |
-| `bmt::build` | `n=100000` | 6.66 ms | 12.5 ms | 1.87× |
+| `bmt::build` | `n=100000` | 6.66 ms | 12.5 ms | 1.87× (fixed, see below) |
 | `bmt::proof` | `n=100000` | 41.9 ns | 41.2 ns | 0.98× |
 | `bmt::multi_proof` | `n=100000 items=100` | 6.86 µs | 4.55 µs | 0.66× |
 | `bmt::range_proof` | `n=100000 items=100` | 72 ns | 45.7 ns | 0.63× |
@@ -587,6 +587,21 @@ benches ran on tmpfs, so per-run ratios swing: `merkle::append` mmr ran 0.91×, 
   leaf hashes and 50,000 `hash_pair`s. crypto's own rows still put `hash_parts` at 1.4–1.85×
   and `hash_pair` near 1.3× commonware's hand-scheduled assembly; the bmt code adds one 3 MB
   leaf copy (about 2%). The fix is in cryptography's sha256, not storage.
+- **`bmt::build`, fixed (clearing lane, this row's commit).** The SHA-256 cost was assembling
+  each message on the stack before compressing it. `sha256_blocks.digest_shape` ports
+  commonware's `hash_36` (the 4+32 leaf's words built in registers, padding included) and the
+  64-byte node kernels (two digests loaded straight into registers, then the padding block's
+  constant W + K table, commonware's `FIXED_ROUNDS4`), singly and as interleaved pairs.
+  Eleven alternating rounds of commonware, zigware before (356e1da9) and zigware after, with
+  bench-compare.sh's settings at a load average of 75 to 104:
+
+  | | commonware | before | after |
+  | --- | --- | --- | --- |
+  | best median | 7.34 ms | 10.6 ms | 8.10 ms |
+  | median ratio to commonware, per round | | 1.21× | 0.88× |
+
+  After/before is 0.72× (median per round). Best of each side puts it at 1.10×; at this load
+  the per-round ratio to commonware ran 0.60× to 1.37×, so treat it as even.
 - **Proof generation** (`merkle::proof`, `range_proof`, `bmt::proof`, `bmt::multi_proof`) is
   0.37× to 0.98×. Before 5c5d48cd, `bmt::proof` (about 40 ns) and `bmt::multi_proof` read
   1.8× and 2.9×: the clock read per iteration dominated.
