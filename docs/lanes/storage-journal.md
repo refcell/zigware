@@ -484,14 +484,14 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   fixed_append, segmented append_buffered, append_sync and metadata before/after (05e1ed83)
   were never re-measured, so their BENCHMARKS rows stay provisional. Random 1 MiB
   compressed rows (1.35×, 1.69× before f78b7454 and 20d5e341) are unmeasured since.
-- 2026-11-20: resumed for the random compressed rows. Landed 586dd9d8 (dfast candidates
-  selected without branching on the window check), 971f6c9d (a matchless block whose sampled
+- 2026-11-20: resumed for the random compressed rows. Landed a769320e (dfast candidates
+  selected without branching on the window check), ef300078 (a matchless block whose sampled
   literals stay raw is stored raw without copying it; new libzstd `alphabet` frame fixtures),
-  dd6861c5 (one encoder per journal across batches), bc9ee19b (window indexes continue across
-  frames instead of clearing the tables, as `ZSTDirp_continue`), c62364ee (dfast on window
-  indexes, one read per position), d2ab82b1 (fixed-size batches reserved up front), b83b4871
-  (Huffman literals skipped when their streams cannot pay), 90b38d7c (dfast specialized on
-  level 3's table logs), fa916d41 (items borrowed through compressed frame encoding: a 1 MiB
+  becdb025 (one encoder per journal across batches), bbe63e26 (window indexes continue across
+  frames instead of clearing the tables, as `ZSTDirp_continue`), 01ce7df3 (dfast on window
+  indexes, one read per position), c2766157 (fixed-size batches reserved up front), fbf91279
+  (Huffman literals skipped when their streams cannot pay), 06099fb2 (dfast specialized on
+  level 3's table logs), d5a0ab1a (items borrowed through compressed frame encoding: a 1 MiB
   item was copied twice). Tried and dropped: a four-table histogram (`HIST_count_parallel`,
   slower on this Zen 5) and prefetching the next positions' table entries (slower at every
   size). On identical bytes the encoder now runs a random 1 MiB frame in 185k TSC ticks

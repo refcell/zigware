@@ -1241,56 +1241,56 @@ commonware's `Rayon::new` builds. That made no difference beyond noise here.
 ## Journal: zstd level 3 compression, native ABBA (2026-11-20, storage-journal lane)
 
 Every compressed `journal::variable_prepare_append` row against commonware built with
-`target-cpu=native`, 8 ABBA rounds through the bench queue (load 3 to 19). "before" is main at
-94e3da52 (8 rounds, load 4 to 17), random rows only; "after" is 90b38d7c. Times are the median
-per-round medians. The single random 1 KiB row is faster by a hair (median 0.946×, no round at
-or above 1).
+`target-cpu=native`, 8 ABBA rounds through the bench queue (load 6 to 9). "before" is main at
+94e3da52 (8 rounds, load 4 to 17), random rows only; "after" is d5a0ab1a. Times are the median
+per-round medians. All 24 rows are faster; no random row has a round at or above 1 (the closest,
+a single random 1 KiB item, reads 0.90 to 0.98 per round).
 
 | parameters | commonware | zigware | before | after | verdict |
 |---|---|---|---|---|---|
-| `items=1 size=64 compression=3 random=false` | 635 ns | 480 ns | — | 0.75× | faster |
-| `items=32 size=64 compression=3 random=false` | 19 µs | 14 µs | — | 0.73× | faster |
-| `items=256 size=64 compression=3 random=false` | 152 µs | 113 µs | — | 0.74× | faster |
-| `items=1024 size=64 compression=3 random=false` | 625 µs | 455 µs | — | 0.73× | faster |
+| `items=1 size=64 compression=3 random=false` | 655 ns | 482 ns | — | 0.75× | faster |
+| `items=32 size=64 compression=3 random=false` | 19.9 µs | 14.3 µs | — | 0.72× | faster |
+| `items=256 size=64 compression=3 random=false` | 159 µs | 115 µs | — | 0.72× | faster |
+| `items=1024 size=64 compression=3 random=false` | 633 µs | 459 µs | — | 0.73× | faster |
 | `items=32768 size=64 compression=3 random=false` | 20.1 ms | 14.7 ms | — | 0.73× | faster |
-| `items=1 size=64 compression=3 random=true` | 375 ns | 221 ns | 0.64× | 0.59× | faster |
-| `items=32 size=64 compression=3 random=true` | 11.7 µs | 6.48 µs | 0.51× | 0.55× | faster |
-| `items=256 size=64 compression=3 random=true` | 92.7 µs | 55.2 µs | 0.51× | 0.59× | faster |
-| `items=1024 size=64 compression=3 random=true` | 366 µs | 226 µs | 1.17× | 0.62× | faster |
-| `items=32768 size=64 compression=3 random=true` | 12 ms | 9.6 ms | 1.25× | 0.79× | faster |
-| `items=1 size=1024 compression=3 random=false` | 714 ns | 519 ns | — | 0.73× | faster |
-| `items=32 size=1024 compression=3 random=false` | 22.1 µs | 15.3 µs | — | 0.69× | faster |
-| `items=256 size=1024 compression=3 random=false` | 176 µs | 122 µs | — | 0.70× | faster |
-| `items=1024 size=1024 compression=3 random=false` | 705 µs | 491 µs | — | 0.69× | faster |
-| `items=32768 size=1024 compression=3 random=false` | 24.8 ms | 15.9 ms | — | 0.65× | faster |
-| `items=1 size=1024 compression=3 random=true` | 1.27 µs | 1.2 µs | 0.87× | 0.946× | faster |
-| `items=32 size=1024 compression=3 random=true` | 45.1 µs | 40.2 µs | 0.89× | 0.89× | faster |
-| `items=256 size=1024 compression=3 random=true` | 369 µs | 329 µs | 1.74× | 0.89× | faster |
-| `items=1024 size=1024 compression=3 random=true` | 1.46 ms | 1.32 ms | 1.78× | 0.91× | faster |
-| `items=32768 size=1024 compression=3 random=true` | 52.4 ms | 43.8 ms | 1.63× | 0.84× | faster |
-| `items=1 size=1048576 compression=3 random=false` | 93.2 µs | 82.1 µs | — | 0.89× | faster |
-| `items=32 size=1048576 compression=3 random=false` | 3.47 ms | 2.93 ms | — | 0.84× | faster |
-| `items=1 size=1048576 compression=3 random=true` | 101 µs | 96.7 µs | 1.17× | 0.96× | tie |
-| `items=32 size=1048576 compression=3 random=true` | 5.7 ms | 3.89 ms | 1.41× | 0.68× | faster |
+| `items=1 size=64 compression=3 random=true` | 381 ns | 210 ns | 0.64× | 0.55× | faster |
+| `items=32 size=64 compression=3 random=true` | 11.7 µs | 6.19 µs | 0.51× | 0.53× | faster |
+| `items=256 size=64 compression=3 random=true` | 93.3 µs | 52.4 µs | 0.51× | 0.56× | faster |
+| `items=1024 size=64 compression=3 random=true` | 363 µs | 218 µs | 1.17× | 0.60× | faster |
+| `items=32768 size=64 compression=3 random=true` | 11.8 ms | 8.91 ms | 1.25× | 0.75× | faster |
+| `items=1 size=1024 compression=3 random=false` | 706 ns | 524 ns | — | 0.72× | faster |
+| `items=32 size=1024 compression=3 random=false` | 22.1 µs | 15 µs | — | 0.68× | faster |
+| `items=256 size=1024 compression=3 random=false` | 177 µs | 120 µs | — | 0.68× | faster |
+| `items=1024 size=1024 compression=3 random=false` | 714 µs | 491 µs | — | 0.68× | faster |
+| `items=32768 size=1024 compression=3 random=false` | 24.9 ms | 15.5 ms | — | 0.62× | faster |
+| `items=1 size=1024 compression=3 random=true` | 1.25 µs | 1.2 µs | 0.87× | 0.94× | faster |
+| `items=32 size=1024 compression=3 random=true` | 45.3 µs | 39.6 µs | 0.89× | 0.88× | faster |
+| `items=256 size=1024 compression=3 random=true` | 366 µs | 325 µs | 1.74× | 0.89× | faster |
+| `items=1024 size=1024 compression=3 random=true` | 1.44 ms | 1.31 ms | 1.78× | 0.90× | faster |
+| `items=32768 size=1024 compression=3 random=true` | 52.3 ms | 43.1 ms | 1.63× | 0.83× | faster |
+| `items=1 size=1048576 compression=3 random=false` | 92.7 µs | 51.3 µs | — | 0.55× | faster |
+| `items=32 size=1048576 compression=3 random=false` | 3.47 ms | 2.04 ms | — | 0.58× | faster |
+| `items=1 size=1048576 compression=3 random=true` | 102 µs | 61.4 µs | 1.17× | 0.60× | faster |
+| `items=32 size=1048576 compression=3 random=true` | 5.9 ms | 3.78 ms | 1.41× | 0.63× | faster |
 
 What moved them, in the encoder (all frames stay byte-identical to libzstd 1.5.7's; new
 `alphabet` fixtures cover matchless blocks whose literals Huffman still shrinks):
-- 586dd9d8, c62364ee, 90b38d7c: the double-fast search selects candidates with a conditional
+- a769320e, 01ce7df3, 06099fb2: the double-fast search selects candidates with a conditional
   move (`ZSTD_selectAddr`) instead of branching on the window check, runs on window indexes
   with one 8-byte read per position, and is specialized on min_match, on whether a repeat
   offset is set, and on level 3's table logs, which keeps its state in registers.
-- 971f6c9d, b83b4871: a block without matches whose sampled literals stay raw is stored raw
+- ef300078, fbf91279: a block without matches whose sampled literals stay raw is stored raw
   without gathering and copying its literals twice, and Huffman literals are not written when
   the new table's estimate already rules them out.
-- dd6861c5, bc9ee19b: one encoder per journal, whose window indexes continue from frame to
+- becdb025, bbe63e26: one encoder per journal, whose window indexes continue from frame to
   frame (`ZSTDirp_continue`) instead of clearing 768 KB of tables per 1 MiB frame.
 
 On identical bytes, a random 1 MiB frame now takes 185k TSC ticks against libzstd's 241k,
 and random 1 KiB and 64 B items 3.57k and 0.56k against 3.72k and 0.68k. The rest is the
-batch: d2ab82b1 reserves a batch of fixed-size items once (a 32 MiB random batch grew from
-empty, copying about twice its size), and fa916d41, after this run, passes items to the
-encoder by pointer: a `[1048576]u8` item was copied twice per frame, which held the single
-random 1 MiB row at 0.96× (101 to 62 µs in one slot, against commonware's 102 µs). Tried and
+batch: c2766157 reserves a batch of fixed-size items once (a 32 MiB random batch grew from
+empty, copying about twice its size), and d5a0ab1a passes items to the encoder by
+pointer: a `[1048576]u8` item was copied twice per frame, which held the single random 1 MiB
+row at 0.96× (96.7 to 61.4 µs, against commonware's 102 µs). Tried and
 dropped: a four-table histogram (`HIST_count_parallel`, slower on this Zen 5 than one table)
 and prefetching the next positions' table entries (slower at every size).
 

@@ -15,7 +15,7 @@ add new entries here, with the bench row, its verdict, and the commit, in the sa
 | [Interleaved SHA-NI pairs for short `hash_many` runs](#sha-256-hash_many-in-sha-ni-pairs) | `sha256::hash_many::individual` count=1/7, len=64/256 | 0.73–0.92× (8 rounds) | faster | 17a97b76 |
 | [One root compression for short BLAKE3 messages](#blake3-one-root-compression) | `blake3::hash_message` msg_len=256 | 0.79× (8 rounds) | faster | 772e9944 |
 | [lthash over a wide XOF and 32-lane state steps](#lthash) | `lthash::add`/`subtract` ≤ 1 KiB, `combine` | 0.52–0.71×, 0.22× (8 rounds) | faster | b23c4c4c |
-| [Reserve a compressed batch up front](#journal-reserve-a-compressed-batch-up-front) | `journal::variable_prepare_append` items=32 size=1048576 compression=3 random=true | 0.68× (8 rounds) | faster | d2ab82b1 |
+| [Reserve a compressed batch up front](#journal-reserve-a-compressed-batch-up-front) | `journal::variable_prepare_append` items=32 size=1048576 compression=3 random=true | 0.68× (8 rounds) | faster | c2766157 |
 | [Blob I/O issued inline instead of on `spawn_blocking`](#storage-blob-io-without-a-thread-hop) | `freezer::get`, `freezer::put` | 0.03×, 0.07× (pre-ABBA) | see below | runtime design |
 
 ## ed25519 verify: Lehmer's half_size
