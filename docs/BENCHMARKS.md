@@ -1653,6 +1653,8 @@ ratios). Raw rounds are in `docs/bench/sweep.tsv`. Load 5 to 15 on 32 threads.
 | `cache::insert` | `capacity=16384` | 63.8 µs | 34.4 µs | 0.54× | 0.47–0.57 (6) | faster |
 | `cache::insert` | `capacity=262144` | 67.5 µs | 50.6 µs | 0.77× | 0.57–0.88 (6) | faster |
 | `merkle::update` | `updates=100000 leaves=100000 strategy=BatchedSerial family=mmr` | 18.2 ms | 17.6 ms | 0.97× | 0.93–0.99 (8) | tie |
+| `merkle::update` | same, with 02f95ab0 (radix sort) | 18.6 ms | 15.9 ms | 0.85× | 0.83–0.86 (8) | faster |
+| `merkle::add_many` | `items=65536 workers=8 family=mmb`, rebased on 4b64954b | 1.03 ms | 1.07 ms | 1.01× | 0.90–1.07 (8) | tie |
 | `merkle::add_many` | `items=65536 workers=8 family=mmb` | 1.05 ms | 1.08 ms | 1.03× | 1.02–1.04 (8) | tie |
 | `bls12381::msm` | `group=g1 n=50 conc=1` | 944 µs | 924 µs | 0.98× | 0.97–1.01 (6) | tie |
 | `bls12381::msm` | `group=g1 n=100 conc=1` | 1.60 ms | 1.60 ms | 1.00× | 0.97–1.29 (6) | tie |
@@ -1696,6 +1698,18 @@ ratios). Raw rounds are in `docs/bench/sweep.tsv`. Load 5 to 15 on 32 threads.
   the batch waits for the next batch instead of a Jacobian side bucket (7c1b1dca), and as many
   windows as the buckets hold share one batch-affine pass and its inversions (0f4975ec).
   Verdicts follow. This is blst code on commonware's side, not commonware's.
+- **bls msm regression and fix**: dd3848b6 split the tiled msm for every strategy, which
+  made the parallel G2 rows slower (g2 n=1000 conc=8 5.2 → 7.9 ms, 1.50× in a round; g2
+  n=200 conc=8 1.6 → 2.4 ms). 22f4b2a7 splits only on one thread: g2 n=1000 conc=8 5.0 ms,
+  g2 n=200 conc=8 1.33 ms, g1 n=1000 conc=8 2.11 → 1.69 ms, serial rows unchanged.
+- **cache refill**: 58% of `cache::refill/capacity=1024`'s timed loop was `handles.Table`'s
+  span insert, which loads, masks, and stores 64 bytes of 12-byte slots across two cache lines
+  for every insert. Below half load (a cache's index always is) an empty home slot now takes
+  the entry with one slot store (1b5359dd): refill 1024 5.46 → 4.36 µs, 16384 97 → 79 µs,
+  insert 16384 33.6 → 30.3 µs, get and mixed unchanged, qmdb immutable `apply_batch` and glue
+  `plan` unchanged (the gate keeps fuller tables, such as qmdb's, off the new branch).
+- **add_many** zeroes its new nodes per range in parallel instead of on the caller (74e252bf):
+  1.08 → 1.04 ms standalone.
 
 ## Appendix: bench coverage
 

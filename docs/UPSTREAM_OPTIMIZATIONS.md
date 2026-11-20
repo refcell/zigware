@@ -17,7 +17,7 @@ add new entries here, with the bench row, its verdict, and the commit, in the sa
 | [lthash over a wide XOF and 32-lane state steps](#lthash) | `lthash::add`/`subtract` ≤ 1 KiB, `combine` | 0.52–0.71×, 0.22× (8 rounds) | faster | b23c4c4c |
 | [Reserve a compressed batch up front](#journal-reserve-a-compressed-batch-up-front) | `journal::variable_prepare_append` items=32 size=1048576 compression=3 random=true | 0.68× (8 rounds) | faster | c2766157 |
 | [qmdb batch writes appended, sorted once at merkleize](#qmdb-batch-writes-in-an-append-only-log) | `qmdb::merkleize` (4 rows) | 0.78–0.93× (8 rounds) | faster | 03f3ab28 |
-| [Radix-sorted dirty leaves, children read from the height below](#merkle-update-radix-sorted-dirty-leaves-and-children-from-the-height-below) | `merkle::update` updates=100000 leaves=100000 BatchedSerial mmr | 0.97× (8 rounds) before the sort | tie; re-measuring | 9757335d, 02f95ab0 |
+| [Radix-sorted dirty leaves, children read from the height below](#merkle-update-radix-sorted-dirty-leaves-and-children-from-the-height-below) | `merkle::update` updates=100000 leaves=100000 BatchedSerial mmr | 0.85× (8 rounds) | faster | 9757335d, 02f95ab0 |
 | [Blob I/O issued inline instead of on `spawn_blocking`](#storage-blob-io-without-a-thread-hop) | `freezer::get`, `freezer::put` | 0.03×, 0.07× (pre-ABBA) | see below | runtime design |
 
 ## ed25519 verify: Lehmer's half_size
@@ -115,7 +115,7 @@ pdq took 11% of `update` BatchedSerial 100k/100k in zigware, and the sort took i
 node it hashed at the height just below, in ascending order, so a cursor over that height's
 sorted positions and digests finds each child without the `Overwrites` lookup commonware's
 `get_node` does per child (9757335d). The row was 1.05×, then 0.97× (a tie, 8 rounds) with the
-cursor and before the sort; its verdict with both is being re-measured.
+cursor and before the sort, and 0.85× (0.83–0.86, 8 rounds, faster) with both.
 
 - Evidence: [BENCHMARKS.md, sweep](BENCHMARKS.md#sweep-the-rows-still-slower-2026-11-20-sweep).
 
