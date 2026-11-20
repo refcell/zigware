@@ -415,7 +415,7 @@ pub fn Archive(comptime T: type, comptime K: type, comptime V: type) type {
 
         fn keys_equal(stored: K, key_bytes: *const [key_size]u8) bool {
             const stored_bytes: [key_size]u8 = codec.encode_fixed(K, stored);
-            return std.mem.eql(u8, &stored_bytes, key_bytes);
+            return utils.bytes_eql(key_size, &stored_bytes, key_bytes);
         }
 
         /// Whether `index` is stored, or any retained index stores `key`.

@@ -6,6 +6,7 @@
 //! or else to the older (or empty) one, so a torn table write never loses the committed head.
 
 const std = @import("std");
+const utils = @import("utils");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
@@ -395,7 +396,7 @@ pub fn Freezer(comptime K: type, comptime V: type) type {
             while (true) {
                 const record = try self.oversized.get(section, position);
                 const record_key: [key_size]u8 = codec.encode_fixed(K, record.key);
-                if (std.mem.eql(u8, &record_key, &key_bytes)) return .{ section, record };
+                if (utils.bytes_eql(key_size, &record_key, &key_bytes)) return .{ section, record };
                 self.unnecessary_reads.metric().inc();
                 const next = record.next() orelse return null;
                 section = next[0];
