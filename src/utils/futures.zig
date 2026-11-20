@@ -50,12 +50,14 @@ pub fn Pool(comptime T: type) type {
             return self.len() == 0;
         }
 
-        /// Runs `function(args...)`, which returns `T`, as a task of the pool.
+        /// Runs `function(args...)`, which returns `T`, as a task of the pool. Like Rust's
+        /// `FuturesUnordered::push`, it never runs the task on the caller, so a task may wait
+        /// on what the caller does next.
         pub fn push(
             self: *Self,
             function: anytype,
             args: std.meta.ArgsTuple(@TypeOf(function)),
-        ) void {
+        ) Io.ConcurrentError!void {
             assert(self.pending < self.buffer.len);
             const Task = struct {
                 fn run(pool: *Self, task_args: @TypeOf(args)) void {
@@ -64,8 +66,9 @@ pub fn Pool(comptime T: type) type {
                     pool.queue.putOneUncancelable(pool.io, result) catch unreachable;
                 }
             };
+            // `async` may run the task inline when no thread is free, blocking the caller.
+            try self.group.concurrent(self.io, Task.run, .{ self, args });
             self.pending += 1;
-            self.group.async(self.io, Task.run, .{ self, args });
         }
 
         /// Waits for the next task to complete and returns its result; the pool is not empty.
@@ -156,12 +159,12 @@ pub fn AbortablePool(comptime T: type) type {
         }
 
         /// Runs `function(args...)`, which returns `Io.Cancelable!T`, as a task; the aborter
-        /// cancels it.
+        /// cancels it. Like `Pool.push`, it never runs the task on the caller.
         pub fn push(
             self: *Self,
             function: anytype,
             args: std.meta.ArgsTuple(@TypeOf(function)),
-        ) Aborter {
+        ) Io.ConcurrentError!Aborter {
             assert(self.pending < self.slots.len);
             const index = for (self.slots, 0..) |slot, index| {
                 if (!slot.live) break index;
@@ -177,11 +180,13 @@ pub fn AbortablePool(comptime T: type) type {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             const slot = &self.slots[index];
+            // The task's completion is read under the mutex, so the slot is set before it is.
+            const slot_index: u32 = @intCast(index);
+            slot.future = try self.io.concurrent(Task.run, .{ self, slot_index, args });
             slot.live = true;
             slot.aborted = false;
             slot.generation +%= 1;
             self.pending += 1;
-            slot.future = self.io.async(Task.run, .{ self, @as(u32, @intCast(index)), args });
             return .{ .pool = self, .slot = @intCast(index), .generation = slot.generation };
         }
 

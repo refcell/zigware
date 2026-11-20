@@ -24,8 +24,8 @@ test "futures: pool initialization and adding tasks" {
     var pool = try futures.Pool(i32).init(gpa, io, 4);
     defer pool.deinit(gpa);
     try testing.expect(pool.is_empty());
-    pool.push(ready, .{1});
-    pool.push(ready, .{2});
+    try pool.push(ready, .{1});
+    try pool.push(ready, .{2});
     try testing.expectEqual(2, pool.len());
 }
 
@@ -40,13 +40,37 @@ test "futures: pool results arrive in completion order" {
     // that result before opening the next, so completion order is enforced, not timed, and it
     // differs from push order.
     for (&gates, 1..) |*gate, value| {
-        pool.push(wait_then, .{ &gate.receiver, @as(i32, @intCast(value)) });
+        try pool.push(wait_then, .{ &gate.receiver, @as(i32, @intCast(value)) });
     }
     for ([_]usize{ 2, 1, 3 }) |value| {
         try gates[value - 1].sender.send({});
         try testing.expectEqual(@as(i32, @intCast(value)), try pool.next_completed());
     }
     try testing.expect(pool.is_empty());
+}
+
+fn thread_id() i32 {
+    return @bitCast(@as(u32, @truncate(std.Thread.getCurrentId())));
+}
+
+fn thread_id_cancelable() Io.Cancelable!i32 {
+    return thread_id();
+}
+
+test "futures: push never runs the task on the caller" {
+    // With no async threads, `Io.async` runs a task inline on its caller; a pool task that
+    // waits on the caller then deadlocks it (the 3-core hang in "completion order").
+    var threaded: Io.Threaded = .init(gpa, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+    const limited = threaded.io();
+    var pool = try futures.Pool(i32).init(gpa, limited, 2);
+    defer pool.deinit(gpa);
+    try pool.push(thread_id, .{});
+    try testing.expect(try pool.next_completed() != thread_id());
+    var abortable = try futures.AbortablePool(i32).init(gpa, limited, 2);
+    defer abortable.deinit(gpa);
+    _ = try abortable.push(thread_id_cancelable, .{});
+    try testing.expect(try abortable.next_completed() != thread_id());
 }
 
 fn wait_flag(receiver: *oneshot.Receiver(void), flag: *std.atomic.Value(bool)) i32 {
@@ -61,20 +85,20 @@ test "futures: cancel_all drops pending tasks" {
     var flag: std.atomic.Value(bool) = .init(false);
     var pair = try oneshot.channel(void, gpa, io);
     defer pair.receiver.deinit();
-    pool.push(wait_flag, .{ &pair.receiver, &flag });
+    try pool.push(wait_flag, .{ &pair.receiver, &flag });
     try testing.expectEqual(1, pool.len());
     pool.cancel_all();
     try testing.expect(pool.is_empty());
     try testing.expect(!flag.load(.seq_cst));
     pair.sender.send({}) catch {};
-    pool.push(ready, .{42});
+    try pool.push(ready, .{42});
     try testing.expectEqual(42, try pool.next_completed());
 }
 
 test "futures: many tasks" {
     var pool = try futures.Pool(i32).init(gpa, io, 1000);
     defer pool.deinit(gpa);
-    for (0..1000) |value| pool.push(ready, .{@as(i32, @intCast(value))});
+    for (0..1000) |value| try pool.push(ready, .{@as(i32, @intCast(value))});
     try testing.expectEqual(1000, pool.len());
     var sum: i32 = 0;
     for (0..1000) |_| sum += try pool.next_completed();
@@ -97,11 +121,11 @@ test "futures: abortable pool completes and aborts" {
     var pool = try futures.AbortablePool(i32).init(gpa, io, 4);
     defer pool.deinit(gpa);
     try testing.expect(pool.is_empty());
-    _ = pool.push(ready_cancelable, .{42});
+    _ = try pool.push(ready_cancelable, .{42});
     try testing.expectEqual(42, try pool.next_completed());
 
     // An aborted task reports `Aborted` even when it already finished.
-    const done = pool.push(ready_cancelable, .{43});
+    const done = try pool.push(ready_cancelable, .{43});
     done.abort();
     try testing.expectError(error.Aborted, pool.next_completed());
 
@@ -109,12 +133,12 @@ test "futures: abortable pool completes and aborts" {
     var pair = try oneshot.channel(void, gpa, io);
     defer pair.sender.deinit();
     defer pair.receiver.deinit();
-    const blocked = pool.push(wait_cancelable, .{ &pair.receiver, 1 });
+    const blocked = try pool.push(wait_cancelable, .{ &pair.receiver, 1 });
     blocked.abort();
     try testing.expectError(error.Aborted, pool.next_completed());
     try testing.expect(pool.is_empty());
     // A stale aborter does nothing to the slot's next task.
-    _ = pool.push(ready_cancelable, .{7});
+    _ = try pool.push(ready_cancelable, .{7});
     blocked.abort();
     try testing.expectEqual(7, try pool.next_completed());
 }
@@ -125,9 +149,9 @@ test "futures: abortable pool partial abort" {
     var pair = try oneshot.channel(void, gpa, io);
     defer pair.sender.deinit();
     defer pair.receiver.deinit();
-    _ = pool.push(ready_cancelable, .{1});
-    const second = pool.push(wait_cancelable, .{ &pair.receiver, 2 });
-    _ = pool.push(ready_cancelable, .{3});
+    _ = try pool.push(ready_cancelable, .{1});
+    const second = try pool.push(wait_cancelable, .{ &pair.receiver, 2 });
+    _ = try pool.push(ready_cancelable, .{3});
     try testing.expectEqual(3, pool.len());
     second.abort();
     var sum: i32 = 0;
@@ -214,7 +238,7 @@ fn fuzz_pools(_: void, generator: *rng.FuzzRng) !void {
         switch (rng.range_less_than(generator, u8, 0, 5)) {
             0 => if (pool.len() < 64) {
                 const value: i32 = @bitCast(generator.next_u32() >> 8);
-                pool.push(ready, .{value});
+                try pool.push(ready, .{value});
                 sum_pushed += value;
             },
             1 => if (!pool.is_empty()) {
@@ -225,7 +249,7 @@ fn fuzz_pools(_: void, generator: *rng.FuzzRng) !void {
                 sum_pushed = sum_completed;
             },
             3 => if (abortable.len() < 64) {
-                const aborter = abortable.push(ready_cancelable, .{next_id});
+                const aborter = try abortable.push(ready_cancelable, .{next_id});
                 try pending.append(gpa, .{ .aborter = aborter, .id = next_id });
                 next_id += 1;
             },
