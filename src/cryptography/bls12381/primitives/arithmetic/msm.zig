@@ -105,8 +105,9 @@ fn split_terms(
     return count;
 }
 
-/// The window width with the fewest bucket additions for `count` scalars of `nbits` bits:
-/// each window adds every point into a bucket and folds 2^(c-1) buckets at two additions.
+/// The cheapest window width for `count` scalars of `nbits` bits: each window adds every
+/// point into a batch-affine bucket and folds its 2^(c-1) buckets, weighted as one point
+/// each (measured: wider windows win, as bucket conflicts send points to the side buckets).
 fn split_window_bits(comptime C: type, count: usize, nbits: u32) u32 {
     assert(count > 0 and nbits > 0);
     var best: u32 = window_bits_min;
@@ -114,7 +115,7 @@ fn split_window_bits(comptime C: type, count: usize, nbits: u32) u32 {
     var bits: u32 = window_bits_min;
     while (bits <= window_bits_max(C)) : (bits += 1) {
         const windows: u64 = nbits / bits + 1;
-        const cost = windows * (count + (@as(u64, 1) << @intCast(bits)));
+        const cost = windows * (count + (@as(u64, 1) << @intCast(bits - 1)));
         if (cost < best_cost) {
             best = bits;
             best_cost = cost;
