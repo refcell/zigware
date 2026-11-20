@@ -63,7 +63,7 @@ pub const Blake3 = struct {
         if (len >= tree.subtree_len_min) {
             if (!tree.transposed or parts.len > tree_parts_max) return Streaming.hash(parts);
         }
-        return .{ .bytes = tree.hash_subtrees(parts, len, parallel.sequential) };
+        return .{ .bytes = tree.hash_serial(parts, len) };
     }
 
     /// `hash(parts)`, with a message of at least `tree.split_len_min` bytes hashed as

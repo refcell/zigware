@@ -37,7 +37,10 @@ const subtree_len_floor = 2 * subtree_len_min;
 /// Length, in bytes, of the shortest message `hash_across` splits (commonware `MIN_SPLIT_LEN`).
 pub const split_len_min = subtrees * subtree_len_min;
 
-const subtree_chunks_max = subtree_len_max / chunk_len;
+/// Chunks in the longest run `run_cv` merges, and in the subtrees `hash_serial` cuts.
+const run_chunks_max = 1024;
+/// Length, in bytes, of the subtrees `hash_serial` cuts a message into: one run each.
+const serial_subtree_len = run_chunks_max * chunk_len;
 /// Subtrees one `map_into` round hashes, bounding the chaining values held between rounds.
 const round_subtrees = 64;
 /// Chaining values on the stack: one per set bit of a 64-bit chunk count.
@@ -72,9 +75,9 @@ const msg_schedule: [7][16]u8 = .{
 comptime {
     assert(std.math.isPowerOfTwo(lanes));
     assert(lanes <= subtree_len_min / chunk_len);
-    // A transposed load reads one block: 16 words, or a parent's two chaining values.
+    assert(subtree_len_max <= serial_subtree_len);
+    // A transposed load reads one block of 16 words.
     assert(@sizeOf(@Vector(16, u32)) == block_len);
-    assert(@sizeOf([2][8]u32) == block_len);
     assert(split_len_min > subtree_len_max);
     assert(subtree_len_floor >= subtree_len_min and subtree_len_floor <= subtree_len_max);
 }
@@ -171,14 +174,13 @@ inline fn transpose16(rows: *[16]Vec(16)) void {
     }
 }
 
-/// The 16 words of each 64-byte block at `blocks`, one block per lane, read in native byte
-/// order (chaining values) or as little-endian words (message bytes) with `little`. One vector
-/// load per block: copying a `[64]u8` instead lowers to byte loads.
-inline fn load_transposed(blocks: *const [16][*]const u8, comptime little: bool) [16]Vec(16) {
+/// The 16 little-endian words of each 64-byte block at `blocks`, one block per lane. One
+/// vector load per block: copying a `[64]u8` instead lowers to byte loads.
+inline fn load_transposed(blocks: *const [16][*]const u8) [16]Vec(16) {
     var m: [16]Vec(16) = undefined;
     inline for (&m, blocks) |*row, block| {
         row.* = @as(*align(1) const Vec(16), @ptrCast(block)).*;
-        if (little and native_endian == .big) row.* = @byteSwap(row.*);
+        if (native_endian == .big) row.* = @byteSwap(row.*);
     }
     transpose16(&m);
     return m;
@@ -191,7 +193,7 @@ inline fn chunk_words(comptime n: usize, chunks: *const [n][*]const u8, block: u
     if (n == 16) {
         var blocks: [16][*]const u8 = undefined;
         inline for (&blocks, chunks) |*b, chunk| b.* = chunk + block * block_len;
-        return load_transposed(&blocks, true);
+        return load_transposed(&blocks);
     }
     var rows: [n][16]u32 = undefined;
     for (&rows, chunks) |*row, chunk| {
@@ -204,8 +206,9 @@ inline fn chunk_words(comptime n: usize, chunks: *const [n][*]const u8, block: u
     return m;
 }
 
-/// The chaining values of the `n` whole chunks at `chunks`, the first at chunk `counter`.
-fn chunk_cvs(comptime n: usize, chunks: *const [n][*]const u8, counter: u64, out: *[n]Cv) void {
+/// The chaining values, in vector form, of the `n` whole chunks at `chunks`, the first at chunk
+/// `counter`.
+fn chunk_nodes(comptime n: usize, chunks: *const [n][*]const u8, counter: u64) [8]Vec(n) {
     var low: [n]u32 = undefined;
     var high: [n]u32 = undefined;
     for (&low, &high, 0..) |*l, *h, lane| {
@@ -226,7 +229,12 @@ fn chunk_cvs(comptime n: usize, chunks: *const [n][*]const u8, counter: u64, out
             .flags = @splat(flags),
         } });
     }
-    lane_cvs(n, cv, out);
+    return cv;
+}
+
+/// The chaining values of the `n` whole chunks at `chunks`, the first at chunk `counter`.
+fn chunk_cvs(comptime n: usize, chunks: *const [n][*]const u8, counter: u64, out: *[n]Cv) void {
+    lane_cvs(n, chunk_nodes(n, chunks, counter), out);
 }
 
 /// The chaining values of the `n` parents of `children[2i]` and `children[2i + 1]`, with
@@ -234,17 +242,10 @@ fn chunk_cvs(comptime n: usize, chunks: *const [n][*]const u8, counter: u64, out
 fn parent_cvs(comptime n: usize, children: *const [2 * n]Cv, extra_flags: u32, out: *[n]Cv) void {
     assert(extra_flags & ~flag_root == 0);
     var m: [16]Vec(n) = undefined;
-    if (n == 16) {
-        // Each parent's block is its two children's chaining values, adjacent in `children`.
-        var blocks: [16][*]const u8 = undefined;
-        inline for (&blocks, 0..) |*b, lane| b.* = @ptrCast(children[2 * lane ..][0..2]);
-        m = load_transposed(&blocks, false);
-    } else {
-        inline for (0..16) |w| {
-            var column: [n]u32 = undefined;
-            for (&column, 0..) |*c, lane| c.* = children[2 * lane + w / 8][w % 8];
-            m[w] = column;
-        }
+    inline for (0..16) |w| {
+        var column: [n]u32 = undefined;
+        for (&column, 0..) |*c, lane| c.* = children[2 * lane + w / 8][w % 8];
+        m[w] = column;
     }
     const cv = compress(n, splat_cv(n, iv), &m, .{
         .counter_low = @splat(0),
@@ -259,6 +260,88 @@ fn parent_cv(left: Cv, right: Cv, extra_flags: u32) Cv {
     var out: [1]Cv = undefined;
     parent_cvs(1, &.{ left, right }, extra_flags, &out);
     return out[0];
+}
+
+/// A `@shuffle` mask taking every other lane of the `2n` lanes of `a` then `b`, from lane
+/// `first` (0: the left children of their pairs, 1: the right ones).
+fn pair_mask(comptime n: usize, comptime first: usize) [n]i32 {
+    var mask: [n]i32 = undefined;
+    for (&mask, 0..) |*index, lane| {
+        const source = 2 * lane + first;
+        index.* = if (source < n) source else ~@as(i32, source - n);
+    }
+    return mask;
+}
+
+/// The `n` parents, in vector form, of the `2n` sibling nodes `left` then `right` (chaining
+/// values in vector form): each parent's message is a pair of adjacent nodes, gathered with
+/// two shuffles per word instead of storing the nodes and transposing them back.
+fn parent_nodes(comptime n: usize, left: [8]Vec(n), right: [8]Vec(n)) [8]Vec(n) {
+    var m: [16]Vec(n) = undefined;
+    inline for (0..8) |w| {
+        m[w] = @shuffle(u32, left[w], right[w], pair_mask(n, 0));
+        m[8 + w] = @shuffle(u32, left[w], right[w], pair_mask(n, 1));
+    }
+    return @call(.always_inline, compress, .{ n, splat_cv(n, iv), &m, Words(n){
+        .counter_low = @splat(0),
+        .counter_high = @splat(0),
+        .block_len = @splat(block_len),
+        .flags = @splat(flag_parent),
+    } });
+}
+
+/// The chaining value of the subtree whose `n` sibling nodes are `nodes`, a power of two, each
+/// level at half the width of the one below. The recursion is over the comptime width, so it
+/// unrolls at compile time into `log2(n)` levels.
+inline fn collapse(comptime n: usize, nodes: [8]Vec(n)) Cv {
+    comptime assert(std.math.isPowerOfTwo(n));
+    if (n == 1) {
+        var out: [1]Cv = undefined;
+        lane_cvs(1, nodes, &out);
+        return out[0];
+    }
+    const half = n / 2;
+    comptime var low: [half]i32 = undefined;
+    inline for (&low, 0..) |*index, lane| index.* = lane;
+    comptime var high: [half]i32 = undefined;
+    inline for (&high, 0..) |*index, lane| index.* = half + lane;
+    var left: [8]Vec(half) = undefined;
+    var right: [8]Vec(half) = undefined;
+    inline for (0..8) |w| {
+        left[w] = @shuffle(u32, nodes[w], nodes[w], low);
+        right[w] = @shuffle(u32, nodes[w], nodes[w], high);
+    }
+    return collapse(half, parent_nodes(half, left, right));
+}
+
+/// The chaining value of the aligned run of `chunks` whole chunks read from `cursor`, the
+/// first at chunk `counter`: a power of two from `lanes` to `run_chunks_max`. Batches of
+/// `lanes` chunks merge in vector form as a binary counter: each batch merges with the
+/// pending batch of every level its index completes, so every merge but the top `lanes`
+/// nodes runs at full width.
+fn run_cv(cursor: *Cursor, counter: u64, chunks: usize) Cv {
+    assert(std.math.isPowerOfTwo(chunks));
+    assert(chunks >= lanes and chunks <= run_chunks_max);
+    assert(counter % chunks == 0);
+    const levels = comptime std.math.log2_int(usize, run_chunks_max / lanes) + 1;
+    var pending: [levels][8]Vec(lanes) = undefined;
+    var scratch: [lanes][chunk_len]u8 = undefined;
+    const batches = chunks / lanes;
+    for (0..batches) |batch| {
+        var pointers: [lanes][*]const u8 = undefined;
+        for (&pointers, &scratch) |*pointer, *buffer| {
+            pointer.* = cursor.take(chunk_len, buffer).ptr;
+        }
+        var nodes = chunk_nodes(lanes, &pointers, counter + batch * lanes);
+        var level: usize = 0;
+        while ((batch >> @intCast(level)) & 1 == 1) : (level += 1) {
+            nodes = parent_nodes(lanes, pending[level], nodes);
+        }
+        pending[level] = nodes;
+    }
+    const top = std.math.log2_int(usize, batches);
+    assert(top < levels);
+    return collapse(lanes, pending[top]);
 }
 
 /// Reads a message given as `parts` in order, chunk by chunk, copying a chunk only when it
@@ -376,13 +459,9 @@ fn merge_subtree(cvs: []Cv) Cv {
 
 /// The chaining value of the aligned subtree of `chunks` chunks at byte `offset`.
 fn subtree_cv(parts: []const []const u8, offset: usize, chunks: usize) Cv {
-    assert(std.math.isPowerOfTwo(chunks));
-    assert(chunks <= subtree_chunks_max);
     assert(offset % (chunks * chunk_len) == 0);
-    var cvs: [subtree_chunks_max]Cv = undefined;
     var cursor = Cursor.at(parts, offset);
-    chunks_cvs(&cursor, offset / chunk_len, cvs[0..chunks]);
-    return merge_subtree(cvs[0..chunks]);
+    return run_cv(&cursor, offset / chunk_len, chunks);
 }
 
 /// The streaming hasher's chaining-value stack: each entry covers an aligned power-of-two run
@@ -468,58 +547,83 @@ pub fn subtree_len_for(len: usize) usize {
     return subtree_len;
 }
 
-/// The chaining values of a message's rest, the bytes after its last whole subtree: its whole
-/// chunks as aligned runs of decreasing powers of two, then its last chunk.
+/// The chaining values of a message's rest, the bytes after its last whole subtree: aligned
+/// runs of decreasing powers of two of its whole chunks, then its last node, `last`, at chunk
+/// `last_counter`: its last run when its last chunk is whole, its last chunk otherwise.
 const Rest = struct {
-    /// A rest of fewer than `subtree_chunks_max` whole chunks has at most this many runs.
-    const runs_max = std.math.log2_int(usize, subtree_chunks_max);
+    /// Runs of up to `run_chunks_max` chunks: one per set bit, plus a split one.
+    const runs_max = std.math.log2_int(usize, run_chunks_max) + 2;
 
     runs: [runs_max]Cv = undefined,
     run_starts: [runs_max]u64 = undefined,
     run_count: usize = 0,
     last: Cv = undefined,
     last_counter: u64 = 0,
+
+    fn push(rest: *Rest, cv: Cv, start: u64) void {
+        assert(rest.run_count < runs_max);
+        rest.runs[rest.run_count] = cv;
+        rest.run_starts[rest.run_count] = start;
+        rest.run_count += 1;
+    }
 };
 
-comptime {
-    assert(@popCount(@as(usize, subtree_chunks_max - 1)) <= Rest.runs_max);
+/// The length of the next run of a rest's `whole` chunks, `done` of them already in runs: the
+/// largest power of two left, except that a message that is one power-of-two run (`first` 0,
+/// no partial last chunk) splits into two, since its root merges two runs.
+fn next_run(first: u64, whole: usize, done: usize, partial: bool) usize {
+    assert(done < whole);
+    const run = std.math.floorPowerOfTwo(usize, whole - done);
+    if (first == 0 and done == 0 and !partial and run == whole) return run / 2;
+    return run;
 }
 
 /// Hashes the rest of the `len`-byte message `parts` from byte `offset`, a subtree boundary.
+/// Runs of at least `lanes` chunks merge in vector form (`run_cv`); the shorter ones left,
+/// at most `lanes` chunks in all, compress in one batch.
 fn hash_rest(parts: []const []const u8, len: usize, offset: usize, rest: *Rest) void {
     assert(offset < len);
-    // A whole last chunk compresses in the same batch as the others; only its merge into the
-    // root differs.
     const rest_len = len - offset;
-    const last_whole = rest_len % chunk_len == 0;
-    const rest_chunks = (rest_len - 1) / chunk_len;
-    const batched = rest_chunks + @intFromBool(last_whole);
-    assert(batched <= subtree_chunks_max);
+    const first: u64 = offset / chunk_len;
+    const whole = rest_len / chunk_len;
+    const partial = rest_len % chunk_len;
+    assert(whole <= run_chunks_max);
     var cursor = Cursor.at(parts, offset);
-    var cvs: [subtree_chunks_max]Cv = undefined;
-    const first = offset / chunk_len;
-    chunks_cvs(&cursor, first, cvs[0..batched]);
-    // Merge the whole chunks as aligned runs, so the stack takes one entry per run and every
-    // merge inside a run runs at full width.
     rest.run_count = 0;
-    var merged: usize = 0;
-    while (merged < rest_chunks) {
-        const run = std.math.floorPowerOfTwo(usize, rest_chunks - merged);
-        assert((first + merged) % run == 0);
-        rest.runs[rest.run_count] = merge_subtree(cvs[merged..][0..run]);
-        rest.run_starts[rest.run_count] = first + merged;
-        rest.run_count += 1;
-        merged += run;
+    var done: usize = 0;
+    while (done < whole) {
+        const run = next_run(first, whole, done, partial > 0);
+        if (run < lanes) break;
+        assert((first + done) % run == 0);
+        rest.push(run_cv(&cursor, first + done, run), first + done);
+        done += run;
     }
-    assert(merged == rest_chunks);
-    rest.last_counter = first + rest_chunks;
-    if (last_whole) {
-        rest.last = cvs[rest_chunks];
+    if (done < whole) {
+        var cvs: [lanes]Cv = undefined;
+        const small = cvs[0 .. whole - done];
+        chunks_cvs(&cursor, first + done, small);
+        var merged: usize = 0;
+        while (done + merged < whole) {
+            const run = next_run(first, whole, done + merged, partial > 0);
+            assert(run <= small.len - merged);
+            rest.push(merge_subtree(small[merged..][0..run]), first + done + merged);
+            merged += run;
+        }
+        done += merged;
+    }
+    assert(done == whole);
+    if (partial == 0) {
+        // The last run is the root's rightmost node; a message of one run has two runs here.
+        assert(rest.run_count > 0);
+        rest.run_count -= 1;
+        rest.last = rest.runs[rest.run_count];
+        rest.last_counter = rest.run_starts[rest.run_count];
+        assert(rest.last_counter > 0);
         return;
     }
     var scratch: [chunk_len]u8 = undefined;
-    const last = cursor.take(rest_len - rest_chunks * chunk_len, &scratch);
-    rest.last = last_chunk_cv(last, rest.last_counter);
+    rest.last_counter = first + whole;
+    rest.last = last_chunk_cv(cursor.take(partial, &scratch), rest.last_counter);
 }
 
 /// Item `index` of a round: subtree `index`, or, at index `whole`, the rest, which it writes
@@ -545,8 +649,21 @@ const SubtreeOp = struct {
 /// The BLAKE3 digest of the `len`-byte concatenation of `parts`, which spans more than one
 /// chunk, with its whole subtrees and its rest hashed across `strategy`.
 pub fn hash_subtrees(parts: []const []const u8, len: usize, strategy: anytype) [32]u8 {
+    return hash_tree(parts, len, subtree_len_for(len), strategy);
+}
+
+/// `hash_subtrees` on the calling thread, in subtrees of `serial_subtree_len` bytes: with no
+/// tasks to spread across, longer runs leave fewer narrow merges at their tops.
+pub fn hash_serial(parts: []const []const u8, len: usize) [32]u8 {
+    return hash_tree(parts, len, serial_subtree_len, parallel.sequential);
+}
+
+/// The digest of `parts`, `len` bytes and more than one chunk, cut into aligned subtrees of
+/// `subtree_len` bytes and a rest, hashed across `strategy`.
+fn hash_tree(parts: []const []const u8, len: usize, subtree_len: usize, strategy: anytype) [32]u8 {
     assert(len > chunk_len);
-    const subtree_len = subtree_len_for(len);
+    assert(std.math.isPowerOfTwo(subtree_len));
+    assert(subtree_len >= subtree_len_min and subtree_len <= serial_subtree_len);
     const subtree_chunks = subtree_len / chunk_len;
     // The rest holds the last chunk, and so at least one byte.
     const whole = (len - 1) / subtree_len;
@@ -748,7 +865,7 @@ fn compress_full(cv: [8]Vec(lanes), m: *const [16]Vec(lanes), words: Words(lanes
 
 // `lanes` is 8 in Debug builds and 16 in ReleaseFast on AVX-512, so the 16-lane transposed
 // loads get their own check at that width whatever `lanes` is.
-test "blake3 16-lane chunk and parent compressions match one lane at a time" {
+test "blake3 16-lane chunk compressions and vector merges match one lane at a time" {
     var random = std.Random.DefaultPrng.init(0x16);
     // Chunks start one byte past an aligned address, so the loads must be unaligned ones.
     var data: [16 * chunk_len + 1]u8 align(64) = undefined;
@@ -766,12 +883,29 @@ test "blake3 16-lane chunk and parent compressions match one lane at a time" {
     }
     var children: [32]Cv = undefined;
     random.random().bytes(std.mem.asBytes(&children));
-    for ([_]u32{ 0, flag_root }) |extra_flags| {
-        var parents: [16]Cv = undefined;
-        parent_cvs(16, &children, extra_flags, &parents);
-        for (parents, 0..) |cv, lane| {
-            const expected = parent_cv(children[2 * lane], children[2 * lane + 1], extra_flags);
-            try std.testing.expectEqualSlices(u32, &expected, &cv);
+    var left: [8]Vec(16) = undefined;
+    var right: [8]Vec(16) = undefined;
+    for (0..8) |w| {
+        var low: [16]u32 = undefined;
+        var high: [16]u32 = undefined;
+        for (&low, &high, 0..) |*l, *h, lane| {
+            l.* = children[lane][w];
+            h.* = children[16 + lane][w];
         }
+        left[w] = low;
+        right[w] = high;
     }
+    var parents: [16]Cv = undefined;
+    lane_cvs(16, parent_nodes(16, left, right), &parents);
+    for (parents, 0..) |cv, lane| {
+        const expected = parent_cv(children[2 * lane], children[2 * lane + 1], 0);
+        try std.testing.expectEqualSlices(u32, &expected, &cv);
+    }
+    // The 16 nodes of the left batch collapse to the subtree their pairs build.
+    var level = children[0..16].*;
+    var count: usize = 16;
+    while (count > 1) : (count /= 2) {
+        for (0..count / 2) |i| level[i] = parent_cv(level[2 * i], level[2 * i + 1], 0);
+    }
+    try std.testing.expectEqualSlices(u32, &level[0], &collapse(16, left));
 }

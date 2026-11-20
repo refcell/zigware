@@ -100,7 +100,9 @@ test "blake3 long messages hash to the reference digest whole, in parts, and acr
             const across = try parallel.mocks.explore(gpa, testing.io, Across{ .parts = split });
             try testing.expect(across.eql(expected));
             if (len > chunk_len) {
-                const serial = tree.hash_subtrees(split, len, parallel.sequential);
+                const sequential = tree.hash_subtrees(split, len, parallel.sequential);
+                try testing.expectEqualSlices(u8, &expected.bytes, &sequential);
+                const serial = tree.hash_serial(split, len);
                 try testing.expectEqualSlices(u8, &expected.bytes, &serial);
             }
         }
