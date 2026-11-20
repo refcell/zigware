@@ -164,6 +164,9 @@ pub const Walk = struct {
 /// every entry. Each batch then leaves the database's size at most `3n + 1` operations past
 /// its floor, for `n` active keys.
 pub const Proportional = struct {
+    /// `decide` keeps every entry, so the walk need not hand it an owned copy.
+    pub const keeps_every_entry = true;
+
     pub fn evicts(_: *const Proportional) bool {
         return false;
     }
@@ -225,6 +228,12 @@ pub const Bounded = struct {
 };
 
 /// Asserts at comptime that `P` is a floor policy.
+/// Whether policy `P` declares that its `decide` returns `keep()` for every entry and never
+/// evicts, so the walk may skip `decide` and keep each update's value as it is.
+pub fn keeps_every_entry(comptime P: type) bool {
+    return @hasDecl(P, "keeps_every_entry") and P.keeps_every_entry;
+}
+
 pub fn check(comptime P: type) void {
     comptime {
         assert(@hasDecl(P, "evicts"));

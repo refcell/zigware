@@ -848,6 +848,14 @@ fn Merkleizer(comptime D: type) type {
             policy: anytype,
         ) !bool {
             const gpa = self.gpa;
+            if (comptime floor_mod.keeps_every_entry(@TypeOf(policy.*))) {
+                // The policy would take a copy of the value only to hand it back, so the move
+                // borrows the update's own value: a read the Merkleizer owns, or an ancestor's
+                // operation it retains, alive until the journal and diff take their copies.
+                assert(!policy.evicts());
+                try walked.relocate(gpa, update, mv);
+                return true;
+            }
             try self.written.ensureUnusedCapacity(gpa, 1);
             const entry: floor_mod.Entry(K, V) = .{
                 .location = loc,
