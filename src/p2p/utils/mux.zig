@@ -76,30 +76,6 @@ pub fn prefixed(payload: usize) usize {
     return payload + max_u64_varint_size;
 }
 
-/// Commonware's blanket `Sender::send` over a `LimitedSender`: sends `parts` to the
-/// recipients within their rate limit and returns those attempted (caller-owned), or none
-/// when every recipient is limited or the checked send is not accepted.
-pub fn send(
-    gpa: Allocator,
-    sender: anytype,
-    recipients: p2p.Recipients(@TypeOf(sender.*).PublicKey),
-    parts: []const []const u8,
-    priority: bool,
-) ![]@TypeOf(sender.*).PublicKey {
-    const P = @TypeOf(sender.*).PublicKey;
-    const checked = switch (try sender.check(recipients)) {
-        .limited => return gpa.alloc(P, 0),
-        .checked => |checked| checked,
-    };
-    const attempted = gpa.dupe(P, checked.recipients()) catch |err| {
-        checked.deinit();
-        return err;
-    };
-    if (checked.send(parts, priority).accepted()) return attempted;
-    gpa.free(attempted);
-    return gpa.alloc(P, 0);
-}
-
 /// A message routed to a subchannel queue; a dropped one frees its payload.
 fn Routed(comptime P: type) type {
     return struct {
@@ -493,7 +469,7 @@ pub fn SubSender(comptime S: type) type {
             parts: []const []const u8,
             priority: bool,
         ) ![]P {
-            return send_checked(self.inner.gpa, self, recipients, parts, priority);
+            return p2p.send(self.inner.gpa, self, recipients, parts, priority);
         }
 
         pub fn clone(self: *const Self) Self {
@@ -506,8 +482,6 @@ pub fn SubSender(comptime S: type) type {
         }
     };
 }
-
-const send_checked = send;
 
 /// Receives the messages of one subchannel. Releasing it deregisters the subchannel.
 pub fn SubReceiver(comptime P: type) type {

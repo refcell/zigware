@@ -10,7 +10,6 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const p2p = @import("../../root.zig");
-const mux = @import("../mux.zig");
 const Feedback = p2p.Feedback;
 const Unreliable = p2p.Unreliable;
 
@@ -47,7 +46,7 @@ pub fn InertSender(comptime P: type) type {
             parts: []const []const u8,
             priority: bool,
         ) Allocator.Error![]P {
-            return mux.send(self.gpa, self, recipients, parts, priority);
+            return p2p.send(self.gpa, self, recipients, parts, priority);
         }
 
         pub fn clone(self: *const Self) Self {
@@ -167,7 +166,7 @@ test "sender returns no recipients when checked send rejects" {
     var rng = utils_pkg.test_rng();
     const peer = cryptography.ed25519.PrivateKey.random(&rng).public_key();
     var sender: RejectingSender = .{ .peer = peer };
-    const sent = try mux.send(testing.allocator, &sender, .{ .one = peer }, &.{"hello"}, false);
+    const sent = try p2p.send(testing.allocator, &sender, .{ .one = peer }, &.{"hello"}, false);
     defer testing.allocator.free(sent);
     try testing.expectEqual(0, sent.len);
 }

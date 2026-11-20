@@ -178,18 +178,7 @@ pub fn LimitedSender(comptime S: type, comptime C: type) type {
             parts: []const []const u8,
             priority: bool,
         ) ![]P {
-            const gpa = self.state.gpa;
-            const checked = switch (try self.check(recipients)) {
-                .limited => return gpa.alloc(P, 0),
-                .checked => |checked| checked,
-            };
-            const attempted = gpa.dupe(P, checked.recipients()) catch |err| {
-                checked.deinit();
-                return err;
-            };
-            if (checked.send(parts, priority).accepted()) return attempted;
-            gpa.free(attempted);
-            return gpa.alloc(P, 0);
+            return p2p.send(self.state.gpa, self, recipients, parts, priority);
         }
 
         fn checked_for(self: *Self, recipients: p2p.Recipients(P)) Checked {

@@ -131,18 +131,7 @@ pub fn SplitSender(comptime L: type, comptime F: type) type {
             parts: []const []const u8,
             priority: bool,
         ) ![]P {
-            const gpa = self.inner.state.gpa;
-            const checked = switch (try self.check(recipients)) {
-                .limited => return gpa.alloc(P, 0),
-                .checked => |checked| checked,
-            };
-            const attempted = gpa.dupe(P, checked.recipients()) catch |err| {
-                checked.deinit();
-                return err;
-            };
-            if (checked.send(parts, priority).accepted()) return attempted;
-            gpa.free(attempted);
-            return gpa.alloc(P, 0);
+            return p2p.send(self.inner.state.gpa, self, recipients, parts, priority);
         }
     };
 }

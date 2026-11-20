@@ -123,6 +123,30 @@ pub fn Check(comptime Checked: type) type {
     };
 }
 
+/// Commonware's blanket `Sender::send` over a `LimitedSender`: sends `parts` to the
+/// recipients within their rate limit and returns those attempted (caller-owned), or none
+/// when every recipient is limited or the checked send is not accepted.
+pub fn send(
+    gpa: Allocator,
+    sender: anytype,
+    recipients: Recipients(@TypeOf(sender.*).PublicKey),
+    parts: []const []const u8,
+    priority: bool,
+) ![]@TypeOf(sender.*).PublicKey {
+    const P = @TypeOf(sender.*).PublicKey;
+    const checked = switch (try sender.check(recipients)) {
+        .limited => return gpa.alloc(P, 0),
+        .checked => |checked| checked,
+    };
+    const attempted = gpa.dupe(P, checked.recipients()) catch |err| {
+        checked.deinit();
+        return err;
+    };
+    if (checked.send(parts, priority).accepted()) return attempted;
+    gpa.free(attempted);
+    return gpa.alloc(P, 0);
+}
+
 /// Primary and secondary peers provided together to `Manager.track`. The same key may appear
 /// in both; `track` stores overlapping keys as primary only.
 pub fn TrackedPeers(comptime P: type) type {
