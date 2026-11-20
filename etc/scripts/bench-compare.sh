@@ -40,6 +40,28 @@ benches=(
   "journal|storage|journal::fixed_replay/items=100000 buffer=65536 size=32 read_options=cache"
   "qmdb|storage|qmdb::apply_batch/case=direct variant=any::unordered::fixed::mmb chunk=32 \
 updates=16384"
+  # One case per qmdb group and family; the other qmdb names match commonware's too.
+  "qmdb|storage|qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384"
+  "qmdb|storage|qmdb::apply_batch/case=direct variant=any::ordered::p256::fixed::mmb chunk=32 \
+updates=16384"
+  "qmdb|storage|qmdb::apply_batch/case=uncomm_ancestor variant=any::unordered::fixed::mmb chunk=32 \
+updates=16384"
+  "qmdb|storage|qmdb::chained_growth/variant=current::unordered::fixed::mmb chunk=32 batches=100"
+  "qmdb|storage|qmdb::generate/variant=any::unordered::fixed::mmb elements=1000 operations=10000"
+  "qmdb|storage|qmdb::generate/variant=any::ordered::variable::mmb elements=1000 operations=10000"
+  "qmdb|storage|qmdb::generate/variant=current::unordered::fixed::mmb elements=1000 \
+operations=10000"
+  "qmdb|storage|qmdb::generate/variant=keyless::mmb operations=10000"
+  "qmdb|storage|qmdb::generate/variant=store::variable elements=1000 operations=10000"
+  "qmdb|storage|qmdb::init/variant=any::unordered::fixed::mmb cache=0 elements=100000"
+  "qmdb|storage|qmdb::init/variant=current::ordered::fixed::mmb cache=262144 elements=100000"
+  "qmdb|storage|qmdb::init/variant=store::variable cache=0 elements=100000"
+  "qmdb|storage|qmdb::merkleize/v=any::unordered::fixed::mmb k=10000 ch=false s=false cc=false"
+  "qmdb|storage|qmdb::merkleize/v=any::ordered::variable::mmr k=10000 ch=true s=false cc=false"
+  "qmdb|storage|qmdb::merkleize/v=current::unordered::fixed::mmb chunk=32 k=10000 ch=false s=false \
+cc=false"
+  "qmdb|storage|qmdb::merkleize/variant=any::unordered::fixed::mmb keys=10000 churn=50 \
+cache_pages=32"
   "buffer_paged|runtime|buffer_paged::append/backend=tokio chunk=4096"
   # storage-merkle's merkle, bmt, rmap, and variable-journal read benches.
   "merkle|storage|merkle::append/n=100000 family=mmr"

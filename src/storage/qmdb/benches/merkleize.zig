@@ -302,7 +302,13 @@ fn bench_merkleize_churned(runner: *bench.Runner) !void {
         .full => &.{ 10_000, 100_000 },
     };
     for (keys) |num_keys| {
-        inline for (variants) |V| try run_churned(V, runner, num_keys);
+        // As commonware: `current::*` already reads a bitmap, so only `any::*` takes the
+        // floor walk this case measures.
+        inline for (variants) |V| {
+            if (comptime std.mem.startsWith(u8, V.name, "any::")) {
+                try run_churned(V, runner, num_keys);
+            }
+        }
     }
 }
 

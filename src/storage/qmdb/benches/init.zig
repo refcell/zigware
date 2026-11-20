@@ -54,7 +54,8 @@ fn run_variant(comptime V: type, runner: *bench.Runner, case: Case) !void {
     var disk: Disk = .init(runner);
     try disk.open(runner.allocator);
     defer disk.close();
-    try populate(V.Db, runner.allocator, &disk, case);
+    // A listing only prints the names: seeding the variant would take minutes per variant.
+    if (!runner.list) try populate(V.Db, runner.allocator, &disk, case);
     for (cache_sizes) |cache| {
         var workload: InitWorkload(V.Db) = .{
             .gpa = runner.allocator,
@@ -63,6 +64,7 @@ fn run_variant(comptime V: type, runner: *bench.Runner, case: Case) !void {
         };
         try runner.run(benchmark_of(V.name, cache, case), &workload);
     }
+    if (runner.list) return;
     var session: Session(V.Db) = undefined;
     try session.open(runner.allocator, &disk, .{});
     try session.close();
