@@ -550,3 +550,8 @@ hold whole units of lanes" over coding's lane-aware `hash_batches`, and `sha512/
 - 2026-11-20: the ed25519 batch-verify and bulletproofs ipa benches give their pools an
   adaptive `Policy`, as commonware's `Rayon::new` strategies have, so their conc>1 rows compare
   like with like (a policy-less `Rayon` always splits; curve25519's came in 1adfe245).
+- 2026-11-20: a one-part SHA-256 message longer than two blocks (`hash_message`) hashes through
+  `blocks.digest_message`: whole blocks compress straight from the message with the state in
+  registers, then the tail pads on the stack, skipping std's streaming buffer. 256 B went from
+  175 to 152 ns on this desktop; long messages stay compression-bound. A planted padding
+  boundary, bit length, or pad byte fails the std comparison tests.

@@ -64,6 +64,26 @@ pub fn digest_n(comptime n: usize, inputs: [n][]const u8, outs: [n]*[32]u8) void
     store_digests(n, x, y, outs);
 }
 
+/// The SHA-256 digest of `message`, of any length, with the state kept in registers from the
+/// IV to the digest bytes: the whole blocks compress straight from `message`, then the tail is
+/// padded on the stack (the streaming state's buffer and its copies are skipped).
+pub fn digest_message(message: []const u8, out: *[32]u8) void {
+    comptime assert(available);
+    const whole = message.len - message.len % 64;
+    var x: [1]V4u32 = .{iv_x};
+    var y: [1]V4u32 = .{iv_y};
+    blocks_n(1, &x, &y, .{message[0..whole]});
+    const rest = message[whole..];
+    assert(rest.len < 64);
+    var padded: [128]u8 align(16) = @splat(0);
+    @memcpy(padded[0..rest.len], rest);
+    padded[rest.len] = 0x80;
+    const len: usize = if (rest.len + 9 <= 64) 64 else 128;
+    std.mem.writeInt(u64, padded[len - 8 ..][0..8], @as(u64, message.len) * 8, .big);
+    blocks_n(1, &x, &y, .{padded[0..len]});
+    store_digests(1, x, y, .{out});
+}
+
 /// The Merkle shapes whose words load straight into registers, skipping the padded copy on
 /// the stack (commonware's `hash_36`, `hash_40`, `hash_64`, and `hash_72` and their pair
 /// kernels): `leaf_36` is a 4-byte position then a digest and `leaf_40` an 8-byte position

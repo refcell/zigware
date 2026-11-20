@@ -61,7 +61,11 @@ pub const Core = struct {
         var total: usize = 0;
         for (parts) |part| total +|= part.len;
         if (comptime !blocks.available) return stream(parts, out);
-        if (total > short_max) return stream(parts, out);
+        if (total > short_max) {
+            // One long part (`hash_message`) skips the streaming buffer and its copies.
+            if (parts.len == 1) return blocks.digest_message(parts[0], out);
+            return stream(parts, out);
+        }
         if (shape_of(parts)) |shape| switch (shape) {
             inline else => |s| return blocks.digest_shape(1, s, .{parts}, .{out}),
         };
@@ -210,6 +214,14 @@ test "sha256 block runs match std across lengths and split points" {
     for (lengths) |len| {
         var expected: [32]u8 = undefined;
         StdSha256.hash(data[0..len], &expected, .{});
+        // One part, as `hash_message` passes it, at an aligned and an unaligned start.
+        try testing.expectEqualSlices(u8, &expected, &Sha256.hash(&.{data[0..len]}).bytes);
+        if (len < data.len) {
+            var shifted: [32]u8 = undefined;
+            StdSha256.hash(data[1..][0..len], &shifted, .{});
+            const got = Sha256.hash(&.{data[1..][0..len]});
+            try testing.expectEqualSlices(u8, &shifted, &got.bytes);
+        }
         // Unaligned starts, splits inside and on block boundaries, and empty parts.
         const a = prng.random().uintAtMost(usize, len);
         const b = a + prng.random().uintAtMost(usize, len - a);
