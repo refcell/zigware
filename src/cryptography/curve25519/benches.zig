@@ -93,6 +93,8 @@ fn bench_batch_verify(runner: *bench.Runner) !void {
     // commonware's concurrency levels; a pool of `c - 1` workers plus the caller runs `c`.
     const pooled_levels = [_]u32{ 8, 16, 32 };
     var pools: [pooled_levels.len]*parallel.ThreadPool = undefined;
+    // commonware's `Rayon::new` gives each pool its own adaptive policy.
+    var policies: [pooled_levels.len]parallel.Policy = @splat(.init(runner.io));
     var created: usize = 0;
     defer for (pools[0..created]) |pool| pool.destroy();
     for (pooled_levels) |level| {
@@ -109,10 +111,10 @@ fn bench_batch_verify(runner: *bench.Runner) !void {
             .strategy = parallel.sequential,
         };
         try runner.run(name.with_param("conc", 1), &sequential);
-        for (pooled_levels, pools) |level, pool| {
+        for (pooled_levels, pools, &policies) |level, pool, *policy| {
             var pooled: BatchVerify(parallel.Rayon) = .{
                 .batch = &batch,
-                .strategy = parallel.Rayon.init(pool),
+                .strategy = parallel.Rayon.init(pool).with_policy(policy),
             };
             try runner.run(name.with_param("conc", level), &pooled);
         }
