@@ -28,6 +28,12 @@ const max_peaks = merkle.max_pinned_nodes;
 const max_siblings = 2 * max_peaks;
 /// Explicit DFS stacks hold at most a few pending items per level.
 const stack_capacity = 4 * max_peaks;
+/// The tallest subtree inside a proven range that the walk hashes level by level instead of
+/// node by node.
+const inside_height_max = 6;
+const inside_leaves_max = 1 << inside_height_max;
+/// The tallest subtree a proof walks (`Subtree.leaf_end` bounds heights at 62).
+const path_height_max = 63;
 
 /// Upper bound on the positions a range plan reads (`RangePlan.positions`).
 pub const max_plan_positions = max_peaks + max_siblings;
@@ -718,13 +724,22 @@ pub fn Proof(comptime F: type, comptime Digest: type) type {
                 elements: anytype,
                 collector: ?Collector,
             ) (ReconstructionError || Allocator.Error)!Digest {
+                const single = walk.range.end - walk.range.start == 1;
+                if (collector == null and single and peak.height > 0) {
+                    return walk.path_digest(hasher, peak, elements);
+                }
                 var work: BoundedList(Work, stack_capacity) = .{};
                 var values: BoundedList(Digest, 2 * max_peaks) = .{};
                 work.append(.{ .visit = peak });
                 while (work.pop()) |item| {
                     switch (item) {
                         .visit => |node| {
-                            const digest = try walk.visit(hasher, node, elements, &work);
+                            const inside = collector == null and node.height > 0 and
+                                node.height <= inside_height_max and node.is_inside(walk.range);
+                            const digest = if (inside)
+                                try walk.inside_digest(hasher, node, elements)
+                            else
+                                try walk.visit(hasher, node, elements, &work);
                             values.append(digest orelse continue);
                         },
                         .combine => |node| {
@@ -739,6 +754,174 @@ pub fn Proof(comptime F: type, comptime Digest: type) type {
                 }
                 assert(values.len == 1);
                 return values.buffer[0];
+            }
+
+            /// The digest of `peak` for a one-element range: the path from the peak to the
+            /// leaf, then each level hashed up, without the walk's stacks. The walk consumes
+            /// a sibling as soon as it is visited: a left sibling (the path turns right) before
+            /// the path below it, a right sibling (the path turns left) after it. So the
+            /// right-turn siblings come first, top-down, and the left-turn ones follow,
+            /// bottom-up.
+            fn path_digest(
+                walk: *RangeWalk,
+                hasher: anytype,
+                peak: Subtree,
+                elements: anytype,
+            ) ReconstructionError!Digest {
+                const height: usize = peak.height;
+                assert(height > 0 and walk.range.end - walk.range.start == 1);
+                var positions: [path_height_max]u64 = undefined;
+                var turns_left: [path_height_max]bool = undefined;
+                var node = peak;
+                var right_turns: usize = 0;
+                for (positions[0..height], turns_left[0..height]) |*position, *left| {
+                    const kids = node.children(F);
+                    left.* = walk.range.start < kids[1].leaf_start;
+                    position.* = node.position;
+                    right_turns += @intFromBool(!left.*);
+                    node = kids[@intFromBool(!left.*)];
+                }
+                assert(node.height == 0 and node.leaf_start == walk.range.start);
+                const base = walk.sibling_index;
+                if (walk.siblings.len - base < height) return error.MissingDigests;
+                if (walk.element_index >= elements.len) return error.MissingElements;
+                const element = element_bytes(&elements[walk.element_index]);
+                walk.element_index += 1;
+                var digest = hasher.leaf_digest(node.position, element);
+                var right_index = right_turns;
+                var left_index = right_turns;
+                var level = height;
+                while (level > 0) {
+                    level -= 1;
+                    if (turns_left[level]) {
+                        const sibling = walk.siblings[base + left_index];
+                        left_index += 1;
+                        digest = hasher.node_digest(positions[level], &digest, &sibling);
+                    } else {
+                        right_index -= 1;
+                        const sibling = walk.siblings[base + right_index];
+                        digest = hasher.node_digest(positions[level], &sibling, &digest);
+                    }
+                }
+                assert(right_index == 0 and left_index == height);
+                walk.sibling_index = base + height;
+                return digest;
+            }
+
+            /// The digest of `node`, whose leaves all lie in the range: its leaves, then each
+            /// level, hashed two at a time through the hasher's pair kernels when it has them.
+            /// The digests are the ones the walk computes node by node, without its stacks.
+            fn inside_digest(
+                walk: *RangeWalk,
+                hasher: anytype,
+                node: Subtree,
+                elements: anytype,
+            ) ReconstructionError!Digest {
+                const height: usize = node.height;
+                assert(height >= 1 and height <= inside_height_max);
+                const count: usize = @as(usize, 1) << @intCast(height);
+                const first = walk.element_index;
+                assert(first == node.leaf_start - walk.range.start);
+                if (elements.len - first < count) return error.MissingElements;
+                walk.element_index += count;
+                // `positions[k]` lists the positions at height `k`, left to right.
+                var positions: [inside_height_max + 1][inside_leaves_max]u64 = undefined;
+                subtree_positions(node, &positions);
+                var digests: [inside_leaves_max]Digest = undefined;
+                hash_leaves(hasher, positions[0][0..count], elements[first..][0..count], &digests);
+                var width = count;
+                for (1..height + 1) |level| {
+                    width /= 2;
+                    hash_level(hasher, positions[level][0..width], &digests);
+                }
+                assert(width == 1);
+                return digests[0];
+            }
+
+            /// Fills `positions[k]` with the positions of `node`'s descendants at height `k`.
+            fn subtree_positions(
+                node: Subtree,
+                positions: *[inside_height_max + 1][inside_leaves_max]u64,
+            ) void {
+                var level: [inside_leaves_max]Subtree = undefined;
+                level[0] = node;
+                positions[node.height][0] = node.position;
+                var width: usize = 1;
+                var height: usize = node.height;
+                while (height > 0) : (height -= 1) {
+                    // Expand right to left, so each child lands on a slot already read.
+                    var index = width;
+                    while (index > 0) {
+                        index -= 1;
+                        const kids = level[index].children(F);
+                        level[2 * index] = kids[0];
+                        level[2 * index + 1] = kids[1];
+                    }
+                    width *= 2;
+                    for (level[0..width], positions[height - 1][0..width]) |subtree, *position| {
+                        position.* = subtree.position;
+                    }
+                }
+                assert(width == @as(usize, 1) << @intCast(node.height));
+            }
+
+            /// `digests[i]` = the leaf digest of `elements[i]` at `positions[i]`, pairwise.
+            fn hash_leaves(
+                hasher: anytype,
+                positions: []const u64,
+                elements: anytype,
+                digests: *[inside_leaves_max]Digest,
+            ) void {
+                assert(positions.len == elements.len and positions.len % 2 == 0);
+                const paired = @hasDecl(@TypeOf(hasher.*), "leaf_digest_pair");
+                var index: usize = 0;
+                while (index < positions.len) : (index += 2) {
+                    const left = element_bytes(&elements[index]);
+                    const right = element_bytes(&elements[index + 1]);
+                    if (paired) {
+                        const pair = hasher.leaf_digest_pair(
+                            positions[index..][0..2].*,
+                            .{ left, right },
+                        );
+                        digests[index..][0..2].* = pair;
+                    } else {
+                        digests[index] = hasher.leaf_digest(positions[index], left);
+                        digests[index + 1] = hasher.leaf_digest(positions[index + 1], right);
+                    }
+                }
+            }
+
+            /// Replaces the `2 * positions.len` digests of a level with their parents' digests
+            /// at `positions`, pairwise. A parent's children sit at `2i` and `2i + 1`, at or
+            /// after the slot `i` it overwrites, so each pair is read before it is replaced.
+            fn hash_level(
+                hasher: anytype,
+                positions: []const u64,
+                digests: *[inside_leaves_max]Digest,
+            ) void {
+                assert(positions.len > 0 and 2 * positions.len <= inside_leaves_max);
+                const paired = @hasDecl(@TypeOf(hasher.*), "node_digest_pair");
+                var index: usize = 0;
+                while (paired and index + 1 < positions.len) : (index += 2) {
+                    const pair = hasher.node_digest_pair(.{
+                        .{
+                            .position = positions[index],
+                            .left = &digests[2 * index],
+                            .right = &digests[2 * index + 1],
+                        },
+                        .{
+                            .position = positions[index + 1],
+                            .left = &digests[2 * index + 2],
+                            .right = &digests[2 * index + 3],
+                        },
+                    });
+                    digests[index..][0..2].* = pair;
+                }
+                while (index < positions.len) : (index += 1) {
+                    const left = digests[2 * index];
+                    const right = digests[2 * index + 1];
+                    digests[index] = hasher.node_digest(positions[index], &left, &right);
+                }
             }
 
             /// The digest of `node` when known now, or null after scheduling its children.

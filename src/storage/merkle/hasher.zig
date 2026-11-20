@@ -75,6 +75,22 @@ pub fn Standard(comptime H: type) type {
             return self.hash(&.{ &position_bytes, &left.bytes, &right.bytes });
         }
 
+        /// Two leaf digests at once, through the hash's pair kernel.
+        pub fn leaf_digest_pair(
+            self: *const Self,
+            positions: [2]u64,
+            elements: [2][]const u8,
+        ) [2]Digest {
+            _ = self;
+            const left_position = big_endian(positions[0]);
+            const right_position = big_endian(positions[1]);
+            return H.hash_pair(
+                &.{ &left_position, elements[0] },
+                &.{ &right_position, elements[1] },
+                parallel.sequential,
+            );
+        }
+
         /// Two node digests at once (hashed in parallel once `parallel` lands).
         pub fn node_digest_pair(self: *const Self, nodes: [2]NodeInput) [2]Digest {
             _ = self;
