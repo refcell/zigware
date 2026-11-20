@@ -13,6 +13,9 @@
 //!   subtraction are u256 arithmetic (field.zig).
 //!
 //! Every input is public, so branching on it leaks nothing. The answer is the same as std's.
+//! Nothing here is constant time, so secret values must never reach it: the file exports only
+//! `verify` and `Affine`, signing and key generation stay on std's constant-time
+//! `basePoint.mul` and `Scalar.invert`, and a test below pins both facts.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -171,7 +174,7 @@ fn double_base(scalar_g: [32]u8, scalar_q: [32]u8, q: Affine) Jacobian {
 
 /// `s^-1 mod n` for a nonzero `s`, by the binary extended Euclidean algorithm, which keeps
 /// `x1 s = u` and `x2 s = v (mod n)` while `gcd(u, v) = 1` shrinks to `u = 1` or `v = 1`.
-pub fn invert_scalar(s: Scalar) Scalar {
+fn invert_scalar(s: Scalar) Scalar {
     assert(!s.isZero());
     const n = P256.scalar.field_order;
     var u: u256 = std.mem.readInt(u256, &s.toBytes(.big), .big);
@@ -334,4 +337,27 @@ test "secp256r1 verify fuzz: accepts signatures and matches std" {
             try check(&input);
         }
     }.run, .{});
+}
+
+test "secp256r1 verify: only public verification reaches the variable-time code" {
+    // The variable-time routines stay private: the file exports exactly `Affine` and `verify`.
+    const decls = comptime std.meta.declarations(@This());
+    try testing.expectEqual(2, decls.len);
+    for (decls) |name| {
+        const known = std.mem.eql(u8, name, "Affine") or std.mem.eql(u8, name, "verify");
+        try testing.expect(known);
+    }
+    // common.zig calls `verify.verify` once, inside `PublicKeyInner`, and nothing that holds
+    // a secret (`sign_prehashed`, `PrivateKeyInner`) names this file or field.zig.
+    const common = @embedFile("common.zig");
+    try testing.expectEqual(1, std.mem.count(u8, common, "verify.verify("));
+    const public_start = std.mem.indexOf(u8, common, "pub const PublicKeyInner = struct {").?;
+    const call = std.mem.indexOf(u8, common, "verify.verify(").?;
+    try testing.expect(call > public_start);
+    const secret_start = std.mem.indexOf(u8, common, "fn sign_prehashed(").?;
+    try testing.expect(secret_start < public_start);
+    const secret_code = common[secret_start..public_start];
+    try testing.expect(std.mem.indexOf(u8, secret_code, "verify.") == null);
+    try testing.expect(std.mem.indexOf(u8, secret_code, "field.") == null);
+    try testing.expect(std.mem.indexOf(u8, common, "@import(\"field.zig\")") == null);
 }

@@ -9,6 +9,8 @@
 # commonware's tokio runner uses `env::temp_dir()` and zigware's benches `./.zig-cache/tmp`,
 # so commonware runs with TMPDIR and zigware with its working directory under it.
 # BENCH_FILTER keeps only the benches whose name contains it.
+# BENCH_STAT=median reports each side's median over the runs and the median of the per-run
+# (paired) ratios instead of the best of each side.
 # Each run alternates the two sides so both see the same machine load. The table goes to
 # stdout; the raw medians to .cache/bench-compare/raw.tsv.
 set -euo pipefail
@@ -77,6 +79,9 @@ read_options=cache"
   "chacha20_poly1305|cryptography|chacha20_poly1305::seal_open/n=65536"
   "chacha20_poly1305|cryptography|chacha20_poly1305::seal_open/n=1048576"
   "sake|cryptography|sake::sake"
+  "secp256r1|cryptography|secp256r1::signature_generation/variant=standard ns_len=9 msg_len=32"
+  "secp256r1|cryptography|secp256r1::signature_generation/variant=recoverable ns_len=9 \
+msg_len=32"
   "secp256r1|cryptography|secp256r1::signature_verification/variant=standard ns_len=9 msg_len=32"
   "secp256r1|cryptography|secp256r1::signature_verification/variant=recoverable ns_len=9 \
 msg_len=32"
@@ -150,9 +155,11 @@ for run in $(seq 1 "$runs"); do
 done
 
 fstype=$(findmnt -no FSTYPE --target "$scratch" 2> /dev/null || echo unknown)
-python3 -I - "$out/raw.tsv" "$fstype" << 'EOF'
-import math, sys
+python3 -I - "$out/raw.tsv" "$fstype" "${BENCH_STAT:-best}" << 'EOF'
+import math, statistics, sys
 best = {}
+values = {}
+ratios = {}
 loads = []
 order = []
 for line in open(sys.argv[1]):
@@ -161,10 +168,16 @@ for line in open(sys.argv[1]):
     if name not in best:
         order.append(name)
         best[name] = [math.inf, math.inf]
+        values[name] = [[], []]
+        ratios[name] = []
     for side, value in enumerate((cw, zw)):
         value = float(value)
         if not math.isnan(value):
             best[name][side] = min(best[name][side], value)
+            values[name][side].append(value)
+    if not math.isnan(float(cw)) and not math.isnan(float(zw)):
+        ratios[name].append(float(zw) / float(cw))
+median = sys.argv[3] == "median"
 
 def show(ns):
     if math.isinf(ns):
@@ -180,7 +193,12 @@ for name in order:
     group, _, params = name.partition("/")
     cw, zw = best[name]
     ratio = "n/a" if math.isinf(cw) or math.isinf(zw) else f"{zw / cw:.2f}×"
+    if median:
+        cw, zw = (statistics.median(v) if v else math.inf for v in values[name])
+        ratio = f"{statistics.median(ratios[name]):.2f}×" if ratios[name] else "n/a"
     print(f"| `{group}` | `{params}` | {show(cw)} | {show(zw)} | {ratio} |")
+if median:
+    print("\nMedians over the runs; the ratio is the median of each run's paired ratio.")
 print(f"\nLoad average (1 min) during the runs: {min(loads):.1f} to {max(loads):.1f}.")
 print(f"Storage benches ran on: {sys.argv[2]}.")
 EOF
