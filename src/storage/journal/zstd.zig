@@ -75,6 +75,53 @@ pub fn compress_into(
     return encode_into(gpa, data, out, .exact);
 }
 
+/// One level-3 encoder reused across frames, as commonware reuses a thread-local `CCtx`:
+/// each frame starts from a fresh frame's state in the same buffers, which grow only for a
+/// frame larger than any before. Frames are byte-identical to `compress_into`'s.
+pub const Compressor = struct {
+    encoder: ?block_exact.Encoder = null,
+
+    pub fn deinit(self: *Compressor, gpa: Allocator) void {
+        if (self.encoder) |*encoder| encoder.deinit(gpa);
+        self.* = undefined;
+    }
+
+    /// `compress_into` through this compressor's encoder.
+    pub fn compress_into(
+        self: *Compressor,
+        gpa: Allocator,
+        data: []const u8,
+        out: *std.ArrayList(u8),
+    ) Allocator.Error![]u8 {
+        const start = out.items.len;
+        try out.ensureUnusedCapacity(gpa, compress_bound(data.len));
+        const encoder = try self.encoder_for(gpa, data.len);
+        write_header(data.len, out);
+        encoder.compress(data, out);
+        assert(!encoder.first);
+        assert(out.items.len - start <= compress_bound(data.len));
+        return out.items[start..];
+    }
+
+    fn encoder_for(
+        self: *Compressor,
+        gpa: Allocator,
+        len: usize,
+    ) Allocator.Error!*block_exact.Encoder {
+        if (self.encoder) |*encoder| {
+            if (encoder.fits(len)) {
+                encoder.reset(len);
+                return encoder;
+            }
+            encoder.deinit(gpa);
+            self.encoder = null;
+        }
+        self.encoder = try block_exact.Encoder.init(gpa, len);
+        assert(self.encoder.?.first);
+        return &self.encoder.?;
+    }
+};
+
 /// How `encode_into` writes blocks.
 pub const Mode = enum {
     /// Raw and RLE blocks only (the encoder before match finding; kept for comparison).
@@ -228,6 +275,59 @@ pub fn decompress(gpa: Allocator, compressed: []const u8) DecompressError![]u8 {
 }
 
 const testing = std.testing;
+
+test "a reused compressor writes the frames one-shot compression does" {
+    // Sizes go down, up past the encoder's buffers, and down again, so frames reuse table
+    // prefixes, grow the encoder, and follow frames that left repeat offsets and Huffman
+    // tables behind. Compressible records alternate with random ones.
+    const gpa = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(7);
+    const sizes = [_]usize{ 4096, 64, 1024, 300_000, 17, 1024, 200_000, 8, 70_000, 4096 };
+    // Last, a frame whose first block is random (stored raw) and whose second compresses:
+    // only a reset clears the tables the second block could otherwise repeat.
+    const mixed_len = 2 * block_size_max;
+    var compressor: Compressor = .{};
+    defer compressor.deinit(gpa);
+    var reused: std.ArrayList(u8) = .empty;
+    defer reused.deinit(gpa);
+    var fresh: std.ArrayList(u8) = .empty;
+    defer fresh.deinit(gpa);
+    for (sizes, 0..) |size, index| {
+        const data = try gpa.alloc(u8, size);
+        defer gpa.free(data);
+        if (index % 3 == 2) {
+            prng.random().bytes(data);
+        } else {
+            corpus.records(prng.random(), data);
+        }
+        reused.clearRetainingCapacity();
+        fresh.clearRetainingCapacity();
+        const frame = try compressor.compress_into(gpa, data, &reused);
+        try testing.expectEqualSlices(u8, try compress_into(gpa, data, &fresh), frame);
+        const decoded = try decompress(gpa, frame);
+        defer gpa.free(decoded);
+        try testing.expectEqualSlices(u8, data, decoded);
+    }
+    const mixed = try gpa.alloc(u8, mixed_len);
+    defer gpa.free(mixed);
+    prng.random().bytes(mixed[0..block_size_max]);
+    corpus.records(prng.random(), mixed[block_size_max..]);
+    reused.clearRetainingCapacity();
+    fresh.clearRetainingCapacity();
+    const frame = try compressor.compress_into(gpa, mixed, &reused);
+    try testing.expectEqualSlices(u8, try compress_into(gpa, mixed, &fresh), frame);
+    // Small texts after a larger one: a stale Huffman table would validate, and blocks of
+    // at most 1 KiB of literals prefer repeating it.
+    for ([_]usize{ 8192, 700, 900, 1000 }) |size| {
+        const data = try gpa.alloc(u8, size);
+        defer gpa.free(data);
+        corpus.text(prng.random(), data);
+        reused.clearRetainingCapacity();
+        fresh.clearRetainingCapacity();
+        const small = try compressor.compress_into(gpa, data, &reused);
+        try testing.expectEqualSlices(u8, try compress_into(gpa, data, &fresh), small);
+    }
+}
 
 test {
     _ = @import("zstd/bits.zig");

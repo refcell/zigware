@@ -46,7 +46,7 @@ pub const Encoder = struct {
 
     pub fn init(gpa: Allocator, len: usize) Allocator.Error!Encoder {
         // Blocks are at most `cap` bytes, so every buffer is sized to it.
-        const cap: usize = @max(block_len_min, @min(len, block_size_max));
+        const cap = cap_of(len);
         var state = try dfast.State.init(gpa, params.level3(len));
         errdefer state.deinit(gpa);
         var sequences = try std.ArrayList(dfast.Sequence).initCapacity(gpa, cap);
@@ -65,6 +65,32 @@ pub const Encoder = struct {
         enc.* = undefined;
     }
 
+    fn cap_of(len: usize) usize {
+        return @max(block_len_min, @min(len, block_size_max));
+    }
+
+    /// Whether `reset` can start a frame of `len` bytes in this encoder's buffers.
+    pub fn fits(enc: *const Encoder, len: usize) bool {
+        const cap = cap_of(len);
+        return enc.buffer.len >= 4 * cap + scratch_len(cap) and
+            enc.sequences.capacity >= cap and enc.state.fits(params.level3(len));
+    }
+
+    /// Start a new frame of `len` bytes with a fresh frame's state: the initial repeat
+    /// offsets, no Huffman tables, and cleared match tables (a reused `ZSTD_CCtx`).
+    pub fn reset(enc: *Encoder, len: usize) void {
+        assert(enc.fits(len));
+        enc.state.reset(params.level3(len));
+        enc.sequences.clearRetainingCapacity();
+        enc.rep = .{ 1, 4, 8 };
+        enc.tables = .{};
+        enc.next_rep = undefined;
+        enc.next_tables = .{};
+        enc.first = true;
+        enc.cap = cap_of(len);
+        assert(enc.first and enc.sequences.items.len == 0);
+    }
+
     fn literals(enc: *Encoder) []u8 {
         return enc.buffer[0..enc.cap];
     }
@@ -80,8 +106,8 @@ pub const Encoder = struct {
     }
 
     fn scratch(enc: *Encoder) []u8 {
-        const out = enc.buffer[4 * enc.cap ..];
-        assert(out.len == scratch_len(enc.cap));
+        const out = enc.buffer[4 * enc.cap ..][0..scratch_len(enc.cap)];
+        assert(4 * enc.cap + out.len <= enc.buffer.len);
         return out;
     }
 

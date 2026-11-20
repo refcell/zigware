@@ -40,6 +40,9 @@ pub const State = struct {
     long: []u32,
     /// `chainTable`: positions hashed on `min_match` bytes.
     short: []u32,
+    /// The allocated lengths of `long` and `short`, which a smaller frame uses a prefix of.
+    long_capacity: usize,
+    short_capacity: usize,
     long_log: u6,
     short_log: u6,
     min_match: u6,
@@ -53,22 +56,47 @@ pub const State = struct {
         const long = try gpa.alloc(u32, @as(usize, 1) << params.hash_log);
         errdefer gpa.free(long);
         const short = try gpa.alloc(u32, @as(usize, 1) << params.chain_log);
-        @memset(long, 0);
-        @memset(short, 0);
-        return .{
+        var state: State = .{
             .long = long,
             .short = short,
-            .long_log = params.hash_log,
-            .short_log = params.chain_log,
-            .min_match = params.min_match,
-            .window_log = params.window_log,
+            .long_capacity = long.len,
+            .short_capacity = short.len,
+            .long_log = undefined,
+            .short_log = undefined,
+            .min_match = undefined,
+            .window_log = undefined,
         };
+        state.reset(params);
+        return state;
     }
 
     pub fn deinit(self: *State, gpa: Allocator) void {
-        gpa.free(self.long);
-        gpa.free(self.short);
+        gpa.free(self.long.ptr[0..self.long_capacity]);
+        gpa.free(self.short.ptr[0..self.short_capacity]);
         self.* = undefined;
+    }
+
+    /// Whether `reset` can take `params` without growing the tables.
+    pub fn fits(self: *const State, params: Params) bool {
+        return (@as(usize, 1) << params.hash_log) <= self.long_capacity and
+            (@as(usize, 1) << params.chain_log) <= self.short_capacity;
+    }
+
+    /// Start a new frame with `params` in the same tables: every entry cleared and the
+    /// window back at its start, as `ZSTD_resetCCtx_internal` leaves a reused context.
+    pub fn reset(self: *State, params: Params) void {
+        assert(params.min_match >= 4 and params.min_match <= 5);
+        assert(self.fits(params));
+        self.long = self.long.ptr[0 .. @as(usize, 1) << params.hash_log];
+        self.short = self.short.ptr[0 .. @as(usize, 1) << params.chain_log];
+        @memset(self.long, 0);
+        @memset(self.short, 0);
+        self.long_log = params.hash_log;
+        self.short_log = params.chain_log;
+        self.min_match = params.min_match;
+        self.window_log = params.window_log;
+        self.low_limit = start_index;
+        self.dict_limit = start_index;
     }
 
     /// `ZSTD_window_enforceMaxDist` before compressing a block ending at position `end`.

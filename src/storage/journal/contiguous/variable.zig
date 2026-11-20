@@ -874,11 +874,15 @@ fn encode_items(
     out: *std.ArrayList(u8),
     starts: *std.ArrayList(usize),
 ) Error!void {
+    // One encoder for the whole batch, as commonware's thread-local `CCtx`.
+    var compressor: frame.zstd.Compressor = .{};
+    defer compressor.deinit(gpa);
+    const reused: ?*frame.zstd.Compressor = if (compression != null) &compressor else null;
     for (nested) |items| {
         try starts.ensureUnusedCapacity(gpa, items.len);
         for (items) |item| {
             starts.appendAssumeCapacity(out.items.len);
-            _ = try frame.encode_frame_into(V, gpa, compression, item, out);
+            _ = try frame.encode_frame_reusing(V, gpa, compression, reused, item, out);
         }
     }
     assert(starts.items.len == 0 or starts.items[starts.items.len - 1] < out.items.len);

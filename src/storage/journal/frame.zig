@@ -12,7 +12,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const Error = @import("mod.zig").Error;
-const zstd = @import("zstd.zig");
+pub const zstd = @import("zstd.zig");
 
 /// Longest varint prefix of a `u32` payload length.
 pub const max_prefix_size: usize = codec.varint.max_u32_varint_size;
@@ -201,7 +201,23 @@ pub fn encode_frame_into(
     item: V,
     buf: *std.ArrayList(u8),
 ) Error!u32 {
-    if (compression) |level| return encode_compressed_frame_into(V, gpa, level, item, buf);
+    return encode_frame_reusing(V, gpa, compression, null, item, buf);
+}
+
+/// `encode_frame_into` compressing through `compressor` when it is set, so a batch of frames
+/// shares one encoder's buffers.
+pub fn encode_frame_reusing(
+    comptime V: type,
+    gpa: Allocator,
+    compression: ?u8,
+    compressor: ?*zstd.Compressor,
+    item: V,
+    buf: *std.ArrayList(u8),
+) Error!u32 {
+    assert(compressor == null or compression != null);
+    if (compression) |level| {
+        return encode_compressed_frame_into(V, gpa, level, compressor, item, buf);
+    }
     const frame = try UncompressedFrame(V).init(item);
     const out = try buf.addManyAsSlice(gpa, frame.frame_len);
     var writer = codec.Writer.init(out);
@@ -216,6 +232,7 @@ pub fn encode_compressed_frame_into(
     comptime V: type,
     gpa: Allocator,
     level: u8,
+    compressor: ?*zstd.Compressor,
     item: V,
     buf: *std.ArrayList(u8),
 ) Error!u32 {
@@ -230,7 +247,11 @@ pub fn encode_compressed_frame_into(
         std.math.maxInt(u32));
     try buf.ensureUnusedCapacity(gpa, max_size_len + max_len);
     buf.items.len += max_size_len;
-    const compressed_len = (zstd.compress_into(gpa, encoded, buf) catch |err| {
+    const compressed = if (compressor) |c|
+        c.compress_into(gpa, encoded, buf)
+    else
+        zstd.compress_into(gpa, encoded, buf);
+    const compressed_len = (compressed catch |err| {
         buf.items.len = start;
         return err;
     }).len;
