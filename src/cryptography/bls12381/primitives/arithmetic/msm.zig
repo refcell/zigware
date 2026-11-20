@@ -98,7 +98,8 @@ fn split_terms(
     var count: usize = 0;
     for (points, scalars) |point, scalar| {
         if (point.infinity) continue;
-        split_point(C, point, scalar, split_points[count..][0..parts], split_scalars[count..][0..parts]);
+        const out_points = split_points[count..][0..parts];
+        split_point(C, point, scalar, out_points, split_scalars[count..][0..parts]);
         count += parts;
     }
     assert(count % parts == 0 and count <= points.len * parts);

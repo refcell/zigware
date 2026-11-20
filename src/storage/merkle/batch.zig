@@ -1296,7 +1296,10 @@ test "sort_locations sorts like pdq across radix widths" {
     // Lengths on both sides of `radix_sort_min`; widths of zero, one, two, and six passes.
     for ([_]usize{ 0, radix_sort_min - 1, radix_sort_min, 3000 }) |len| {
         for ([_]u32{ 0, 11, 12, 23, 64 }) |width| {
-            const mask: u64 = if (width == 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(width)) - 1;
+            const mask: u64 = if (width == 64)
+                std.math.maxInt(u64)
+            else
+                (@as(u64, 1) << @intCast(width)) - 1;
             for (items[0..len]) |*item| item.* = random.int(u64) & mask;
             @memcpy(expected[0..len], items[0..len]);
             std.sort.pdq(u64, expected[0..len], {}, std.sort.asc(u64));
