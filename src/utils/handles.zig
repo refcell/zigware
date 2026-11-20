@@ -291,6 +291,16 @@ pub fn Table(comptime H: type) type {
             self.len = 0;
         }
 
+        /// The first candidate for `hash` that `matcher.matches` accepts, or null: `get`
+        /// with the confirmation inlined into one walk of the run.
+        pub fn find(self: *const Self, hash: u64, matcher: anytype) ?H {
+            if (self.metas.len == 0) return null;
+            return switch (self.walk(hash, matcher)) {
+                .found => |found| found,
+                .stop => null,
+            };
+        }
+
         pub const Found = struct { handle: H, inserted: bool };
 
         /// The first candidate for `hash` that `matcher.matches` accepts, or else `handle`,

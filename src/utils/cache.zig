@@ -65,15 +65,15 @@ pub fn key_hash(comptime K: type, key: K) u64 {
     return hasher.final();
 }
 
-/// An integer key's hash: ahash's fallback (the hasher commonware's cache uses), two folded
-/// 64x64-bit multiplies, about a third of Wyhash's cost. Both the low bits (home slot) and
-/// the top byte (fingerprint) depend on every key bit.
+/// An integer key's hash: one folded 64x64-bit multiply (foldhash's integer step). The fold
+/// XORs the product's high half into its low half, so both the low bits (home slot) and the
+/// top byte (fingerprint) depend on every key bit. The second multiply and rotate of ahash's
+/// non-AES fallback, ported from commonware's hasher, cost a fifth of a lookup and spread
+/// sequential, shifted, and strided keys no better.
 fn integer_hash(key: anytype) u64 {
     const multiple: u64 = 6364136223846793005;
     const value: u64 = @as(@Int(.unsigned, @bitSizeOf(@TypeOf(key))), @bitCast(key));
-    const buffer = folded_multiply(value ^ hash_seed, multiple);
-    const pad: u64 = 0x2d35_8dcc_aa6c_78a5;
-    return std.math.rotl(u64, folded_multiply(buffer, pad), buffer & 63);
+    return folded_multiply(value ^ hash_seed, multiple);
 }
 
 fn folded_multiply(a: u64, b: u64) u64 {
@@ -408,12 +408,17 @@ pub fn GhostQueue(comptime K: type) type {
         }
 
         pub fn find(ghost: *const Self, key: K, hash: u64) ?usize {
-            var candidates = ghost.index.get(hash);
-            while (candidates.next()) |slot| {
-                if (key_eql(K, ghost.slots.items[slot].key.?, key)) return slot;
-            }
-            return null;
+            return ghost.index.find(hash, KeyMatcher{ .slots = ghost.slots.items, .key = key });
         }
+
+        const KeyMatcher = struct {
+            slots: []const Slot,
+            key: K,
+
+            pub fn matches(matcher: KeyMatcher, slot: usize) bool {
+                return key_eql(K, matcher.slots[slot].key.?, matcher.key);
+            }
+        };
 
         /// Removes the history of `key`; returns whether it was present.
         pub fn forget(ghost: *Self, key: K, hash: u64) bool {
@@ -671,12 +676,17 @@ pub fn Cache(comptime K: type, comptime V: type) type {
         }
 
         pub fn find_slot(self: *const Self, key: K, hash: u64) ?usize {
-            var candidates = self.index.get(hash);
-            while (candidates.next()) |slot| {
-                if (key_eql(K, self.slots.items[slot].key, key)) return slot;
-            }
-            return null;
+            return self.index.find(hash, KeyMatcher{ .slots = self.slots.items, .key = key });
         }
+
+        const KeyMatcher = struct {
+            slots: []const Entry,
+            key: K,
+
+            pub fn matches(matcher: KeyMatcher, slot: usize) bool {
+                return key_eql(K, matcher.slots[slot].key, matcher.key);
+            }
+        };
 
         /// On a hit, records use, drops the argument key, and returns the slot.
         fn hit(self: *Self, key: K, hash: u64) ?usize {
