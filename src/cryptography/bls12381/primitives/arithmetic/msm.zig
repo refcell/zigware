@@ -727,8 +727,10 @@ fn CurveKernel(comptime C: type) type {
 
 /// sum_i [scalars[i]] points[i] in tiles cut by `strategy` (commonware's `msm_parallel`), for
 /// at least two points of the order-r subgroup with scalars below 2^`nbits`. Equal to `msm`
-/// for every cut. Scalars wider than the endomorphism split's parts are split first (GLV for
-/// G1, GLS for G2), so the tiles run a half or a quarter of the windows over more points.
+/// for every cut. On one thread, scalars wider than the endomorphism split's parts are split
+/// first (GLV for G1, GLS for G2), so the tiles run a half or a quarter of the windows over
+/// more points. A parallel strategy tiles the full scalars: split, its tiles cost more than
+/// they save (g2 n=1000 on 8 threads: 7.9 ms split, 5.0 ms not).
 pub fn msm_tiled(
     comptime C: type,
     gpa: std.mem.Allocator,
@@ -742,7 +744,7 @@ pub fn msm_tiled(
         for (scalars) |scalar| assert(scalar >> @intCast(nbits) == 0);
     }
     const parts = comptime split_parts(C);
-    if (nbits <= scalar_bits / parts) {
+    if (nbits <= scalar_bits / parts or strategy.parallelism() > 1) {
         const kernel: CurveKernel(C) = .{ .points = points, .scalars = scalars };
         return run_tiled(C, gpa, points.len, nbits, strategy, kernel);
     }
