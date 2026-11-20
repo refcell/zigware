@@ -15,6 +15,7 @@ add new entries here, with the bench row, its verdict, and the commit, in the sa
 | [Interleaved SHA-NI pairs for short `hash_many` runs](#sha-256-hash_many-in-sha-ni-pairs) | `sha256::hash_many::individual` count=1/7, len=64/256 | 0.73–0.92× (8 rounds) | faster | 17a97b76 |
 | [One root compression for short BLAKE3 messages](#blake3-one-root-compression) | `blake3::hash_message` msg_len=256 | 0.79× (8 rounds) | faster | 772e9944 |
 | [lthash over a wide XOF and 32-lane state steps](#lthash) | `lthash::add`/`subtract` ≤ 1 KiB, `combine` | 0.52–0.71×, 0.22× (8 rounds) | faster | b23c4c4c |
+| [Reserve a compressed batch up front](#journal-reserve-a-compressed-batch-up-front) | `journal::variable_prepare_append` items=32 size=1048576 compression=3 random=true | 0.68× (8 rounds) | faster | d2ab82b1 |
 | [Blob I/O issued inline instead of on `spawn_blocking`](#storage-blob-io-without-a-thread-hop) | `freezer::get`, `freezer::put` | 0.03×, 0.07× (pre-ABBA) | see below | runtime design |
 
 ## ed25519 verify: Lehmer's half_size
@@ -88,6 +89,20 @@ a portable change needs checking against commonware's loops before adopting it.
 - Evidence: [BENCHMARKS.md, cryptography](BENCHMARKS.md#cryptography-hashes-ed25519-lthash-2026-11-20-crypto-lane);
   [crypto.md](lanes/crypto.md) log, 2026-11-19.
 
+## Journal: reserve a compressed batch up front
+
+commonware's `prepare_append` starts from `Vec::new()` and `compress_into` reserves each
+item's `compress_bound` as it goes, so a batch of large items grows by doubling and copies
+everything written so far at each step, onto fresh pages. When every item's encoded size is
+known first (`FixedSize` values, or a pass over `encode_size()`), the batch can be reserved
+once as the sum of `varint + compress_bound(size)`. In zigware this took 32 random 1 MiB items
+from 6.9 ms to 4.0 ms (its list grows by half, so it copied more than a doubling `Vec`); the
+row is 0.68× at native ABBA, with the encoder changes of the same push included, so treat the
+share commonware would gain as unmeasured.
+
+- Evidence: [BENCHMARKS.md, journal zstd](BENCHMARKS.md#journal-zstd-level-3-compression-native-abba-2026-11-20-storage-journal-lane);
+  [storage-journal.md](lanes/storage-journal.md) log, 2026-11-20.
+
 ## Storage: blob I/O without a thread hop
 
 commonware's tokio storage runs every blob `read_at` and `write_at` on a `spawn_blocking`
@@ -121,6 +136,9 @@ are not claimed as adoptable:
 
 ## Not included
 
+- The journal's zstd encoder changes (storage-journal, 2026-11-20): branch-free candidate
+  selection and continued window indexes are what libzstd already does, and the raw-block and
+  Huffman shortcuts are changes to libzstd's own code, not to commonware's.
 - ChaCha20 (`seal_open`) and the `sake` handshake: zigware's wins there were against Zig's
   `std`, and commonware already runs aws-lc assembly and dalek's basepoint tables.
 - The end-to-end flood throughput (1.87×): part of it is the sender running on its own thread,

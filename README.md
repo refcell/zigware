@@ -200,8 +200,9 @@ would carry over. ed25519 verification splits its scalar with Lehmer's algorithm
 bit-at-a-time Euclid, BLS12-381 runs its field arithmetic eight elements at a time on AVX-512
 IFMA lanes and clears the cofactor once per batch of messages, short SHA-256 batches hash in
 interleaved SHA-NI pairs, and short BLAKE3 messages take a single root compression. In
-storage, much of the gap looks like blob I/O issued inline rather than on a blocking thread
-pool. [docs/UPSTREAM_OPTIMIZATIONS.md](docs/UPSTREAM_OPTIMIZATIONS.md) has the bench rows,
+storage, a compressed journal batch can be reserved once instead of growing, and much of
+the gap looks like blob I/O issued inline rather than on a blocking thread pool.
+[docs/UPSTREAM_OPTIMIZATIONS.md](docs/UPSTREAM_OPTIMIZATIONS.md) has the bench rows,
 verdicts, and commits, and separates these from wins whose cause is not yet known.
 
 ## Installation
