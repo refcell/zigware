@@ -220,6 +220,21 @@ test "futures: try_join_all returns a later error and cancels a pending task" {
     }
 }
 
+// With `async_limit` 0, `Group.async` runs every task on the caller, so a join that started
+// its tasks that way would sleep in the pending task forever instead of canceling it.
+test "futures: try_join_all never runs a task on the caller" {
+    var threaded: Io.Threaded = .init(std.heap.smp_allocator, .{ .async_limit = .nothing });
+    defer threaded.deinit();
+    var canceled: std.atomic.Value(u32) = .init(0);
+    const arguments = [_]std.meta.ArgsTuple(@TypeOf(role_task)){
+        .{ .pending, threaded.io(), &canceled },
+        .{ .fail, threaded.io(), &canceled },
+    };
+    const joined = futures.try_join_all(u32, JoinError, gpa, threaded.io(), role_task, &arguments);
+    try testing.expectError(error.Failed, joined);
+    try testing.expectEqual(1, canceled.load(.seq_cst));
+}
+
 const Pending = struct { aborter: futures.AbortablePool(i32).Aborter, id: i32 };
 
 /// Coverage fuzzing checks `testing.allocator` for leaks after every input without joining

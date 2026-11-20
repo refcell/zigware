@@ -244,6 +244,11 @@ pub fn AbortablePool(comptime T: type) type {
 /// input order, or the first error observed after canceling the remaining tasks. `function`
 /// returns `E!T`; values already collected when an error occurs are dropped without cleanup, so
 /// `T` should not own memory. The caller frees the returned slice.
+///
+/// Each task gets its own thread (`Group.concurrent`), never the caller's: `Group.async` runs a
+/// task inline once `async_limit` tasks are busy, and a task that waits to be canceled then
+/// blocks the join that would cancel it (the macOS `try_join_all` hang). Fails with
+/// `ConcurrencyUnavailable` when the `Io` cannot start a task.
 pub fn try_join_all(
     comptime T: type,
     comptime E: type,
@@ -251,7 +256,7 @@ pub fn try_join_all(
     io: Io,
     comptime function: anytype,
     arguments: []const std.meta.ArgsTuple(@TypeOf(function)),
-) (E || Allocator.Error || Io.Cancelable)![]T {
+) (E || Allocator.Error || Io.Cancelable || Io.ConcurrentError)![]T {
     const Args = std.meta.ArgsTuple(@TypeOf(function));
     const Completion = struct { index: usize, result: E!T };
     const Task = struct {
@@ -270,7 +275,9 @@ pub fn try_join_all(
     var group: Io.Group = .init;
     // Runs before `buffer` is freed: every task has returned once `cancel` does.
     defer group.cancel(io);
-    for (arguments, 0..) |args, index| group.async(io, Task.run, .{ &queue, io, index, args });
+    for (arguments, 0..) |args, index| {
+        try group.concurrent(io, Task.run, .{ &queue, io, index, args });
+    }
     for (0..arguments.len) |_| {
         const completion = queue.getOne(io) catch |err| switch (err) {
             error.Canceled => return error.Canceled,
