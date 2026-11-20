@@ -164,9 +164,11 @@ fn Durably(comptime Db: type, comptime operation: []const u8) type {
 }
 
 fn run(comptime body: fn (Context) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(body, .{}));
+    try runtime.deterministic.soak(gpa, .{}, {}, struct {
+        fn round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start_context(body, .{}));
+        }
+    }.round);
 }
 
 /// Applying a successor does not wait for the witness sync already in flight.

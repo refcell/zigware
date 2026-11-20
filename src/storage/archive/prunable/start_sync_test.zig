@@ -57,11 +57,13 @@ fn expect_index(archive: *Archive, index: u64, expected: ?i32) !void {
 
 const default_section: u64 = 65536;
 
-/// Runs `body(ctx)` on the deterministic runtime.
+/// Runs `body(ctx)` on the deterministic runtime, on `-Dfuzz-soak` runner seeds.
 fn run(comptime body: fn (deterministic.Context) anyerror!void) !void {
-    var runner = try deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(body, .{}));
+    try deterministic.soak(gpa, .{}, {}, struct {
+        fn round(_: void, runner: *deterministic.Runner) anyerror!void {
+            try (try runner.start_context(body, .{}));
+        }
+    }.round);
 }
 
 const Op = fn (*Archive) anyerror!void;
