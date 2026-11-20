@@ -80,7 +80,7 @@ pub const Encoder = struct {
     /// offsets, no Huffman tables, and cleared match tables (a reused `ZSTD_CCtx`).
     pub fn reset(enc: *Encoder, len: usize) void {
         assert(enc.fits(len));
-        enc.state.reset(params.level3(len));
+        enc.state.restart(params.level3(len), len);
         enc.sequences.clearRetainingCapacity();
         enc.rep = .{ 1, 4, 8 };
         enc.tables = .{};

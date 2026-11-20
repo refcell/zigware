@@ -3,8 +3,10 @@
 //! level 3. It must find exactly libzstd's sequences, so it follows the C step by step: the
 //! same hashes, table updates, skip schedule, repeat checks, and complementary insertions.
 //!
-//! Positions are indexes into the frame; libzstd's window indexes are positions plus
-//! `start_index`, so table entries 0 and 1 are never valid matches.
+//! Positions are indexes into the frame; libzstd's window indexes are positions plus the
+//! frame's `base`. A fresh state starts at `start_index`, so table entries 0 and 1 are never
+//! valid matches; a reused one starts each frame where the last ended (`restart`), so every
+//! entry an earlier frame left is below the window and the tables need no clearing.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -19,6 +21,9 @@ pub const rep_num = 3;
 const search_strength = 8;
 /// `HASH_READ_SIZE`: hashing reads this many bytes, so positions stop that far from the end.
 const hash_read_size = 8;
+/// The window index past which `restart` clears the tables and starts again from
+/// `start_index` (libzstd's `ZSTD_indexTooCloseToMax`; any bound gives the same frames).
+const index_max: u32 = 1 << 31;
 /// `MINMATCH`: match lengths are stored minus this.
 pub const match_min = 3;
 
@@ -52,6 +57,10 @@ pub const State = struct {
     window_log: u6,
     low_limit: u32 = start_index,
     dict_limit: u32 = start_index,
+    /// The window index of the frame's first byte.
+    base: u32 = start_index,
+    /// The window index past the last block's end, where the next frame starts.
+    end_index: u32 = start_index,
 
     pub fn init(gpa: Allocator, params: Params) Allocator.Error!State {
         assert(params.min_match >= 4 and params.min_match <= 5);
@@ -100,11 +109,35 @@ pub const State = struct {
         self.window_log = params.window_log;
         self.low_limit = start_index;
         self.dict_limit = start_index;
+        self.base = start_index;
+        self.end_index = start_index;
+    }
+
+    /// Start a new frame of `len` bytes with `params`, as `ZSTD_resetCCtx_internal` restarts a
+    /// reused context (`ZSTDirp_continue`): the frame's indexes continue past the last frame's
+    /// end and the window starts there, so stale entries never match and the tables stay as
+    /// they are. Near `index_max` it clears them instead, as `reset` does.
+    pub fn restart(self: *State, params: Params, len: usize) void {
+        assert(self.fits(params));
+        assert(self.end_index >= self.base);
+        if (len > index_max or self.end_index > index_max - len) return self.reset(params);
+        self.long = self.long.ptr[0 .. @as(usize, 1) << params.hash_log];
+        self.short = self.short.ptr[0 .. @as(usize, 1) << params.chain_log];
+        self.long_log = params.hash_log;
+        self.short_log = params.chain_log;
+        self.min_match = params.min_match;
+        self.window_log = params.window_log;
+        self.base = self.end_index;
+        self.low_limit = self.base;
+        self.dict_limit = self.base;
+        assert(self.low_limit == self.base);
     }
 
     /// `ZSTD_window_enforceMaxDist` before compressing a block ending at position `end`.
     pub fn enforce_max_dist(self: *State, end: usize) void {
-        const block_end_index = index_of(end);
+        const block_end_index = index_of(self.base, end);
+        assert(block_end_index >= self.end_index or self.end_index == self.base);
+        self.end_index = block_end_index;
         const max_dist = @as(u32, 1) << @intCast(self.window_log);
         if (block_end_index > max_dist) {
             self.low_limit = @max(self.low_limit, block_end_index - max_dist);
@@ -122,8 +155,8 @@ pub const State = struct {
     }
 };
 
-fn index_of(position: usize) u32 {
-    return @intCast(position + start_index);
+fn index_of(base: u32, position: usize) u32 {
+    return @intCast(position + base);
 }
 
 fn read32(src: []const u8, position: usize) u32 {
@@ -205,9 +238,10 @@ pub fn compress_block(
         .sequences = sequences,
         .offset_1 = rep[0],
         .offset_2 = rep[1],
-        .prefix_lowest_index = state.lowest_prefix_index(index_of(end)),
+        .base = state.base,
+        .prefix_lowest_index = state.lowest_prefix_index(index_of(state.base, end)),
     };
-    block.prefix_lowest = block.prefix_lowest_index - start_index;
+    block.prefix_lowest = block.prefix_lowest_index - state.base;
     assert(block.prefix_lowest <= start);
     block.prepare();
     block.run();
@@ -239,6 +273,8 @@ const Block = struct {
     offset_2: u32,
     saved_1: u32 = 0,
     saved_2: u32 = 0,
+    /// The frame's `State.base`.
+    base: u32,
     prefix_lowest_index: u32,
     prefix_lowest: usize = 0,
     /// Window index of the last position inserted by the search (`curr`).
@@ -251,7 +287,7 @@ const Block = struct {
     /// Skip the window's first byte and drop repeat offsets reaching before the window.
     fn prepare(block: *Block) void {
         if (block.ip == block.prefix_lowest) block.ip += 1;
-        const current = index_of(block.ip);
+        const current = index_of(block.base, block.ip);
         const window_low = block.state.lowest_prefix_index(current);
         const rep_max = current - window_low;
         if (block.offset_2 > rep_max) {
@@ -291,7 +327,8 @@ const Block = struct {
                     block.offset_1 = match.offset;
                     // Safe while ip1 cannot pass the match end (step under the 4-byte
                     // minimum match).
-                    if (block.step < 4) block.state.long[block.hash_next] = index_of(block.ip_next);
+                    if (block.step < 4) block.state.long[block.hash_next] =
+                        index_of(block.base, block.ip_next);
                     const literal_length = block.ip - block.anchor;
                     block.store(literal_length, match.offset + rep_num, match.length);
                     block.after_match(match.length);
@@ -322,7 +359,8 @@ const Block = struct {
         const short_log = state.short_log;
         const lowest = block.prefix_lowest_index;
         const offset_1 = block.offset_1;
-        assert(lowest >= start_index);
+        const base = block.base;
+        assert(lowest >= base);
         if (block.end < hash_read_size) return .none;
         // `ilimit`: the last position that may be hashed.
         const limit = block.end - hash_read_size;
@@ -337,20 +375,20 @@ const Block = struct {
             assert(ip < ip1 and ip1 <= limit);
             const hash_short_0 = hash_short_mls(src, ip, short_log, min_match);
             const index_short_0 = short[hash_short_0];
-            long[hash_long_0] = index_of(ip);
-            short[hash_short_0] = index_of(ip);
+            long[hash_long_0] = index_of(base, ip);
+            short[hash_short_0] = index_of(base, ip);
             if (offset_1 > 0 and read32(src, ip + 1 - offset_1) == read32(src, ip + 1)) {
                 block.resume_at(ip, step, 0, 0);
                 return block.found_repeat();
             }
             const hash_long_1 = hash8(src, ip1, long_log);
             const word = read64(src, ip);
-            if (select_equal(src, index_long_0, lowest, word, 8)) {
+            if (select_equal(src, base, index_long_0, lowest, word, 8)) {
                 block.resume_at(ip, step, hash_long_1, ip1);
                 return block.long_candidate(index_long_0).?;
             }
             const index_long_1 = long[hash_long_1];
-            if (select_equal(src, index_short_0, lowest, word, 4)) {
+            if (select_equal(src, base, index_short_0, lowest, word, 4)) {
                 block.resume_at(ip, step, hash_long_1, ip1);
                 return block.search_next_long(index_short_0, index_long_1, ip1);
             }
@@ -375,6 +413,7 @@ const Block = struct {
     /// fails the comparison, so the one branch is on the combined result, which is rare.
     inline fn select_equal(
         src: []const u8,
+        base: u32,
         index: u32,
         lowest: u32,
         word: u64,
@@ -386,7 +425,7 @@ const Block = struct {
             : [keep] "=r" (-> usize),
             : [in] "0" (keep_visible),
         );
-        const real = @intFromPtr(src.ptr) +% (@as(usize, index) -% start_index);
+        const real = @intFromPtr(src.ptr) +% (@as(usize, index) -% base);
         const address = (real & keep) | (@intFromPtr(&select_backup) & ~keep);
         const candidate = std.mem.readInt(u64, @as(*const [8]u8, @ptrFromInt(address)), .little);
         const mask: u64 = if (bytes == 8) std.math.maxInt(u64) else std.math.maxInt(u32);
@@ -398,7 +437,7 @@ const Block = struct {
         assert(ip >= block.anchor and ip < block.end);
         assert(step >= 1);
         block.ip = ip;
-        block.current = index_of(ip);
+        block.current = index_of(block.base, ip);
         block.step = step;
         block.hash_next = hash_next;
         block.ip_next = ip_next;
@@ -420,7 +459,7 @@ const Block = struct {
     /// The long-table match at `ip`, extended backward.
     fn long_candidate(block: *Block, index: u32) ?Found {
         if (!block.valid(index)) return null;
-        var match = index - start_index;
+        var match = index - block.base;
         if (read64(block.src, match) != read64(block.src, block.ip)) return null;
         var length = count(block.src, block.ip + 8, match + 8, block.end) + 8;
         const offset: u32 = @intCast(block.ip - match);
@@ -437,11 +476,11 @@ const Block = struct {
     /// A short match at `ip`: prefer the long match at `ip1` when it is longer.
     fn search_next_long(block: *Block, index_short: u32, index_long_1: u32, ip1: usize) Found {
         const src = block.src;
-        var match = index_short - start_index;
+        var match = index_short - block.base;
         var length = count(src, block.ip + 4, match + 4, block.end) + 4;
         var offset: u32 = @intCast(block.ip - match);
         if (index_long_1 > block.prefix_lowest_index) {
-            const match_1 = index_long_1 - start_index;
+            const match_1 = index_long_1 - block.base;
             if (read64(src, match_1) == read64(src, ip1)) {
                 const length_1 = count(src, ip1 + 8, match_1 + 8, block.end) + 8;
                 if (length_1 > length) {
@@ -471,20 +510,22 @@ const Block = struct {
         block.ip += length;
         block.anchor = block.ip;
         if (!block.in_limit(block.ip)) return;
-        const insert = block.current + 2 - start_index;
+        const insert = block.current + 2 - block.base;
         state.long[hash8(src, insert, state.long_log)] = block.current + 2;
-        state.long[hash8(src, block.ip - 2, state.long_log)] = index_of(block.ip - 2);
+        const before_end = block.ip - 2;
+        state.long[hash8(src, before_end, state.long_log)] = index_of(block.base, before_end);
         state.short[hash_short(src, insert, state.short_log, state.min_match)] = block.current + 2;
         state.short[hash_short(src, block.ip - 1, state.short_log, state.min_match)] =
-            index_of(block.ip - 1);
+            index_of(block.base, block.ip - 1);
         while (block.in_limit(block.ip) and block.offset_2 > 0 and
             read32(src, block.ip) == read32(src, block.ip - block.offset_2))
         {
             const ip = block.ip;
             const repeat_length = count(src, ip + 4, ip + 4 - block.offset_2, block.end) + 4;
             std.mem.swap(u32, &block.offset_1, &block.offset_2);
-            state.short[hash_short(src, ip, state.short_log, state.min_match)] = index_of(ip);
-            state.long[hash8(src, ip, state.long_log)] = index_of(ip);
+            const index = index_of(block.base, ip);
+            state.short[hash_short(src, ip, state.short_log, state.min_match)] = index;
+            state.long[hash8(src, ip, state.long_log)] = index;
             block.store(0, 1, repeat_length);
             block.ip += repeat_length;
             block.anchor = block.ip;
