@@ -26,7 +26,8 @@ const Upgrader = stream.SakeCups(PrivateKey, cryptography.ChaCha20Poly1305);
 const Transport = runtime.network.deterministic.Network;
 const Net = network_mod.Network(Upgrader, Transport);
 const Bootstrapper = config_mod.Bootstrapper(PublicKey);
-const gpa = testing.allocator;
+/// `testing.allocator`, except while `run_production` swaps in one without stack traces.
+var gpa: std.mem.Allocator = testing.allocator;
 
 const base_port: u16 = 3000;
 const peers_max = 25;
@@ -492,6 +493,17 @@ fn Watched(comptime function: anytype) type {
 /// Runs `function(io, network, metrics)` on a fresh production runner, under `watchdog`, up to
 /// three times while an attempt reports `error.TestPortLost`.
 pub fn run_production(comptime function: anytype) !void {
+    // Not `testing.allocator`: on Darwin its free captures a stack trace through the MachO
+    // unwinder, which takes a cancelable lock and so consumes a task's pending cancel. A
+    // network loop freeing after its cancel then runs on (the likely cause of macOS CI hanging
+    // "while stopping", run 44752935852). This one still checks leaks but takes no traces.
+    var traceless: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{
+        .stack_trace_frames = 0,
+    });
+    defer if (traceless.deinit() != 0) @panic("a real-socket run leaked");
+    const previous = gpa;
+    gpa = traceless.allocator();
+    defer gpa = previous;
     var attempt: u32 = 1;
     while (true) : (attempt += 1) {
         var tmp = testing.tmpDir(.{});
