@@ -476,7 +476,15 @@ pub fn Table(comptime H: type) type {
         }
 
         /// Places an entry in Robin Hood order without changing `len`. Requires an empty slot.
+        /// Below half load (a cache's index always is), an empty home slot takes the entry at
+        /// displacement 0 with one slot store, skipping the span's load, masks, and store.
+        /// Fuller tables skip the test: there it is a coin flip the branch predictor loses.
         fn place(self: *Self, hash: u64, handle: H) void {
+            const start = home(self.slots.len, hash);
+            if (self.len * 2 < self.slots.len and self.slots[start].meta == EMPTY) {
+                self.slots[start] = .{ .meta = slot_meta(hash, 0), .handle = handle };
+                return;
+            }
             if (!self.place_in_span(hash, handle)) {
                 const stop = switch (self.walk(hash, {})) {
                     .found => unreachable, // A walk without a matcher accepts no candidate.
