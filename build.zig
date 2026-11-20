@@ -62,7 +62,7 @@ const packages = [_]Package{
         "conformance", "invariants",
     } },
     .{ .name = "stream", .deps = &.{
-        "codec", "cryptography", "formatting", "math", "runtime", "utils",
+        "codec", "cryptography", "formatting", "math", "runtime", "utils", "conformance",
     } },
     .{ .name = "coding", .deps = &.{
         "codec",       "cryptography", "parallel", "storage", "utils", "runtime", "invariants",
