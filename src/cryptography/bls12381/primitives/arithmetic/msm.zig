@@ -273,8 +273,9 @@ const batch_affine_points_min = 64;
 const batch_size = 128;
 
 /// Bucket state for batch-affine accumulation: affine buckets updated in batches
-/// with one shared inversion (Montgomery's trick), plus Jacobian side buckets for
-/// additions that cannot join the current batch (slot already pending, or equal x).
+/// with one shared inversion (Montgomery's trick). A point whose bucket already has an
+/// addition in the batch waits for the next batch; Jacobian side buckets take the additions
+/// that cannot be batched (equal x, or the waiting list full).
 fn BatchAffine(comptime C: type) type {
     const F = @TypeOf(@as(C.Affine, undefined).x);
     const buckets_cap = 1 << (window_bits_max(C) - 1);
@@ -288,6 +289,9 @@ fn BatchAffine(comptime C: type) type {
         denominators: [batch_size]F = undefined,
         prefix: [batch_size]F = undefined,
         count: u32 = 0,
+        waiting_slots: [batch_size]u16 = undefined,
+        waiting: [batch_size]C.Affine = undefined,
+        waiting_count: u32 = 0,
 
         fn reset(self: *Self, bucket_count: usize) void {
             assert(bucket_count <= buckets_cap);
@@ -295,14 +299,34 @@ fn BatchAffine(comptime C: type) type {
             @memset(self.side[0..bucket_count], C.identity);
             @memset(self.pending_slot[0..bucket_count], false);
             self.count = 0;
+            self.waiting_count = 0;
         }
 
         fn add(self: *Self, slot: usize, point: C.Affine) void {
+            self.place(slot, point);
+            while (self.count == batch_size) {
+                self.apply();
+                self.retry();
+            }
+            assert(self.count < batch_size);
+        }
+
+        /// Puts `point` in its bucket, the batch, the waiting list, or the side bucket.
+        fn place(self: *Self, slot: usize, point: C.Affine) void {
             assert(!point.infinity);
+            assert(self.count < batch_size);
             const bucket = self.affine[slot];
-            if (bucket.infinity and !self.pending_slot[slot]) {
+            if (self.pending_slot[slot]) {
+                if (self.waiting_count < batch_size) {
+                    self.waiting_slots[self.waiting_count] = @intCast(slot);
+                    self.waiting[self.waiting_count] = point;
+                    self.waiting_count += 1;
+                } else {
+                    self.side[slot] = self.side[slot].add_affine(point);
+                }
+            } else if (bucket.infinity) {
                 self.affine[slot] = point;
-            } else if (self.pending_slot[slot] or bucket.x.eql(point.x)) {
+            } else if (bucket.x.eql(point.x)) {
                 self.side[slot] = self.side[slot].add_affine(point);
             } else {
                 self.pending_slot[slot] = true;
@@ -310,12 +334,38 @@ fn BatchAffine(comptime C: type) type {
                 self.addends[self.count] = point;
                 self.denominators[self.count] = point.x.sub(bucket.x);
                 self.count += 1;
-                if (self.count == batch_size) self.flush();
             }
         }
 
-        /// Applies every pending addition with a single inversion.
+        /// Places the waiting points again after a batch was applied. At most one per slot
+        /// joins the batch, so the batch never fills before the last of them.
+        fn retry(self: *Self) void {
+            assert(self.count == 0);
+            const waiting_count = self.waiting_count;
+            var slots: [batch_size]u16 = undefined;
+            var points: [batch_size]C.Affine = undefined;
+            @memcpy(slots[0..waiting_count], self.waiting_slots[0..waiting_count]);
+            @memcpy(points[0..waiting_count], self.waiting[0..waiting_count]);
+            self.waiting_count = 0;
+            for (slots[0..waiting_count], points[0..waiting_count]) |slot, point| {
+                self.place(slot, point);
+            }
+            assert(self.waiting_count < waiting_count or waiting_count == 0);
+        }
+
+        /// Applies every pending and waiting addition.
         fn flush(self: *Self) void {
+            var rounds: usize = 0;
+            while (self.count > 0 or self.waiting_count > 0) : (rounds += 1) {
+                assert(rounds <= batch_size);
+                self.apply();
+                self.retry();
+            }
+            assert(self.count == 0 and self.waiting_count == 0);
+        }
+
+        /// Applies the batch's pending additions with a single inversion.
+        fn apply(self: *Self) void {
             if (self.count == 0) return;
             const count = self.count;
             self.prefix[0] = self.denominators[0];
