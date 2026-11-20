@@ -158,10 +158,11 @@ Read this whole file before you change anything. These rules are not optional.
   byte, so a bench that sinks a `[32]u8` by value spends most of its time on barriers
   (`journal::fixed_replay` read 1.19× commonware instead of 0.76×, c12261bd). In benches,
   sink a pointer: `std.mem.doNotOptimizeAway(&item)`, as commonware's `black_box` is one use.
-- `std.mem.eql` on slices longer than 32 bytes lowers badly on native AVX-512 targets (its
-  64-byte bool-vector reduce): 96 bytes cost about 120 ns, against 4 to 14 ns on x86_64_v3.
-  On a hot path, compare fixed-size values by XOR-ORing 32-byte vectors, as
-  `certificate.Deferred.eql` does (beaf4df5, attestation_eq 4.68× to 0.28× commonware).
+- `std.mem.eql` on slices longer than 64 bytes lowers badly on native AVX-512 targets (its
+  64-byte bool-vector reduce): 65 or 96 bytes cost about 116 ns, against about 2 ns for a
+  vector XOR-OR. Compare fixed-size values with `utils.bytes_eql(n, a, b)` (ebb2e8ec;
+  attestation_eq went from 4.68× to 0.28× commonware). It has no early exit; secret material
+  still uses `std.crypto.timing_safe`.
 - `std.debug.assert(cond)` evaluates `cond` in every build mode, including ReleaseFast. An
   assert that calls a hash, a scan, or `contains` runs that work on the hot path
   (bloomfilter `insert` hashed every item twice, f56321ac). Assert the cheap invariant
