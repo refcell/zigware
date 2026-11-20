@@ -11,10 +11,11 @@ machine load. A scenario is a function `run(side, binary_dir, port) -> {metric: 
 registered in SCENARIOS with, per metric, whether lower is better. For each metric the table
 shows both sides' medians and the median of the per-round ratios (zigware / commonware, flipped
 for higher-is-better metrics so a ratio below 1 always means zigware is better). The verdict is
-"faster" only when that median is below 0.95 and at most n/8 of the n rounds reach 1 (none of
-4, one of 8); otherwise "not yet faster". Each round's pair of runs holds the machine-wide bench
-lock (~/.cache/zigware/bench.lock, as bench-compare.sh), so no other lane benches meanwhile.
-Raw measurements go to stderr as `round\\tside\\tscenario\\tmetric\\tvalue`.
+"faster" only when that median is below 0.95 and at most n/8 of the n rounds reach 1 (none of 4,
+one of 8); otherwise "not yet faster". Each round's pair of runs holds a slot of the
+machine-wide bench queue (etc/scripts/bench-lock.sh, first come first served) and runs pinned to
+it; set BENCH_WHOLE=1 to wait for both slots and use every CPU, as the multi-node scenarios
+need. Raw measurements go to stderr as `round\\tside\\tscenario\\tmetric\\tvalue`.
 
 Scenarios:
 - `log`: four `log` validators of one implementation (ed25519 seeds 0..3, validator 0
@@ -39,7 +40,6 @@ Scenarios:
   joiner's log time from height 1 to the tip divided by the heights between.
 """
 
-import fcntl
 import functools
 import datetime
 import os
@@ -234,13 +234,37 @@ def verdict(ratios):
     return "not yet faster"
 
 
-def bench_lock():
-    """The machine-wide bench lock, held until the returned file is closed."""
-    path = os.path.expanduser("~/.cache/zigware/bench.lock")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    handle = open(path, "a")
-    fcntl.flock(handle, fcntl.LOCK_EX)
-    return handle
+BENCH_LOCK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bench-lock.sh")
+
+
+class BenchSlot:
+    """A slot of the machine-wide bench queue (bench-lock.sh), held until `close`. While held,
+    this process and every process it starts run pinned to the slot's CPUs."""
+
+    def __init__(self):
+        # The holder prints its CPU list, then keeps the slot until its stdin closes.
+        self.holder = subprocess.Popen(
+            [BENCH_LOCK, "bash", "-c", 'echo "$BENCH_CPUS"; cat > /dev/null'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        cpus = self.holder.stdout.readline().strip()
+        if not cpus:
+            raise RuntimeError("bench-lock.sh exited without a slot")
+        self.previous = os.sched_getaffinity(0)
+        os.sched_setaffinity(0, parse_cpus(cpus))
+
+    def close(self):
+        os.sched_setaffinity(0, self.previous)
+        self.holder.stdin.close()
+        self.holder.wait()
+
+
+def parse_cpus(text):
+    """The CPUs of a taskset list such as `0-7,16-23`."""
+    cpus = set()
+    for part in text.split(","):
+        low, _, high = part.partition("-")
+        cpus.update(range(int(low), int(high or low) + 1))
+    return cpus
 
 
 def main():
@@ -256,7 +280,7 @@ def main():
         order = ["commonware", "zigware"] if round_index % 2 == 0 else ["zigware", "commonware"]
         for name in names:
             run, metrics = SCENARIOS[name]
-            lock = bench_lock()
+            lock = BenchSlot()
             for side in order:
                 # Every run gets fresh ports, so none waits on the last run's sockets.
                 run_index += 1
