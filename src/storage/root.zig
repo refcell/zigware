@@ -26,6 +26,8 @@ pub const freezer = @import("freezer/mod.zig");
 pub const archive = @import("archive/mod.zig");
 pub const qmdb = @import("qmdb/mod.zig");
 pub const refcount = @import("refcount.zig");
+/// Fuzz input helpers shared by storage's and clearing's fuzz targets.
+pub const fuzz_bytes = @import("fuzz_bytes.zig");
 
 test {
     std.testing.refAllDecls(@This());

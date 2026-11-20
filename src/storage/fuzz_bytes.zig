@@ -1,4 +1,4 @@
-//! Fuzz input helpers shared by storage's fuzz tests.
+//! Fuzz input helpers shared by storage's and clearing's fuzz tests.
 //!
 //! Each fuzz target decodes its operations from a byte string, as commonware's targets do
 //! with `arbitrary`. The same decoder runs under `std.testing.fuzz` (bytes from the fuzzer)

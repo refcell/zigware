@@ -16,7 +16,7 @@ const cryptography = @import("cryptography");
 const parallel = @import("parallel");
 const bajillion = @import("../bajillion/mod.zig");
 const arb = @import("../bajillion/arbitrary.zig");
-const bytes = @import("bytes.zig");
+const bytes = @import("storage").fuzz_bytes;
 
 const Sha256 = cryptography.Sha256;
 const Digest = Sha256.Digest;
