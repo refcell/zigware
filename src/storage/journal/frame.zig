@@ -237,8 +237,12 @@ pub fn encode_compressed_frame_into(
     buf: *std.ArrayList(u8),
 ) Error!u32 {
     _ = level;
-    const encoded = try codec.encode(V, gpa, item);
-    defer gpa.free(encoded);
+    // A byte array encodes as its own bytes, so it compresses in place: a 1 MiB item's
+    // temporary copy cost twice its compression (fresh pages from the allocator each item).
+    const raw = comptime is_byte_array(V);
+    const encoded = if (raw) std.mem.asBytes(&item) else try codec.encode(V, gpa, item);
+    defer if (!raw) gpa.free(encoded);
+    assert(!raw or encoded.len == @sizeOf(V));
 
     // Reserve the widest prefix so the frame compresses straight into `buf`.
     const start = buf.items.len;
@@ -274,6 +278,15 @@ pub fn encode_compressed_frame_into(
     return item_len;
 }
 
+/// Whether `V` is `[N]u8`, which codec writes as its bytes with no prefix.
+fn is_byte_array(comptime V: type) bool {
+    const info = @typeInfo(V);
+    if (info != .array) return false;
+    if (info.array.child != u8 or info.array.sentinel_ptr != null) return false;
+    comptime assert(codec.fixed_size(V).? == @sizeOf(V));
+    return true;
+}
+
 const testing = std.testing;
 
 /// Decode a unit-config item with the testing allocator.
@@ -307,6 +320,29 @@ test "roundtrip compressed" {
     const complete = (try find_frame(buf, 0)).info.complete;
     const payload = buf[complete.varint_len..][0..complete.data_len];
     try testing.expectEqual(@as(u64, 42), try decode_test(u64, payload, true));
+}
+
+test "compressed arrays frame their codec encoding" {
+    // `[N]u8` compresses in place; `[N]u16` must still go through codec's big-endian writes.
+    var bytes: [300]u8 = undefined;
+    var words: [300]u16 = undefined;
+    for (&bytes, &words, 0..) |*byte, *word, index| {
+        byte.* = @truncate(index *% 7 +% 1);
+        word.* = @truncate(index *% 0x0103 +% 0x0201);
+    }
+    inline for (.{ bytes, words }) |item| {
+        const V = @TypeOf(item);
+        const buf = try frame_bytes(V, 3, item);
+        defer testing.allocator.free(buf);
+        const complete = (try find_frame(buf, 0)).info.complete;
+        const payload = buf[complete.varint_len..][0..complete.data_len];
+        const encoded = try codec.encode(V, testing.allocator, item);
+        defer testing.allocator.free(encoded);
+        const plain = try decompress(testing.allocator, payload);
+        defer testing.allocator.free(plain);
+        try testing.expectEqualSlices(u8, encoded, plain);
+        try testing.expectEqual(item, try decode_test(V, payload, true));
+    }
 }
 
 test "compressed frames shift short prefixes and decode independently" {
