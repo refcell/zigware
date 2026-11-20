@@ -418,13 +418,35 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
             self.metrics.operations_applied.metric().inc_by(self.journal.size() - db_size);
         }
 
-        /// Indexes `batch_diff`'s sets, all below `tip`, the size the batch applies to.
+        /// Indexes `batch_diff`'s sets, all below `tip`, the size the batch applies to. Each
+        /// insert first hints the table slot of the set `prefetch_distance` ahead, so the cache
+        /// misses of a batch's random inserts overlap instead of running one at a time.
         fn index_diff(self: *Self, batch_diff: *const BatchDiff, tip: u64) !void {
             assert(tip >= self.journal.size());
-            for (batch_diff.entries) |*entry| {
+            const entries = batch_diff.entries;
+            const len_before = self.snapshot.len();
+            for (entries[0..@min(prefetch_distance, entries.len)]) |*entry| {
+                self.prefetch_slot(&entry.key);
+            }
+            for (entries, 0..) |*entry, i| {
                 assert(entry.loc < tip);
+                if (i + prefetch_distance < entries.len) {
+                    self.prefetch_slot(&entries[i + prefetch_distance].key);
+                }
                 try self.snapshot.insert(value_mod.bytes(K, &entry.key), entry.loc);
             }
+            assert(self.snapshot.len() == len_before + entries.len);
+        }
+
+        /// Sets ahead whose table slot `index_diff` hints: enough to keep several misses in
+        /// flight, few enough that the hinted lines are still cached when the insert comes.
+        const prefetch_distance = 16;
+
+        /// Hints the CPU to load the table slot `key`'s insert will probe first.
+        fn prefetch_slot(self: *const Self, key: *const K) void {
+            const translator = self.snapshot.translator;
+            const translated = translator.transform(value_mod.bytes(K, key));
+            self.snapshot.table.prefetch(translator.hash(translated));
         }
 
         /// A batch on the database's current state.
