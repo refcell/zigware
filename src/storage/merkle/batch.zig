@@ -833,41 +833,111 @@ fn build_range(
     unhashed: *Levels,
 ) !void {
     const first_position = F.location_to_position(first);
-    var scratch: std.ArrayList(u8) = .empty;
-    defer scratch.deinit(gpa);
-    // Left children waiting for their right sibling, by height, so the two hash as a pair.
-    var waiting: [max_height]?u64 = @splat(null);
+    var scratch: [2]std.ArrayList(u8) = .{ .empty, .empty };
+    defer for (&scratch) |*buffer| buffer.deinit(gpa);
+    const paired = comptime has_leaf_pair(@TypeOf(hasher));
+    var range: RangeParents(F, @TypeOf(nodes)) = .{
+        .first = first,
+        .first_position = first_position,
+        .nodes = nodes,
+        .unhashed = unhashed,
+    };
     var position = first_position;
-    for (items, 0..) |*item, offset| {
+    var offset: usize = 0;
+    while (offset < items.len) {
+        // Two leaves hash together through the hasher's pair kernel, both before the first
+        // one's parents, which may read it (8 workers, 64 KiB items: see BENCHMARKS.md).
+        const count: usize = if (paired and offset + 1 < items.len) 2 else 1;
         const location = first + offset;
-        try scratch.resize(gpa, codec.encode_size(Item, item.*));
-        var writer = codec.Writer.init(scratch.items);
-        codec.write(Item, item.*, &writer);
-        assert(writer.written().len == scratch.items.len);
-        nodes[@intCast(position - first_position)] = hasher.leaf_digest(position, scratch.items);
-        var heights = F.parent_heights(location);
-        while (heights.next()) |height| {
-            position += 1;
-            // The count is now `location + 1`, `birth_offset` past the node's leftmost leaf.
-            const leftmost = location + 1 - F.birth_offset(height);
-            if (leftmost < first) {
-                try unhashed[height].append(gpa, position);
-            } else if ((leftmost >> @intCast(height)) % 2 == 0) {
-                assert(waiting[height] == null);
-                waiting[height] = position;
-            } else {
-                hash_right(F, hasher, nodes, first_position, &waiting[height], position, height);
-            }
+        var elements: [2][]const u8 = undefined;
+        for (0..count) |k| {
+            elements[k] = try encode_item(gpa, &scratch[k], Item, &items[offset + k]);
         }
-        position += 1;
+        if (paired and count == 2) {
+            const second = F.location_to_position(location + 1);
+            const digests = hasher.leaf_digest_pair(.{ position, second }, elements);
+            nodes[@intCast(position - first_position)] = digests[0];
+            nodes[@intCast(second - first_position)] = digests[1];
+            position = try range.place(gpa, hasher, location, position);
+            assert(position == second);
+            position = try range.place(gpa, hasher, location + 1, second);
+        } else {
+            nodes[@intCast(position - first_position)] = hasher.leaf_digest(position, elements[0]);
+            position = try range.place(gpa, hasher, location, position);
+        }
+        offset += count;
     }
-    for (waiting, 0..) |left, height| {
+    for (range.waiting, 0..) |left, height| {
         const node = left orelse continue;
         const children = range_children(F, nodes, first_position, node, @intCast(height));
         const index: usize = @intCast(node - first_position);
         nodes[index] = hasher.node_digest(node, &children[0], &children[1]);
     }
     assert(position == F.location_to_position(first + items.len));
+}
+
+/// `build_range`'s internal nodes: where each parent a new leaf completes goes.
+fn RangeParents(comptime F: type, comptime Nodes: type) type {
+    return struct {
+        first: u64,
+        first_position: u64,
+        nodes: Nodes,
+        unhashed: *Levels,
+        /// Left children waiting for their right sibling, by height, so the two hash as a pair.
+        waiting: [max_height]?u64 = @splat(null),
+
+        /// Places the parents born when leaf `location`, at `position`, is added: each is
+        /// hashed now, waits for its sibling, or, covering leaves before `first`, goes to
+        /// `unhashed`. Returns the position after the leaf and its parents.
+        fn place(
+            range: *@This(),
+            gpa: Allocator,
+            hasher: anytype,
+            location: u64,
+            leaf_position: u64,
+        ) !u64 {
+            assert(location >= range.first and leaf_position >= range.first_position);
+            var position = leaf_position;
+            var heights = F.parent_heights(location);
+            while (heights.next()) |height| {
+                position += 1;
+                // The count is now `location + 1`, `birth_offset` past the node's leftmost leaf.
+                const leftmost = location + 1 - F.birth_offset(height);
+                if (leftmost < range.first) {
+                    try range.unhashed[height].append(gpa, position);
+                } else if ((leftmost >> @intCast(height)) % 2 == 0) {
+                    assert(range.waiting[height] == null);
+                    range.waiting[height] = position;
+                } else {
+                    const waiting = &range.waiting[height];
+                    const nodes = range.nodes;
+                    hash_right(F, hasher, nodes, range.first_position, waiting, position, height);
+                }
+            }
+            return position + 1;
+        }
+    };
+}
+
+/// Whether the hasher (a pointer to one) hashes two leaves at once.
+fn has_leaf_pair(comptime HasherRef: type) bool {
+    const info = @typeInfo(HasherRef);
+    const Hasher = if (info == .pointer) info.pointer.child else HasherRef;
+    return @hasDecl(Hasher, "leaf_digest_pair");
+}
+
+/// The codec encoding of `item`, written into `scratch`.
+fn encode_item(
+    gpa: Allocator,
+    scratch: *std.ArrayList(u8),
+    comptime Item: type,
+    item: *const Item,
+) ![]const u8 {
+    try scratch.resize(gpa, codec.encode_size(Item, item.*));
+    var writer = codec.Writer.init(scratch.items);
+    codec.write(Item, item.*, &writer);
+    assert(writer.written().len == scratch.items.len);
+    return scratch.items;
 }
 
 fn range_children(
