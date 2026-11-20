@@ -14,10 +14,10 @@ better. A ratio below 1 means zigware is faster.
 | `ed25519::batch_verify_same_message` | `pks=100 conc=1` | 1.52 ms | 789 µs | 0.52× (re-run, see below) |
 | `bls12381::signature_verification` | `ns_len=9 msg_len=32` | 1.51 ms | 1.20 ms | 0.79× (re-run, see below) |
 | `bls12381::aggregate_verify_same_message` | `pks=1000` | 3.19 ms | 3.13 ms | 0.98× (re-run, see below) |
-| `journal::fixed_append` | `items=10000 size=32` | 2.00 ms | 456 µs | 0.23× |
+| `journal::fixed_append` | `items=10000 size=32` | 2.23 ms | 533 µs | 0.24× (paired median, see below) |
 | `journal::append_sync` | `journal=fixed mode=sync` | 14.6 µs | 1.55 µs | 0.11× |
 | `journal::fixed_replay` | `items=100000 buffer=65536 size=32 read_options=cache` | 415 µs | 316 µs | 0.76× (re-run, see below) |
-| `qmdb::apply_batch` | `case=direct variant=any::unordered::fixed::mmb chunk=32 updates=16384` | 1.13 ms | 1.21 ms | 1.07× |
+| `qmdb::apply_batch` | `case=direct variant=any::unordered::fixed::mmb chunk=32 updates=16384` | 1.79 ms | 1.74 ms | 0.97× (paired median, see below) |
 | `buffer_paged::append` | `backend=tokio chunk=4096` | 66.1 ms | 28.2 ms | 0.43× |
 
 Measured 2026-11-19. The 1-minute load average was 28.9 to 83.3 during the runs (see Caveats).
@@ -193,6 +193,18 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
   (1.30×, 25.6), 1.66/1.71 (1.03×, 62.7), 1.58/1.93 (1.22×, 49.2), 1.65/1.84 (1.11×, 58.5).
   The median of the per-round ratios is 1.11×, inside the row's noise. Load rose to about 80
   inside round 2, so the start-of-round samples understate it.
+- **`journal::fixed_append` and `qmdb::apply_batch` on `allocator.Heap`, 2026-11-20 (rows
+  re-measured at d3264bb2, after 0ea389fd).** No journal or bench change. Five paired rounds
+  each (`bench-compare.sh 5`), commonware/zigware with the load at the round's start;
+  each row shows its median round. `fixed_append`: 2.26/0.550 ms (0.24×, load 86.3),
+  2.21/0.538 (0.24×, 83.2), 2.32/0.542 (0.23×, 78.3), 2.23/0.533 (0.24×, 74.3), 2.34/0.534
+  (0.23×, 70.2); median 0.24×. `apply_batch`: 1.91/1.71 ms (0.89×, 75.8), 1.66/1.64 (0.99×,
+  81.0), 1.54/1.62 (1.05×, 61.6), 1.79/1.74 (0.97×, 52.4), 1.86/1.65 (0.88×, 106.2); median
+  0.97× (was 1.11×). The append's remaining cost was first-touch faults on each fresh db's
+  2 MB tip buffer: `smp_allocator` unmaps it on free, so every iteration re-faulted it
+  (`getrusage` minor faults around the tip copy: 109 to 384 per applied batch before). Same
+  tree, counters around the whole apply: `smp_allocator` 177 faults per batch, all in the tip
+  copy; `allocator.Heap` 0 in two runs, as it keeps the freed block mapped.
 
 ## bls12381: the remaining benches (2026-11-19, bls-math lane)
 
