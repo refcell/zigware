@@ -124,14 +124,111 @@ pub fn prepare(stack: Stack, entry_fn: EntryFn, argument: *anyopaque) Context {
     return .{ .sp = base };
 }
 
+/// Whether switches save and restore the floating-point control state (x86_64 MXCSR and x87
+/// control word, aarch64 FPCR). It is callee-saved, so a fiber that changed it and switched
+/// away would hand it to the next fiber. No zigware code changes it: safe builds keep the save
+/// and assert at every switch that the outgoing fiber's state is the default, which is the
+/// condition under which skipping the save changes nothing; optimized builds skip it (about
+/// 2.5 ns per switch on x86_64).
+pub const saves_fp_control = builtin.mode == .debug or builtin.mode == .safe;
+
 /// Save the current fiber into `from` and resume `to`. Returns when something switches back.
 pub fn switch_to(from: *Context, to: *const Context) void {
     comptime assert(supported);
     assert(to.sp != 0);
     assert(to.sp % 16 == 0);
+    if (saves_fp_control) assert(fp_control_is_default());
     const switch_fn: *const fn (from_sp: *usize, to_sp: usize) callconv(.c) void =
-        @ptrCast(&switch_naked);
+        if (saves_fp_control) @ptrCast(&switch_naked) else @ptrCast(&switch_naked_fast);
     switch_fn(&from.sp, to.sp);
+}
+
+/// Whether the floating-point control state, ignoring sticky exception flags, is the default
+/// every fiber starts with (`prepare`'s saved frame).
+pub fn fp_control_is_default() bool {
+    var state: u64 = 0;
+    const read_fn: *const fn (state: *u64) callconv(.c) void = @ptrCast(&fp_control_read);
+    read_fn(&state);
+    return switch (builtin.cpu.arch) {
+        // MXCSR in the low word, the x87 control word above it. MXCSR bits 0..5 are exception
+        // flags that ordinary arithmetic sets.
+        .x86_64 => state & 0xFFFF_FFFF & ~@as(u64, 0x3F) == 0x1F80 and
+            (state >> 32) & 0xFFFF == 0x037F,
+        .aarch64 => state == 0,
+        else => unreachable,
+    };
+}
+
+/// `read_fn(state: *u64)`: store the floating-point control state, as `switch_naked` saves it.
+fn fp_control_read() callconv(.naked) void {
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile (
+            \\ stmxcsr (%%rdi)
+            \\ fnstcw 4(%%rdi)
+            \\ retq
+        ),
+        .aarch64 => asm volatile (
+            \\ mrs x9, fpcr
+            \\ str x9, [x0]
+            \\ ret
+        ),
+        else => @compileError("fibers are not implemented for this architecture"),
+    }
+}
+
+/// `switch_naked` without the floating-point control state, for optimized builds. The frame
+/// keeps the same layout, so `prepare` serves both.
+fn switch_naked_fast() callconv(.naked) void {
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile (
+            \\ pushq %%rbp
+            \\ pushq %%rbx
+            \\ pushq %%r12
+            \\ pushq %%r13
+            \\ pushq %%r14
+            \\ pushq %%r15
+            \\ subq $8, %%rsp
+            \\ movq %%rsp, (%%rdi)
+            \\ movq %%rsi, %%rsp
+            \\ addq $8, %%rsp
+            \\ popq %%r15
+            \\ popq %%r14
+            \\ popq %%r13
+            \\ popq %%r12
+            \\ popq %%rbx
+            \\ popq %%rbp
+            \\ retq
+        ),
+        .aarch64 => asm volatile (
+            \\ sub sp, sp, #176
+            \\ stp x19, x20, [sp, #0]
+            \\ stp x21, x22, [sp, #16]
+            \\ stp x23, x24, [sp, #32]
+            \\ stp x25, x26, [sp, #48]
+            \\ stp x27, x28, [sp, #64]
+            \\ stp x29, x30, [sp, #80]
+            \\ stp d8, d9, [sp, #96]
+            \\ stp d10, d11, [sp, #112]
+            \\ stp d12, d13, [sp, #128]
+            \\ stp d14, d15, [sp, #144]
+            \\ mov x9, sp
+            \\ str x9, [x0]
+            \\ mov sp, x1
+            \\ ldp x19, x20, [sp, #0]
+            \\ ldp x21, x22, [sp, #16]
+            \\ ldp x23, x24, [sp, #32]
+            \\ ldp x25, x26, [sp, #48]
+            \\ ldp x27, x28, [sp, #64]
+            \\ ldp x29, x30, [sp, #80]
+            \\ ldp d8, d9, [sp, #96]
+            \\ ldp d10, d11, [sp, #112]
+            \\ ldp d12, d13, [sp, #128]
+            \\ ldp d14, d15, [sp, #144]
+            \\ add sp, sp, #176
+            \\ ret
+        ),
+        else => @compileError("fibers are not implemented for this architecture"),
+    }
 }
 
 /// `switch_fn(from_sp: *usize, to_sp: usize)`: push callee-saved state, store sp into
@@ -353,4 +450,65 @@ test "fibers preserve live values across many switches" {
         try testing.expectEqual(index + 0.5 * rounds + index + rounds, fiber.float_sum);
         try testing.expect(fiber.alignment_ok);
     }
+}
+
+/// Sets the floating-point control state from `state`, laid out as `fp_control_read` stores it.
+fn fp_control_set(state: u64) void {
+    const write_fn: *const fn (state: *const u64) callconv(.c) void = @ptrCast(&fp_control_write);
+    write_fn(&state);
+}
+
+fn fp_control_write() callconv(.naked) void {
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile (
+            \\ ldmxcsr (%%rdi)
+            \\ fldcw 4(%%rdi)
+            \\ retq
+        ),
+        .aarch64 => asm volatile (
+            \\ ldr x9, [x0]
+            \\ msr fpcr, x9
+            \\ ret
+        ),
+        else => @compileError("fibers are not implemented for this architecture"),
+    }
+}
+
+/// The default state (`prepare`'s), and the same with rounding toward zero.
+const fp_default: u64 = if (builtin.cpu.arch == .x86_64) 0x1F80 | (0x037F << 32) else 0;
+const fp_round_to_zero: u64 = if (builtin.cpu.arch == .x86_64) fp_default | 0x6000 else 3 << 22;
+
+/// Switches to a fiber and back once, with `fp_state` set across the switch.
+fn switch_with_fp_control(fp_state: u64) !void {
+    const State = struct {
+        main: Context = .{},
+        fiber: Context = .{},
+
+        fn entry(argument: *anyopaque) callconv(.c) noreturn {
+            const state: *@This() = @ptrCast(@alignCast(argument));
+            switch_to(&state.fiber, &state.main);
+            unreachable;
+        }
+    };
+    const stack = try Stack.map(64 * 1024);
+    defer stack.unmap();
+    var state: State = .{};
+    state.fiber = prepare(stack, State.entry, &state);
+    fp_control_set(fp_state);
+    defer fp_control_set(fp_default);
+    switch_to(&state.main, &state.fiber);
+}
+
+// The fast switch skips the floating-point control state, which is only equivalent while every
+// fiber switches with the default: safe builds assert it, so a fiber that changed the rounding
+// mode fails loudly instead of handing it to the next fiber in an optimized build.
+test "a switch with non-default floating-point control state panics in safe builds" {
+    if (!supported or !saves_fp_control) return error.SkipZigTest;
+    // Sticky exception flags (x86_64 MXCSR bits 0..5, here precision) are not control state.
+    if (builtin.cpu.arch == .x86_64) try switch_with_fp_control(fp_default | 0x20);
+    try @import("utils").death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            try switch_with_fp_control(fp_round_to_zero);
+        }
+    }.body);
 }
