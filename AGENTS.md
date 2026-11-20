@@ -74,6 +74,14 @@ Read this whole file before you change anything. These rules are not optional.
    test sweeps at `nice 19` so they don't skew other lanes' benches. Record rows with their verdict and load in
    docs/BENCHMARKS.md.
 
+12. **Record upstream findings.** When you find a bug in upstream commonware, record it in
+   docs/UPSTREAM_BUGS.md and update the README's "Upstream bugs" section. When you land an
+   optimization commonware could adopt, record it in docs/UPSTREAM_OPTIMIZATIONS.md (with
+   the bench row, its verdict, and the commit) and update the README's "Optimizations
+   commonware could adopt" section. Do both in the same push as the finding or the change.
+   Say whether each bug is filed upstream; filing an issue or posting a patch upstream
+   needs Andreas's explicit approval first.
+
 ## Style: TigerStyle (see docs/TIGER_STYLE.md)
 
 - Safety, then performance, then developer experience.
