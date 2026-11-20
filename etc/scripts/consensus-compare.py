@@ -31,11 +31,17 @@ Scenarios:
   examples/dkg/README.md runs them). Once every validator has finalized N heights, validator 5
   starts with `--state-sync` (the README's late joiner: dkg probe, QMDB state sync, marshal
   backfill), and `catchup_s` is the time from its start until it logs a finalized block at the
-  tip the others had reached when it started.
+  tip the others had reached when it started. The joiner's sync floor is that tip, so this
+  times p2p connection and the dkg probe, not N heights of backfill.
+- `dkg_replay_100`, `dkg_replay_1000`: the same with validator 5 started without
+  `--state-sync`, so it replays every height from genesis: marshal backfills each finalized
+  block and the application applies it. `catchup_s` as above, plus `replay_ms_per_block`, the
+  joiner's log time from height 1 to the tip divided by the heights between.
 """
 
 import fcntl
 import functools
+import datetime
 import os
 import re
 import shutil
@@ -153,9 +159,20 @@ class DkgNodes:
             time.sleep(0.2)
 
 
-def run_dkg_catchup(side, binary_dir, port, heights):
-    """Seconds a `--state-sync` late joiner takes to finalize the tip that validators 0-4 of
-    `side` reached once each had finalized `heights` heights."""
+def finalized_at(path, height):
+    """When `path`'s validator logged `height` as finalized (its log line's timestamp)."""
+    with open(path, errors="replace") as handle:
+        for line in ANSI.sub("", handle.read()).splitlines():
+            found = FINALIZED.search(line)
+            if found and int(found.group(1)) == height:
+                return datetime.datetime.fromisoformat(line.split()[0].rstrip("Z"))
+    raise RuntimeError(f"{path} never finalized height {height}")
+
+
+def run_dkg_catchup(side, binary_dir, port, heights, state_sync=True):
+    """Seconds a late joiner takes to finalize the tip that validators 0-4 of `side` reached
+    once each had finalized `heights` heights: syncing from a recent floor with `state_sync`,
+    else replaying from genesis (then also its milliseconds per replayed block)."""
     root = tempfile.mkdtemp(prefix="zigware-consensus-compare-dkg-")
     nodes = DkgNodes(os.path.join(binary_dir, BINARIES["dkg"][side]), root)
     deadline = time.time() + CATCHUP_TIMEOUT_S
@@ -177,14 +194,17 @@ def run_dkg_catchup(side, binary_dir, port, heights):
             top_height(nodes.log(n)) for n in validators) >= heights, deadline)
         tip = max(top_height(nodes.log(n)) for n in validators)
         start = time.time()
-        nodes.spawn("joiner", 5, "validator", "--state-sync")
+        nodes.spawn("joiner", 5, "validator", *(["--state-sync"] if state_sync else []))
         nodes.wait(side, f"the joiner to reach height {tip}",
                    lambda: top_height(nodes.log("joiner")) >= tip, deadline)
-        catchup = time.time() - start
+        result = {"catchup_s": time.time() - start}
+        if not state_sync:
+            replay = finalized_at(nodes.log("joiner"), tip) - finalized_at(nodes.log("joiner"), 1)
+            result["replay_ms_per_block"] = replay.total_seconds() * 1000 / (tip - 1)
     finally:
         nodes.stop()
     shutil.rmtree(root, ignore_errors=True)
-    return {"catchup_s": catchup}
+    return result
 
 
 # scenario -> (run, {metric: lower_is_better})
@@ -192,6 +212,10 @@ SCENARIOS = {
     "log": (run_log, {"finalized_views_per_s": False, "nullified_per_finalized": True}),
     "dkg_catchup_100": (functools.partial(run_dkg_catchup, heights=100), {"catchup_s": True}),
     "dkg_catchup_1000": (functools.partial(run_dkg_catchup, heights=1000), {"catchup_s": True}),
+    "dkg_replay_100": (functools.partial(run_dkg_catchup, heights=100, state_sync=False),
+                       {"catchup_s": True, "replay_ms_per_block": True}),
+    "dkg_replay_1000": (functools.partial(run_dkg_catchup, heights=1000, state_sync=False),
+                        {"catchup_s": True, "replay_ms_per_block": True}),
 }
 
 
