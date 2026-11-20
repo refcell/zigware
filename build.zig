@@ -43,7 +43,9 @@ const packages = [_]Package{
     .{ .name = "codec", .deps = &.{ "conformance", "formatting" } },
     .{ .name = "utils", .deps = &.{ "codec", "formatting", "conformance", "invariants" } },
     .{ .name = "parallel", .deps = &.{"utils"} },
-    .{ .name = "math", .deps = &.{ "codec", "invariants", "parallel", "utils", "simd" } },
+    .{ .name = "math", .deps = &.{
+        "codec", "conformance", "invariants", "parallel", "utils", "simd",
+    } },
     .{ .name = "cryptography", .deps = &.{
         "codec", "formatting", "math", "parallel", "utils", "invariants", "simd", "conformance",
     } },

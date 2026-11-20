@@ -41,6 +41,7 @@ pub fn fuzz_plan(_: void, u: *minifuzz.Unstructured) !void {
 test {
     std.testing.refAllDecls(@This());
     std.testing.refAllDecls(fields);
+    _ = @import("conformance_test.zig");
 }
 
 test "math fuzz plan" {

@@ -16,8 +16,8 @@ variants (MinPk, MinSig) must match exactly.
 
 ## Backlog
 - [x] math: algebra traits, fields (goldilocks), poly (polynomials, evaluation,
-  interpolation), ntt, synthetic. Port math's tests. (Conformance hashes wait for the
-  `conformance` harness.)
+  interpolation), ntt, synthetic. Port math's tests, and its five `CodecConformance` hashes
+  via `conformance.verify` against `src/math/conformance.toml` (math/conformance_test.zig).
 - [x] simd: the operations commonware abstracts (simd/src/core.rs), scalar + `@Vector`
   implementations with the consistency tests.
 - [x] bls12381 primitives: group elements, scalars, compressed codec, hash-to-curve with
@@ -109,8 +109,9 @@ variants (MinPk, MinSig) must match exactly.
   (commonware `interpolate(evals, strategy)`) sums through `K.msm_strategy` when `K` provides
   one, else runs `interpolate`; `G1`/`G2.msm_strategy` sum in strategy-cut tiles
   (`arithmetic.msm.msm_tiled`). Ops without a ported parallel path stay sequential.
-- Conformance hashes (math/conformance.toml) are not ported yet; the `conformance` harness
-  they need exists.
+- math's conformance entries (test `F`/`G`, goldilocks `F`, `Poly<F>`, `Matrix<F>`) run in the
+  default `zig build test` (about 4 s in Debug); `math` depends on `conformance` as commonware's
+  dev-dependency does.
 - Randomness is injected as a `utils.rng` generator pointer (`next_u64`/`fill_bytes`, commonware's
   `CryptoRng`), so ported tests draw the same values as the Rust tests.
 
