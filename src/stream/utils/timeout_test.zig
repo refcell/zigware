@@ -4,6 +4,7 @@ const std = @import("std");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const build_options = @import("build_options");
 const runtime = @import("runtime");
 
 const Timeout = @import("timeout.zig").Timeout;
@@ -123,10 +124,25 @@ const AdmitAll = struct {
 };
 
 fn run_deterministic(comptime function: anytype, args: anytype) !void {
-    const config: runtime.deterministic.Config = .{ .timeout_ns = std.time.ns_per_s };
-    var runner = try runtime.deterministic.Runner.init(gpa, config);
-    defer runner.deinit();
-    try (try runner.start(function, .{runner.io()} ++ args));
+    for (0..build_options.fuzz_soak) |round| {
+        const config: runtime.deterministic.Config = .{
+            .seed = soak_seed(0, round),
+            .timeout_ns = std.time.ns_per_s,
+        };
+        var runner = try runtime.deterministic.Runner.init(gpa, config);
+        defer runner.deinit();
+        try (try runner.start(function, .{runner.io()} ++ args));
+    }
+}
+
+/// The `round`-th seed of a deterministic test whose unsoaked seed is `base`: `base` first, then
+/// `-Dfuzz-soak` rounds in all, spread by `-Dfuzz-seed`. Soaked rounds print their seed, so a
+/// failure names the seed to replay.
+fn soak_seed(base: u64, round: u64) u64 {
+    if (round == 0) return base;
+    const seed = base +% build_options.fuzz_seed *% 0x9e3779b97f4a7c15 +% round;
+    std.debug.print("dst: seed {d}\n", .{seed});
+    return seed;
 }
 
 /// The far ends of the two channels an attempt receives.

@@ -9,6 +9,7 @@ const testing = std.testing;
 const codec = @import("codec");
 const cryptography = @import("cryptography");
 const p2p = @import("p2p");
+const build_options = @import("build_options");
 const runtime = @import("runtime");
 const utils = @import("utils");
 
@@ -172,9 +173,22 @@ const Sim = struct {
 };
 
 fn run_deterministic(seed: u64, comptime function: fn (Io) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{ .seed = seed });
-    defer runner.deinit();
-    try (try runner.start(function, .{runner.io()}));
+    for (0..build_options.fuzz_soak) |round| {
+        const config: runtime.deterministic.Config = .{ .seed = soak_seed(seed, round) };
+        var runner = try runtime.deterministic.Runner.init(gpa, config);
+        defer runner.deinit();
+        try (try runner.start(function, .{runner.io()}));
+    }
+}
+
+/// The `round`-th seed of a deterministic test whose unsoaked seed is `base`: `base` first, then
+/// `-Dfuzz-soak` rounds in all, spread by `-Dfuzz-seed`. Soaked rounds print their seed, so a
+/// failure names the seed to replay.
+fn soak_seed(base: u64, round: u64) u64 {
+    if (round == 0) return base;
+    const seed = base +% build_options.fuzz_seed *% 0x9e3779b97f4a7c15 +% round;
+    std.debug.print("dst: seed {d}\n", .{seed});
+    return seed;
 }
 
 /// Asserts that no event arrives within `ms` (commonware's `select!` against a sleep).
@@ -468,7 +482,7 @@ fn clean_shutdown(seed: u64) !void {
 }
 
 test "clean shutdown" {
-    for (0..25) |seed| try clean_shutdown(seed);
+    for (0..25 * build_options.fuzz_soak) |seed| try clean_shutdown(seed);
 }
 
 test "engine stops once every mailbox is dropped (pr 5153 regression)" {

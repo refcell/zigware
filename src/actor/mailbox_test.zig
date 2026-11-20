@@ -486,9 +486,22 @@ test "receiver drop breaks message sender cycle" {
 // Deterministic runtime: parked receivers and many producers.
 
 fn run_deterministic(comptime function: fn (Io) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(testing.allocator, .{});
-    defer runner.deinit();
-    try (try runner.start(function, .{runner.io()}));
+    for (0..build_options.fuzz_soak) |round| {
+        const config: runtime.deterministic.Config = .{ .seed = soak_seed(0, round) };
+        var runner = try runtime.deterministic.Runner.init(testing.allocator, config);
+        defer runner.deinit();
+        try (try runner.start(function, .{runner.io()}));
+    }
+}
+
+/// The `round`-th seed of a deterministic test whose unsoaked seed is `base`: `base` first, then
+/// `-Dfuzz-soak` rounds in all, spread by `-Dfuzz-seed`. Soaked rounds print their seed, so a
+/// failure names the seed to replay.
+fn soak_seed(base: u64, round: u64) u64 {
+    if (round == 0) return base;
+    const seed = base +% build_options.fuzz_seed *% 0x9e3779b97f4a7c15 +% round;
+    std.debug.print("dst: seed {d}\n", .{seed});
+    return seed;
 }
 
 fn recv_flagged(comptime T: type) fn (*mailbox.Receiver(T), *bool) Io.Cancelable!?T {
