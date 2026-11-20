@@ -88,8 +88,11 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   (or with alignment beyond a slice) mapped on their own; alignments of a whole
   `metadata_group_size` (256 MiB) are refused, and `Stats.arenas` excludes pages mapped on
   their own, as in mimalloc. Commonware's allocator integration tests are ported except the
-  huge-page-advice ones, which read Linux smaps for mimalloc's THP advice. One lock guards a heap, so `Stats`
-  are exact; the mimalloc-only knobs (large OS pages, THP, stats merge threshold) are recorded
+  huge-page-advice ones, which read Linux smaps for mimalloc's THP advice. Each thread gets a cache in the heap
+  (mimalloc's per-thread heap) that allocates and frees its small pages without the lock,
+  defers frees into other threads' pages to a lock-free list the owner drains, and keeps a
+  size class's last emptied pages for a few refills; `Stats` stay exact once threads are
+  quiescent (allocated bytes are summed over the caches); the mimalloc-only knobs (large OS pages, THP, stats merge threshold) are recorded
   in `effective` but change nothing. A heap is a value, not the process allocator, so
   configuration is per heap rather than once per process.
 - `parallel.topology` ports topology.rs's model: `Topology.detect(io)` (sysfs LLC lists, read

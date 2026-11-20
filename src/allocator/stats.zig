@@ -1,7 +1,8 @@
 //! `Stats`: a heap's statistics, the fields of commonware's mimalloc `Stats`.
 //!
-//! A zigware heap updates them under its lock, so unlike mimalloc's per-thread counters they
-//! are exact when read.
+//! A zigware heap updates them under its lock, except allocated bytes, which each thread's
+//! cache counts and a read sums, so unlike mimalloc's per-thread counters, which merge past a
+//! threshold, they are exact whenever no thread is allocating.
 
 /// Heap statistics, excluding memory callers obtain elsewhere.
 pub const Stats = struct {

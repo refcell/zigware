@@ -536,9 +536,46 @@ other parallel rows, three for glue's plan rows), at a 1-minute load of 26 to 10
   seven rounds spread 3.8 to 6.6 ms on both sides (round 1 alone read +51%), but every small allocation pays a
   mutex through the Io vtable and a page lookup by address, where mimalloc and `smp_allocator`
   pop a thread-local free list. That fixed cost is the +22% on the 16-transfer plan, a few
-  hundred nanoseconds with a handful of allocations. A thread-local fast path in
-  `allocator.Heap` (parallel lane) is the fix; sub-microsecond, allocation-heavy rows read
-  high until then.
+  hundred nanoseconds with a handful of allocations. The thread-local fast path below
+  removes it.
+
+## allocator.Heap thread caches (2026-11-19, storage-merkle lane)
+
+`allocator.Heap` now gives each thread a cache, as mimalloc's per-thread heaps: the owning
+thread allocates from and frees into its own small pages without the heap's lock, a block
+freed by another thread goes onto its page's lock-free deferred list for the owner to drain,
+and a size class keeps its last emptied pages for a few refills (mimalloc's
+`_mi_page_retire`, `MI_RETIRE_CYCLES`) instead of releasing and re-taking a page every time
+it empties. A single-thread loop allocating and freeing eight size classes went from 46.6 to
+4.5 ns per pair (26.8 to 6.4 ns when the pages never empty). Before is the harness at
+0ea389fd (one lock), after is this commit, alternating per row, best of three medians (five
+for the rows marked), at a 1-minute load of 56 to 89 with another lane benchmarking:
+
+| bench | one lock | thread caches | change |
+|---|---|---|---|
+| `transfers::plan/transfers=16 accounts=128 effects=none conc=1` | 801 ns | 625 ns | −22% (three passes: −23%, −8%, −23%) |
+| `transfers::plan/transfers=1024 accounts=128 effects=none conc=1` | 33.1 µs | 34.1 µs | +3% |
+| `transfers::plan/transfers=1024 accounts=4096 effects=none conc=1` | 35.7 µs | 36.5 µs | +2% |
+| `transfers::plan/transfers=32768 accounts=4096 effects=none conc=1` | 1.64 ms | 1.42 ms | −13% |
+| `merkle::multi_proof/n=100000 items=100 family=mmr` | 7.94 µs | 8.08 µs | +2% |
+| `merkle::add_many/items=65536 workers=8 family=mmb` (5) | 4.45 ms | 4.68 ms | +5% (medians 4.45–6.19 against 4.68–8.56 ms) |
+| `merkle::add_many/items=65536 workers=8 family=mmr` (5) | 3.20 ms | 3.54 ms | +10% (medians 3.20–5.79 against 3.54–5.54 ms) |
+| `merkle::update/... strategy=BatchedParallel family=mmr` | 31.5 ms | 31.6 ms | 0% |
+| `index::insert/variant=ordered items=10000` | 1.02 ms | 905 µs | −11% |
+| `index::insert/variant=partitioned_ordered_2 items=10000` | 526 µs | 482 µs | −8% |
+| `sha256::hash_message/msg_len=4096` | 1.98 µs | 2.02 µs | +2% |
+| `codec::lazy::get/source=shared txs=100000 conc=1` (5) | 750 µs | 762 µs | +2% |
+| `mailbox::mailbox::enqueue_ready/capacity=1024` (5) | 11.9 µs | 13.1 µs | +10% (other medians 13.5 against 13.4 µs) |
+| `reed_solomon::encode/msg_len=1048576 chunks=10 conc=1` (5) | 1.24 ms | 1.27 ms | +3% |
+
+- The 16-transfer plan is back under `smp_allocator`'s 637 ns: it makes about six
+  allocations per iteration, each now a pop from the thread's page.
+- The +10% rows time no allocations (the pool's workers in `add_many` and the timed
+  `enqueue_ready` allocate nothing), and their rounds overlap; treat them as noise.
+- A first build without cold hints on the heap's slow paths read
+  `partitioned_ordered_2` at +40% in every round while the same code with probe counters
+  read even: a code-layout effect. Marking `refill`, `attach`, `alloc_locked`, and
+  `retire_owned` cold took the pair cost from 14.3 to 4.5 ns and the row to −8%.
 
 ## Storage: merkle, bmt, rmap, variable journal reads (2026-11-19, storage-merkle lane)
 

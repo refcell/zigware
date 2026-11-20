@@ -151,6 +151,7 @@ test "smallest size class pages stay within block counts" {
         try testing.expectEqual(@as(u8, @truncate(index)), box.*);
         gpa.destroy(box);
     }
+    heap.collect(); // Releases the emptied pages the thread keeps for reuse.
     const stats = heap.read_stats();
     try testing.expectEqual(@as(u64, 0), stats.allocated_bytes);
     try testing.expectEqual(@as(u64, 0), stats.pages);
@@ -193,6 +194,7 @@ test "a zero purge delay purges freed pages at once" {
     const block = try gpa.alloc(u8, 1000);
     @memset(block, 7);
     gpa.free(block);
+    heap.collect(); // Releases the emptied page the thread keeps for reuse.
     const stats = heap.read_stats();
     try testing.expectEqual(@as(u64, 1), stats.arena_purges);
     try testing.expect(stats.purged_bytes >= slice);
@@ -206,6 +208,7 @@ test "delayed purges wait for a collection after the deadline" {
     defer heap.deinit();
     const gpa = heap.allocator();
     gpa.free(try gpa.alloc(u8, 1000));
+    heap.collect(); // Releases the emptied page; its purge waits for the deadline.
     try testing.expectEqual(@as(u64, 0), heap.read_stats().purged_bytes);
     try testing.io.sleep(.fromMilliseconds(2), .awake);
     heap.collect();
@@ -346,12 +349,13 @@ const CrossThread = struct {
             heap.allocator().free(block);
         } else |err| assert(err == error.Closed);
         assert(freed == blocks);
+        heap.collect(); // Releases the page of the small block above.
     }
 };
 
 // Ported from commonware's `allocator/tests/cross_thread_stats.rs`, the regression test for
 // commonwarexyz/monorepo#5483. mimalloc's per-thread counters drift there by up to a merge
-// threshold; a zigware heap counts under its lock, so the statistics are exact.
+// threshold; a zigware heap sums every thread's count when read, so the statistics are exact.
 test "stats stay exact while one thread frees what another allocates" {
     var heap = Heap.init(testing.io, small_config());
     defer heap.deinit();
@@ -375,6 +379,82 @@ test "stats stay exact while one thread frees what another allocates" {
     try testing.expectEqual(before.huge_allocations + CrossThread.blocks, after.huge_allocations);
 }
 
+// A thread frees small blocks another thread's cache owns: they wait on their pages' deferred
+// lists, counted as freed at once, until the owner collects and releases the emptied pages.
+test "blocks freed on another thread return to their pages when the owner collects" {
+    var heap = Heap.init(testing.io, small_config());
+    defer heap.deinit();
+    const gpa = heap.allocator();
+    var blocks: [3_000][]u8 = undefined;
+    for (&blocks) |*block| block.* = try gpa.alloc(u8, 64);
+    const owned = heap.read_stats();
+    try testing.expect(owned.pages >= 2);
+
+    var group: std.Io.Group = .init;
+    try group.concurrent(testing.io, free_all, .{ &heap, &blocks });
+    try group.await(testing.io);
+    const deferred = heap.read_stats();
+    try testing.expectEqual(@as(u64, 0), deferred.allocated_bytes);
+    try testing.expectEqual(owned.pages, deferred.pages);
+
+    heap.collect();
+    try testing.expectEqual(@as(u64, 0), heap.read_stats().pages);
+}
+
+fn free_all(heap: *Heap, blocks: []const []u8) void {
+    for (blocks) |block| heap.allocator().free(block);
+}
+
+/// Threads swap small blocks through shared slots, so most frees land on another thread's
+/// pages while their owner allocates from them. A block records its length and fills the rest
+/// with it, so a block handed out twice shows up when either holder frees it.
+const Exchange = struct {
+    slots: [64]std.atomic.Value(usize) = @splat(.init(0)),
+
+    fn run(heap: *Heap, exchange: *Exchange, seed: u64) void {
+        var prng: std.Random.DefaultPrng = .init(seed);
+        const random = prng.random();
+        for (0..20_000) |_| {
+            const slot = &exchange.slots[random.uintLessThan(usize, exchange.slots.len)];
+            const taken = slot.swap(0, .acq_rel);
+            if (taken != 0) {
+                free_checked(heap, taken);
+                continue;
+            }
+            const len = random.intRangeAtMost(u32, 8, 1024);
+            const block = heap.allocator().alloc(u8, len) catch @panic("out of memory");
+            std.mem.writeInt(u32, block[0..4], len, .little);
+            @memset(block[4..], @truncate(len));
+            const displaced = slot.swap(@intFromPtr(block.ptr), .acq_rel);
+            if (displaced != 0) free_checked(heap, displaced);
+        }
+    }
+
+    fn free_checked(heap: *Heap, address: usize) void {
+        const block: [*]u8 = @ptrFromInt(address);
+        const len = std.mem.readInt(u32, block[0..4], .little);
+        assert(len >= 8 and len <= 1024);
+        for (block[4..len]) |byte| assert(byte == @as(u8, @truncate(len)));
+        heap.allocator().free(block[0..len]);
+    }
+};
+
+// Four threads allocate small blocks and free each other's: no block is handed out twice and
+// the allocated bytes return to zero.
+test "threads free small blocks other threads own" {
+    var heap = Heap.init(testing.io, small_config());
+    defer heap.deinit();
+    var exchange: Exchange = .{};
+    var group: std.Io.Group = .init;
+    for (0..4) |seed| try group.concurrent(testing.io, Exchange.run, .{ &heap, &exchange, seed });
+    try group.await(testing.io);
+    for (&exchange.slots) |*slot| {
+        const address = slot.load(.acquire);
+        if (address != 0) Exchange.free_checked(&heap, address);
+    }
+    try testing.expectEqual(@as(u64, 0), heap.read_stats().allocated_bytes);
+}
+
 const Stress = struct {
     fn run(heap: *Heap, seed: u64) void {
         var prng: std.Random.DefaultPrng = .init(seed);
@@ -394,6 +474,7 @@ const Stress = struct {
             }
         }
         for (live) |maybe| if (maybe) |block| heap.allocator().free(block);
+        heap.collect(); // Releases the emptied pages this thread keeps.
     }
 };
 
@@ -446,6 +527,7 @@ fn fuzz_heap(random: std.Random) !void {
         try testing.expectEqual(expected, heap.read_stats().allocated_bytes);
     }
     for (live) |maybe| if (maybe) |entry| gpa.rawFree(entry.memory, entry.alignment, 0);
+    heap.collect(); // Releases the emptied pages the thread keeps for reuse.
     try testing.expectEqual(@as(u64, 0), heap.read_stats().allocated_bytes);
     try testing.expectEqual(@as(u64, 0), heap.read_stats().pages);
 }

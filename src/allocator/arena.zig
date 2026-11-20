@@ -46,6 +46,17 @@ pub const Page = struct {
     next: ?*Page = null,
     prev: ?*Page = null,
     queued: bool = false,
+    /// The heap thread cache (its index + 1) that owns the page, or 0 for a page the heap's
+    /// lock guards. Only the owning thread touches `free`, `used`, and the links.
+    owner: u16 = 0,
+    /// Whether the page is on its owner's list of full pages.
+    full: bool = false,
+    /// Blocks other threads freed, pushed without a lock (mimalloc's `xthread_free`); the
+    /// owner moves them to `free`. Counted in `used` until then.
+    thread_free: std.atomic.Value(usize) = .init(0),
+    /// Refills an empty page its owner keeps for reuse has left before it is released, or 0
+    /// when the page is not kept (mimalloc's `retire_expire`).
+    retire_expire: u8 = 0,
 
     pub fn start(page: *const Page) usize {
         const arena = page.arena;
