@@ -65,6 +65,10 @@ tidy:
 check-links *args:
     python3 -I etc/scripts/check-links.py "$@"
 
+# Head-to-head verdict counts (faster/tie/slower) from every lane's docs/bench/<lane>.tsv
+scoreboard *args:
+    python3 -I etc/scripts/scoreboard.py "$@"
+
 # Everything CI runs
 ci: tidy test
 
