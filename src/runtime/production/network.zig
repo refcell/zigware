@@ -13,6 +13,7 @@ const Io = std.Io;
 const net = Io.net;
 const posix = std.posix;
 const network = @import("../network.zig");
+const Metrics = @import("../network/metered.zig").Metrics;
 const ring_mod = @import("ring.zig");
 const request_mod = @import("request.zig");
 
@@ -41,6 +42,8 @@ const Shared = struct {
     io: Io,
     stream: net.Stream,
     ring: ?*ring_mod.Ring,
+    /// Counts bandwidth when set (commonware `network::metered`).
+    metrics: ?*const Metrics,
     handles: std.atomic.Value(u8) = .init(2),
 
     fn release(shared: *Shared) void {
@@ -99,6 +102,7 @@ pub const Sink = struct {
             return err;
         };
         assert(!sink.closed);
+        if (sink.shared.metrics) |metrics| metrics.sent(bufs);
     }
 
     fn write_all(sink: *Sink, bufs: []const []const u8) Error!void {
@@ -207,6 +211,7 @@ pub const Stream = struct {
         assert(filled == out.len);
         assert(stream.start <= stream.end);
         stream.poisoned = false;
+        if (stream.shared.metrics) |metrics| metrics.received(out.len);
     }
 
     /// One read into `into`; the end of the stream fails.
@@ -284,13 +289,22 @@ fn ring_perform(
 }
 
 /// Splits a connected socket into its two halves, applying the socket options.
-fn split(gpa: Allocator, io: Io, config: *const Config, stream: net.Stream) Error!Halves {
+fn split(network_: *const Network, stream: net.Stream) Error!Halves {
+    const gpa = network_.gpa;
+    const io = network_.io;
+    const config = &network_.config;
     errdefer stream.close(io);
     configure(config, stream.socket.handle);
     const shared = try gpa.create(Shared);
     errdefer gpa.destroy(shared);
     const buffer = try gpa.alloc(u8, config.read_buffer_size);
-    shared.* = .{ .gpa = gpa, .io = io, .stream = stream, .ring = config.ring };
+    shared.* = .{
+        .gpa = gpa,
+        .io = io,
+        .stream = stream,
+        .ring = config.ring,
+        .metrics = network_.metrics,
+    };
     assert(shared.handles.load(.monotonic) == 2);
     return .{
         .sink = .{ .shared = shared, .write_timeout_ns = nanoseconds(config.write_timeout) },
@@ -376,8 +390,9 @@ pub const Network = struct {
                 else => error.Closed,
             };
             const address = stream.socket.address;
-            const halves = try split(net_.gpa, net_.io, &net_.config, stream);
+            const halves = try split(net_, stream);
             assert(!halves.sink.closed and !halves.stream.poisoned);
+            if (net_.metrics) |metrics| metrics.inbound_connections.metric().inc();
             return .{ .address = address, .sink = halves.sink, .stream = halves.stream };
         }
 
@@ -398,6 +413,8 @@ pub const Network = struct {
     gpa: Allocator,
     io: Io,
     config: Config,
+    /// Counts connections and bandwidth when set; the production runner sets it.
+    metrics: ?*const Metrics = null,
 
     pub fn init(gpa: Allocator, io: Io, config: Config) Network {
         assert(config.connect_timeout.nanoseconds > 0);
@@ -423,8 +440,9 @@ pub const Network = struct {
     pub fn dial(network_: *const Network, address: Address) Error!Connection {
         const io = network_.io;
         const stream = try connect(io, address, network_.config.connect_timeout);
-        const halves = try split(network_.gpa, io, &network_.config, stream);
+        const halves = try split(network_, stream);
         assert(!halves.sink.closed and !halves.stream.poisoned);
+        if (network_.metrics) |metrics| metrics.outbound_connections.metric().inc();
         return .{ .sink = halves.sink, .stream = halves.stream };
     }
 };

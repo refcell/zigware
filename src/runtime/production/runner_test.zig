@@ -57,6 +57,28 @@ fn first_run(runner: *Runner) !void {
     try testing.expect(std.mem.startsWith(u8, encoded, echoes_family));
     try testing.expect(std.mem.endsWith(u8, encoded, "# EOF\n"));
     try testing.expect(std.mem.indexOf(u8, encoded, "\nruntime_process_rss ") != null);
+    // Storage and TCP are metered as commonware's tokio runner meters them: both ends of the
+    // echo count here, so each direction carries 8 bytes.
+    const runtime_samples = [_][]const u8{
+        "runtime_open_blobs 1",
+        "runtime_storage_reads_total 0",
+        "runtime_storage_writes_total 1",
+        "runtime_storage_write_bytes_total 7",
+        "runtime_storage_syncs_total 1",
+        "runtime_storage_resizes_total 0",
+        "runtime_inbound_connections_total 1",
+        "runtime_outbound_connections_total 1",
+        "runtime_inbound_bandwidth_total 8",
+        "runtime_outbound_bandwidth_total 8",
+    };
+    for (runtime_samples) |sample| {
+        var line_buffer: [64]u8 = undefined;
+        const line = try std.fmt.bufPrint(&line_buffer, "\n{s}\n", .{sample});
+        if (std.mem.indexOf(u8, encoded, line) == null) {
+            std.debug.print("missing sample {s} in:\n{s}", .{ sample, encoded });
+            return error.TestUnexpectedResult;
+        }
+    }
 }
 
 fn second_run(runner: *Runner) !void {

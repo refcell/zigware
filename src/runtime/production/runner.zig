@@ -19,6 +19,8 @@ const ring_mod = @import("ring.zig");
 const system_resolver_mod = @import("resolver.zig");
 const context_mod = @import("../context.zig");
 const process = @import("../process/metered.zig");
+const metered_storage = @import("../storage/metered.zig");
+const metered_network = @import("../network/metered.zig");
 
 pub const Error = iface.Error;
 
@@ -57,7 +59,11 @@ pub const Runner = struct {
     ring: ring_mod.Ring,
     ring_active: bool,
     file_storage: file_storage.Storage,
+    /// `file_storage` counted in `runtime_open_blobs` and `runtime_storage_*`.
+    metered_storage: metered_storage.Storage,
     tcp: tcp_network.Network,
+    /// `runtime_*_connections` and `runtime_*_bandwidth`, counted by `tcp`.
+    network_metrics: metered_network.Metrics,
     /// The metrics registry. Release every handle before `deinit`.
     metrics_registry: telemetry.metrics.Registry,
     /// `runtime_process_rss` and `runtime_process_virtual_memory`, refreshed while `start` or
@@ -94,12 +100,17 @@ pub const Runner = struct {
             network_config.ring = &runner.ring;
         }
         errdefer if (runner.ring_active) runner.ring.deinit();
-        const cwd = Io.Dir.cwd();
-        const root = cwd.createDirPathOpen(runner_io, config.storage_directory, .{}) catch |err|
-            return if (err == error.Canceled) error.Canceled else error.Io;
-        errdefer root.close(runner_io);
-        runner.file_storage = try .init(runner_io, gpa, root, storage_config);
+        const directory = config.storage_directory;
+        runner.file_storage = try open_storage(runner_io, gpa, directory, storage_config);
+        errdefer runner.file_storage.deinit();
+        // Registered in commonware's order: process, storage, then network.
+        const scope = runner.metrics().sub_registry(telemetry.metrics.metrics_prefix);
+        const inner = runner.file_storage.storage();
+        runner.metered_storage = try .init(gpa, inner, &scope);
+        errdefer runner.metered_storage.deinit();
+        runner.network_metrics = try .init(&scope);
         runner.tcp = .init(gpa, runner_io, network_config);
+        runner.tcp.metrics = &runner.network_metrics;
         runner.context_runtime = null;
         runner.max_contexts = config.max_contexts;
         runner.subscriber = config.subscriber;
@@ -108,10 +119,28 @@ pub const Runner = struct {
         assert(runner.tcp.io.userdata == runner.file_storage.io.userdata);
     }
 
+    /// Opens file storage under `directory`, created if missing.
+    fn open_storage(
+        io_: Io,
+        gpa: Allocator,
+        directory: []const u8,
+        config: file_storage.Config,
+    ) Error!file_storage.Storage {
+        assert(directory.len > 0);
+        const root = Io.Dir.cwd().createDirPathOpen(io_, directory, .{}) catch |err|
+            return if (err == error.Canceled) error.Canceled else error.Io;
+        errdefer root.close(io_);
+        const opened: file_storage.Storage = try .init(io_, gpa, root, config);
+        assert(opened.live.count() == 0);
+        return opened;
+    }
+
     /// Every blob, listener, and connection must be closed first.
     pub fn deinit(runner: *Runner) void {
         if (runner.context_runtime) |*runtime| runtime.deinit();
         runner.process_metrics.deinit();
+        runner.network_metrics.deinit();
+        runner.metered_storage.deinit();
         runner.metrics_registry.deinit();
         runner.tcp.deinit();
         runner.file_storage.deinit();
@@ -127,7 +156,7 @@ pub const Runner = struct {
 
     /// File storage under `storage_directory`.
     pub fn storage(runner: *Runner) iface.Storage {
-        return runner.file_storage.storage();
+        return runner.metered_storage.storage();
     }
 
     /// The TCP network.
