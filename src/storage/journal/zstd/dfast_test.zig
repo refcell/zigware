@@ -9,10 +9,11 @@ const corpus = @import("corpus.zig");
 const params = @import("params.zig");
 const dfast = @import("dfast.zig");
 
-const Kind = enum { text, records, mixed, noisy };
+const Kind = enum { text, records, mixed, noisy, sparse };
 
 /// `mixed` alternates 50 KB pieces of text and records; `noisy` alternates 700 random
-/// bytes, long enough to grow the search step past 3, with 200 bytes of text.
+/// bytes, which grow the search step to 3, with 200 bytes of text; `sparse` alternates 2000
+/// random bytes, which grow it past 3 so a match skips the long insert at `ip1`, with 300.
 fn sample(gpa: std.mem.Allocator, kind: Kind, len: usize) ![]u8 {
     const data = try gpa.alloc(u8, len);
     var prng = std.Random.DefaultPrng.init(0x6c33);
@@ -26,6 +27,15 @@ fn sample(gpa: std.mem.Allocator, kind: Kind, len: usize) ![]u8 {
                 const piece = data[at..@min(data.len, at + 50_000)];
                 const random = prng.random();
                 if (text) corpus.text(random, piece) else corpus.records(random, piece);
+                at += piece.len;
+            }
+        },
+        .sparse => {
+            var at: usize = 0;
+            var text = true;
+            while (at < data.len) : (text = !text) {
+                const piece = data[at..@min(data.len, at + @as(usize, if (text) 300 else 2000))];
+                if (text) corpus.text(prng.random(), piece) else prng.random().bytes(piece);
                 at += piece.len;
             }
         },
@@ -107,6 +117,12 @@ test "double fast finds libzstd level 3's sequences" {
             .len = 400_000,
             .count = 9401,
             .hash = "a3b358dfe6fb2c2a9feb9c91e6a84a840f7fc6a3c145eff38b3f60814e535380",
+        },
+        .{
+            .kind = .sparse,
+            .len = 400_000,
+            .count = 5467,
+            .hash = "8acae4714c8cca3d352363cde8ca70be140a1f1bc86df1ddef8ec8bf932acc99",
         },
     };
     for (cases) |case| {

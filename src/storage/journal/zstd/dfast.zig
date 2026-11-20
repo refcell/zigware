@@ -288,46 +288,76 @@ const Block = struct {
         }
     }
 
-    /// The inner loop: one iteration per position searched.
+    /// The inner loop: one iteration per position searched. The search state lives in locals
+    /// and is written back to `block` only when a match ends it: the tables are `u32`s the
+    /// compiler cannot prove apart from `block`'s fields, so keeping them there reloaded
+    /// them after every table store.
     fn search(block: *Block) Found {
         const state = block.state;
         const src = block.src;
-        block.step = 1;
-        var next_step = block.ip + (1 << search_strength);
-        var ip1 = block.ip + block.step;
-        if (!block.in_limit(ip1)) return .none;
-        var hash_long_0 = hash8(src, block.ip, state.long_log);
-        var index_long_0 = state.long[hash_long_0];
+        const long = state.long;
+        const short = state.short;
+        const lowest = block.prefix_lowest_index;
+        const offset_1 = block.offset_1;
+        assert(lowest >= start_index);
+        if (block.end < hash_read_size) return .none;
+        // `ilimit`: the last position that may be hashed.
+        const limit = block.end - hash_read_size;
+        var ip = block.ip;
+        var step: usize = 1;
+        var next_step = ip + (1 << search_strength);
+        var ip1 = ip + step;
+        if (ip1 > limit) return .none;
+        var hash_long_0 = hash8(src, ip, state.long_log);
+        var index_long_0 = long[hash_long_0];
         while (true) {
-            const ip = block.ip;
+            assert(ip < ip1 and ip1 <= limit);
             const hash_short_0 = hash_short(src, ip, state.short_log, state.min_match);
-            const index_short_0 = state.short[hash_short_0];
-            block.current = index_of(ip);
-            state.long[hash_long_0] = block.current;
-            state.short[hash_short_0] = block.current;
-            const repeat = block.offset_1 > 0 and
-                read32(src, ip + 1 - block.offset_1) == read32(src, ip + 1);
-            if (repeat) return block.found_repeat();
+            const index_short_0 = short[hash_short_0];
+            long[hash_long_0] = index_of(ip);
+            short[hash_short_0] = index_of(ip);
+            if (offset_1 > 0 and read32(src, ip + 1 - offset_1) == read32(src, ip + 1)) {
+                block.resume_at(ip, step, 0, 0);
+                return block.found_repeat();
+            }
             const hash_long_1 = hash8(src, ip1, state.long_log);
-            block.hash_next = hash_long_1;
-            block.ip_next = ip1;
-            if (block.long_candidate(index_long_0)) |match| return match;
-            const index_long_1 = state.long[hash_long_1];
-            if (block.valid(index_short_0) and
+            if (index_long_0 >= lowest and
+                read64(src, index_long_0 - start_index) == read64(src, ip))
+            {
+                block.resume_at(ip, step, hash_long_1, ip1);
+                return block.long_candidate(index_long_0).?;
+            }
+            const index_long_1 = long[hash_long_1];
+            if (index_short_0 >= lowest and
                 read32(src, index_short_0 - start_index) == read32(src, ip))
             {
+                block.resume_at(ip, step, hash_long_1, ip1);
                 return block.search_next_long(index_short_0, index_long_1, ip1);
             }
             if (ip1 >= next_step) {
-                block.step += 1;
+                step += 1;
                 next_step += 1 << search_strength;
             }
-            block.ip = ip1;
-            ip1 += block.step;
+            ip = ip1;
+            ip1 += step;
             hash_long_0 = hash_long_1;
             index_long_0 = index_long_1;
-            if (!block.in_limit(ip1)) return .none;
+            if (ip1 > limit) {
+                block.resume_at(ip, step, 0, 0);
+                return .none;
+            }
         }
+    }
+
+    /// Write the search's locals back for the match handlers and `run`.
+    fn resume_at(block: *Block, ip: usize, step: usize, hash_next: usize, ip_next: usize) void {
+        assert(ip >= block.anchor and ip < block.end);
+        assert(step >= 1);
+        block.ip = ip;
+        block.current = index_of(ip);
+        block.step = step;
+        block.hash_next = hash_next;
+        block.ip_next = ip_next;
     }
 
     /// `ZSTD_selectAddr`: a table index at or above the prefix's lowest index.
