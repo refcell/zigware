@@ -147,6 +147,74 @@ pub const AuditHasher = struct {
     }
 };
 
+/// The `process_task` audit event without hashing it per resume. The event hashes
+/// `len(4) digest len(12) "process_task" len(16) id len(L) label`, and only the previous
+/// digest varies. CRC-32C is affine, so the checksum is the task's `base` (the event with a
+/// zero digest) XOR a linear function of the digest's 4 bytes followed by the `52 + L` fixed
+/// bytes, which four 256-entry tables per label length `L` give.
+pub const ProcessAudit = struct {
+    tables: [4][256]u32,
+
+    const label = "process_task";
+    /// Bytes after the digest, less the label's: three length prefixes, `label`, the id.
+    const suffix_fixed = 8 + label.len + 8 + 16 + 8;
+
+    /// The event's checksum for task `id` named `name`, with a zero previous digest.
+    pub fn base(id: u128, name: []const u8) u32 {
+        var hasher: AuditHasher = .{};
+        hasher.update(&@as([4]u8, @splat(0)));
+        hasher.update(label);
+        var id_bytes: [16]u8 = undefined;
+        std.mem.writeInt(u128, &id_bytes, id, .big);
+        hasher.update(&id_bytes);
+        hasher.update(name);
+        return std.mem.readInt(u32, &hasher.finalize(), .big);
+    }
+
+    /// Tables for labels of `label_len` bytes: entry `[i][b]` is the zero-state CRC register
+    /// after digest byte `i` = `b`, the other digest bytes zero, and the suffix zero.
+    pub fn init(audit: *ProcessAudit, label_len: usize) void {
+        const zeros = suffix_fixed + label_len;
+        // The contributions of single bits, then each byte value as an XOR of its bits.
+        var bits: [4][8]u32 = undefined;
+        for (0..4) |position| {
+            for (0..8) |bit| {
+                bits[position][bit] = shifted(position, @as(u8, 1) << @intCast(bit), zeros);
+            }
+        }
+        for (0..4) |position| {
+            for (0..256) |value| {
+                var sum: u32 = 0;
+                for (0..8) |bit| {
+                    if (value >> @intCast(bit) & 1 != 0) sum ^= bits[position][bit];
+                }
+                audit.tables[position][value] = sum;
+            }
+        }
+        assert(audit.tables[0][0] == 0);
+    }
+
+    /// The zero-state register over 4 digest bytes (only `position` set to `value`) and
+    /// `zeros` zero bytes, bit by bit (CRC-32C, reflected, no final xor).
+    fn shifted(position: usize, value: u8, zeros: usize) u32 {
+        var crc: u32 = 0;
+        for (0..4 + zeros) |index| {
+            crc ^= if (index == position) value else 0;
+            for (0..8) |_| crc = (crc >> 1) ^ (0x82f63b78 & (0 -% (crc & 1)));
+        }
+        return crc;
+    }
+
+    /// The next digest after a `process_task` event of the task with `base_value`.
+    pub fn event(audit: *const ProcessAudit, base_value: u32, previous: [4]u8) [4]u8 {
+        var value = base_value;
+        for (previous, 0..) |byte, position| value ^= audit.tables[position][byte];
+        var digest: [4]u8 = undefined;
+        std.mem.writeInt(u32, &digest, value, .big);
+        return digest;
+    }
+};
+
 /// Tracks the state of the runtime for determinism auditing (commonware `Auditor`).
 pub const Auditor = struct {
     digest: [4]u8 = @splat(0),
@@ -202,6 +270,8 @@ const Task = struct {
     label_kind: telemetry.metrics.task.Kind,
     /// This task's `runtime_task_polls` entry.
     polls: *PollCounter,
+    /// The `process_task` audit event's checksum with a zero previous digest (`ProcessAudit`).
+    audit_base: u32,
     context: fiber.Context,
     stack: ?fiber.Stack,
     state: enum { ready, running, blocked, finished },
@@ -313,6 +383,8 @@ pub const Runner = struct {
     config: Config,
     rng: Rng,
     auditor: Auditor = .{},
+    /// `ProcessAudit` tables by task label length, built on first use.
+    process_audit: [label_size_max + 1]?*ProcessAudit = @splat(null),
     time_ns: u64,
     deadline_ns: ?u64,
     iterations: u64 = 0,
@@ -387,6 +459,7 @@ pub const Runner = struct {
         assert(runner.task_count == 0);
         for (runner.stack_pool.items) |stack| stack.unmap();
         runner.stack_pool.deinit(runner.allocator);
+        for (runner.process_audit) |tables| if (tables) |t| runner.allocator.destroy(t);
         runner.ready.deinit(runner.allocator);
         runner.batch.deinit(runner.allocator);
         runner.alarms.deinit(runner.allocator);
@@ -591,6 +664,12 @@ pub const Runner = struct {
         var label_buffer: [label_size_max]u8 = undefined;
         const task_label = runner.spawn_label(kind, named, &label_buffer);
         const polls = try runner.task_polls.?.metric().get_or_create(task_label);
+        const label_len = task_label.name.len;
+        if (runner.process_audit[label_len] == null) {
+            const tables = try runner.allocator.create(ProcessAudit);
+            tables.init(label_len);
+            runner.process_audit[label_len] = tables;
+        }
         const stack = try runner.acquire_stack();
         errdefer runner.release_stack(stack);
         const task = try runner.allocator.create(Task);
@@ -600,6 +679,7 @@ pub const Runner = struct {
             .label_len = @intCast(task_label.name.len),
             .label_kind = task_label.kind,
             .polls = polls,
+            .audit_base = ProcessAudit.base(runner.next_task_id, task_label.name),
             .context = undefined,
             .stack = stack,
             .state = .ready,
@@ -805,9 +885,7 @@ pub const Runner = struct {
         }
         for (runner.batch.items) |task| {
             assert(task.state == .ready);
-            var id: [16]u8 = undefined;
-            std.mem.writeInt(u128, &id, task.id, .big);
-            runner.auditor.event("process_task", &.{ &id, task.label() });
+            runner.audit_process(task);
             increment(task.polls);
             runner.resume_task(task);
             if (stop_at_root and runner.root_finished) {
@@ -818,6 +896,20 @@ pub const Runner = struct {
                 }
                 return;
             }
+        }
+    }
+
+    /// Records `task`'s `process_task` audit event from its precomputed checksum.
+    fn audit_process(runner: *Runner, task: *const Task) void {
+        const tables = runner.process_audit[task.label_len].?;
+        const previous = runner.auditor.digest;
+        runner.auditor.digest = tables.event(task.audit_base, previous);
+        if (std.debug.runtime_safety) {
+            var expected: Auditor = .{ .digest = previous };
+            var id: [16]u8 = undefined;
+            std.mem.writeInt(u128, &id, task.id, .big);
+            expected.event("process_task", &.{ &id, task.label() });
+            assert(std.mem.eql(u8, &expected.digest, &runner.auditor.digest));
         }
     }
 
@@ -2176,4 +2268,24 @@ test "a reopen drops the retained fragments of a closed open" {
     // Crash replay must not restore fragments the successful reopen excluded.
     try testing.expectEqualStrings("saXed", &try logical_open(false));
     try testing.expectEqualStrings("fresh", &try logical_open(true));
+}
+
+test "the precomputed process_task audit matches hashing the event" {
+    var rng: utils.rng.TestRng = .init(7);
+    for ([_][]const u8{ "", "a", "root", "a_longer_task_label_name" }) |name| {
+        const audit = try testing.allocator.create(ProcessAudit);
+        defer testing.allocator.destroy(audit);
+        audit.init(name.len);
+        for (0..64) |_| {
+            const id = @as(u128, rng.next_u64()) << 64 | rng.next_u64();
+            var previous: [4]u8 = undefined;
+            rng.fill_bytes(&previous);
+            var expected: Auditor = .{ .digest = previous };
+            var id_bytes: [16]u8 = undefined;
+            std.mem.writeInt(u128, &id_bytes, id, .big);
+            expected.event("process_task", &.{ &id_bytes, name });
+            const got = audit.event(ProcessAudit.base(id, name), previous);
+            try testing.expectEqualSlices(u8, &expected.digest, &got);
+        }
+    }
 }
