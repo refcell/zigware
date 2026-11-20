@@ -358,6 +358,14 @@ pub fn estimate_size(table: *const CTable, counts: []const u32, max_symbol: u32)
     return bits >> 3;
 }
 
+/// The fewest bytes `compress_1x` or `compress_4x` can write for symbols counted in `counts`:
+/// every coded bit, rounded down, and the jump table of four streams.
+fn streams_floor(table: *const CTable, counts: []const u32, max_symbol: u32, four: bool) usize {
+    const floor = estimate_size(table, counts, max_symbol) + @as(usize, if (four) 6 else 0);
+    assert(floor >= estimate_size(table, counts, max_symbol));
+    return floor;
+}
+
 /// `HUF_validateCTable`: every symbol present has a code.
 pub fn validate(table: *const CTable, counts: []const u32, max_symbol: u32) bool {
     assert(max_symbol < 256);
@@ -469,7 +477,12 @@ fn compress_with_table(
     return total;
 }
 
-pub const Flags = struct { prefer_repeat: bool, suspect_uncompressible: bool };
+pub const Flags = struct {
+    prefer_repeat: bool,
+    suspect_uncompressible: bool,
+    /// The caller stores the literals raw when the result is this long or longer.
+    discard_from: usize,
+};
 
 const suspect_sample_size = 4096;
 const suspect_sample_ratio = 10;
@@ -521,6 +534,15 @@ pub fn compress(
     const log = fse.optimal_table_log_internal(lit_huf_log, src.len, max_symbol, 1);
     var fresh: CTable = .{};
     const huff_log = try build_ctable(&fresh, &counts, max_symbol, log);
+    // Without an old table, the result is the new table's streams after its header, which
+    // `compress_with_table` refuses at `src.len - 1` bytes and the caller at `discard_from`.
+    // The streams alone hold at least the table's estimate (and a 4-stream jump table), so
+    // when that reaches either limit the literals stay raw: skip writing the header and the
+    // streams (nearly random literals).
+    const limit = @min(src.len - 1, flags.discard_from);
+    if (repeat.* == .none and streams_floor(&fresh, &counts, max_symbol, four) >= limit) {
+        return 0;
+    }
     const header_len = try write_ctable(out, &fresh, max_symbol, huff_log);
     if (repeat.* != .none) {
         const old_size = estimate_size(table, &counts, max_symbol);
@@ -619,14 +641,16 @@ pub fn compress_literals(
     assert(out.len >= header_len + 1);
     var repeat = prev.repeat;
     const single = src.len < 256 or (repeat == .valid and header_len == 3);
+    const min_gain = (src.len >> 6) + 2;
+    assert(min_gain < src.len);
     const flags: Flags = .{
         .prefer_repeat = src.len <= 1024,
         .suspect_uncompressible = suspect_uncompressible,
+        .discard_from = src.len - min_gain,
     };
     const result = compress(out[header_len..], src, !single, &next.table, &repeat, flags);
     const len = result catch 0;
     const kind: EncodingType = if (repeat != .none) .repeat else .compressed;
-    const min_gain = (src.len >> 6) + 2;
     if (len == 0 or len >= src.len - min_gain) {
         next.* = prev.*;
         return raw_literals(out, src);
