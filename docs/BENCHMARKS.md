@@ -224,6 +224,24 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
   tree, counters around the whole apply: `smp_allocator` 177 faults per batch, all in the tip
   copy; `allocator.Heap` 0 in two runs, as it keeps the freed block mapped.
 
+## qmdb: apply_batch, immutable (2026-11-20, storage-qmdb lane)
+
+`qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384`, after
+b3528252 (measured as bf0525c8, its tree before the rebase). `bench-compare.sh 8` (ABBA,
+commonware native in target-native), commonware/zigware per round with the load at the round's
+start: 0.970/1.077 ms (1.11×, load 119.6), 1.251/0.879 (0.70×, 56.6), 1.416/0.848 (0.60×, 73.1),
+1.150/0.736 (0.64×, 74.6), 1.038/0.857 (0.83×, 80.2), 1.193/0.849 (0.71×, 92.4), 1.309/0.778
+(0.59×, 74.0), 1.515/0.696 (0.46×, 43.8). Median of the per-round ratios 0.67×, one round of
+eight at or above 1: **faster** (was 2.04×, slower, in the first ABBA round before the fix). Raw
+rounds: docs/bench/storage-qmdb.tsv.
+
+The time was the snapshot's table inserts: about 520 cycles each, one cache miss per random
+key (rdtsc counters, 8.6M of 9.9M index cycles per batch). `index_diff` now prefetches the
+home slot of the set 16 entries ahead, so a batch's misses overlap. At equal load the same
+counters read 4.40M table cycles per batch before and 1.67M after (1.78 ms to 0.91 ms per
+batch). Commonware joins the inserts with the journal append on one task, which hides only
+I/O waits; zigware still runs them before the append.
+
 ## bls12381: the remaining benches (2026-11-19, bls-math lane)
 
 The bls12381 benches the table above left out, at `bench-compare.sh`'s settings (1 s warm-up,

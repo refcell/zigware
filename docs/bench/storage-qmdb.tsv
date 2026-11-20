@@ -1,0 +1,12 @@
+# date: 2026-11-20
+# zigware: bf0525c8
+# commonware: a9ffc25f3
+# method: ABBA rounds=8, --bench --noplot --warm-up-time 1 --measurement-time 3 --sample-size 50 | --bench --warm-up-ms 1000 --measurement-ms 3000 --samples 50, commonware target-cpu=native
+1	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	970290.0	1076600.0	119.56
+2	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	1250600.0	878500.0	56.62
+3	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	1416100.0	848200.0	73.06
+4	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	1150200.0	735990.0	74.55
+5	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	1038100.0	857030.0	80.23
+6	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	1193400.0	848730.0	92.44
+7	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	1309400.0	778040.0	73.95
+8	storage	qmdb::apply_batch/case=direct variant=immutable::fixed::mmb chunk=32 updates=16384	1514700.0	696190.0	43.76
