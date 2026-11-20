@@ -137,7 +137,7 @@ setup, the commands, and the caveats). Below 1× means zigware is faster.
 | `bls12381::aggregate_verify_same_message` (1000 keys) / single verify | 0.98× / 0.79× |
 | `sha256::hash_message` (4 KiB / 1 MiB) | 1.11× / 1.12× |
 | `ed25519::signature_verification` / `batch_verify_same_message` (100 keys) | 0.55× / 0.52× |
-| `qmdb::apply_batch` (16384 updates) | 1.11× |
+| `qmdb::apply_batch` (16384 updates) | 0.97× |
 
 End to end, four local [flood](examples/flood) peers over authenticated p2p at
 262144 msg/s each: zigware receives 673–772k msg/s per peer at 23–80 ms mean latency,
