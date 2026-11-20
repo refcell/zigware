@@ -23,6 +23,7 @@ const Opaque = @import("../secret.zig").Opaque;
 const msm = @import("msm.zig");
 const verify_msm = @import("verify_msm.zig");
 const base_mul = @import("base_mul.zig");
+const field = @import("field.zig");
 
 pub const Point = std.crypto.ecc.Edwards25519;
 const Fe = Point.Fe;
@@ -37,7 +38,7 @@ pub fn decompress(bytes: [32]u8) ?Point {
     const y2 = y.sq();
     const u = y2.sub(z);
     const v = y2.mul(Fe.edwards25519d).add(z);
-    var x = u.mul(v).pow2523().mul(u);
+    var x = field.pow2523(u.mul(v)).mul(u);
     const vxx = x.sq().mul(v);
     const has_m_root = vxx.sub(u).isZero();
     const has_p_root = vxx.add(u).isZero();

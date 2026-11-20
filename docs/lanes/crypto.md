@@ -582,3 +582,10 @@ hold whole units of lanes" over coding's lane-aware `hash_batches`, and `sha512/
   len=4096 went 13.6 -> 9.1 us and count=2 len=256 298 -> 207 ns standalone. Planted bugs in the
   pair's digest order, the tail padding boundary, the second message's tail, and the
   equal-length check fail the std comparison tests.
+- 2026-11-20: ed25519 decompression's `pow2523` runs on `ed25519/field.zig`'s squaring: the
+  2, 19, and 38 coefficients fold into `u64` limbs before the multiply, so every term is one
+  64x64-bit widening product (std widens to `u128` first), and the carry runs in two parallel
+  stages. Same addition chain as std, so results are identical; the test checks edge elements
+  (0, 1, p - 1, every limb at 2^52 - 1) and 2,000 random ones against std on x86-64 and
+  aarch64. Decompress went from 3.7 to 2.8 us. Planted bugs in a coefficient, either carry
+  stage's wrap by 19, and the addition chain fail it.

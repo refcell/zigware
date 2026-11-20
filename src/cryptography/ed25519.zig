@@ -19,4 +19,5 @@ test {
     _ = @import("ed25519/verify_msm.zig");
     _ = @import("ed25519/verify_ifma.zig");
     _ = @import("ed25519/base_mul.zig");
+    _ = @import("ed25519/field.zig");
 }
