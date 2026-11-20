@@ -45,6 +45,9 @@ const stack_depth_max = 64;
 
 /// Chunks or parents one vectorized compression covers.
 const lanes = std.simd.suggestVectorLength(u32) orelse 1;
+/// Whether full-width compressions load each block with one vector load and transpose the
+/// words (16 lanes, AVX-512); narrower ones gather the words one at a time.
+pub const transposed = lanes == 16;
 
 const flag_chunk_start: u32 = 1 << 0;
 const flag_chunk_end: u32 = 1 << 1;
@@ -69,6 +72,9 @@ const msg_schedule: [7][16]u8 = .{
 comptime {
     assert(std.math.isPowerOfTwo(lanes));
     assert(lanes <= subtree_len_min / chunk_len);
+    // A transposed load reads one block: 16 words, or a parent's two chaining values.
+    assert(@sizeOf(@Vector(16, u32)) == block_len);
+    assert(@sizeOf([2][8]u32) == block_len);
     assert(split_len_min > subtree_len_max);
     assert(subtree_len_floor >= subtree_len_min and subtree_len_floor <= subtree_len_max);
 }
@@ -231,7 +237,7 @@ fn parent_cvs(comptime n: usize, children: *const [2 * n]Cv, extra_flags: u32, o
     if (n == 16) {
         // Each parent's block is its two children's chaining values, adjacent in `children`.
         var blocks: [16][*]const u8 = undefined;
-        inline for (&blocks, 0..) |*b, lane| b.* = @ptrCast(&children[2 * lane]);
+        inline for (&blocks, 0..) |*b, lane| b.* = @ptrCast(children[2 * lane ..][0..2]);
         m = load_transposed(&blocks, false);
     } else {
         inline for (0..16) |w| {
@@ -744,10 +750,11 @@ fn compress_full(cv: [8]Vec(lanes), m: *const [16]Vec(lanes), words: Words(lanes
 // loads get their own check at that width whatever `lanes` is.
 test "blake3 16-lane chunk and parent compressions match one lane at a time" {
     var random = std.Random.DefaultPrng.init(0x16);
-    var data: [16][chunk_len]u8 = undefined;
-    random.random().bytes(std.mem.asBytes(&data));
+    // Chunks start one byte past an aligned address, so the loads must be unaligned ones.
+    var data: [16 * chunk_len + 1]u8 align(64) = undefined;
+    random.random().bytes(&data);
     var chunks: [16][*]const u8 = undefined;
-    for (&chunks, &data) |*chunk, *bytes| chunk.* = bytes;
+    for (&chunks, 0..) |*chunk, lane| chunk.* = data[1 + lane * chunk_len ..].ptr;
     // Lane counters cross the high word of the chunk counter.
     const counter: u64 = (1 << 32) - 5;
     var wide: [16]Cv = undefined;

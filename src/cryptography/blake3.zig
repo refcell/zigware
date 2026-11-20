@@ -21,6 +21,11 @@ pub const Digest = digest.Digest(digest_length, "blake3");
 
 const Streaming = hasher.Streaming(Core, Digest);
 
+/// Parts a message of at least `tree.subtree_len_min` bytes may have to hash in the tree
+/// kernel: seeking each 32 KiB or longer subtree's first part through 64 parts costs well
+/// under 1% of hashing it.
+const tree_parts_max = 64;
+
 /// BLAKE3 hasher: `Streaming` over `Core`, with a `hash_across` that splits long messages.
 pub const Blake3 = struct {
     streaming: Streaming,
@@ -41,10 +46,13 @@ pub const Blake3 = struct {
     }
 
     /// The digest of the concatenation of `parts`. A message of more than one chunk
-    /// compresses its chunks side by side in `blake3_tree`'s kernel, which beats `Core` at
-    /// every length: `Core` compresses a batch of fewer than four chunks one at a time (2 KiB:
-    /// 3.4 µs against 1.6), and its wide batches gather their message words one at a time (1
-    /// MiB: 137 µs against 111).
+    /// compresses its chunks side by side in `blake3_tree`'s kernel: `Core` compresses a batch
+    /// of fewer than four chunks one at a time (2 KiB: 3.4 µs against 1.6). From
+    /// `tree.subtree_len_min` bytes the kernel wins only with its transposed 16-lane loads,
+    /// as `Core`'s wide batches gather their words one at a time (1 MiB: 137 µs against 111),
+    /// and only for a message in at most `tree_parts_max` parts: each subtree seeks its first
+    /// part from the start of `parts`, so a message in more parts streams through `Core` in
+    /// one pass instead.
     pub fn hash(parts: []const []const u8) Value {
         var len: usize = 0;
         for (parts) |part| {
@@ -52,6 +60,9 @@ pub const Blake3 = struct {
         }
         // One chunk compresses its root once (std's setup and finalize cost more than that).
         if (len <= tree.chunk_len) return .{ .bytes = tree.hash(parts) };
+        if (len >= tree.subtree_len_min) {
+            if (!tree.transposed or parts.len > tree_parts_max) return Streaming.hash(parts);
+        }
         return .{ .bytes = tree.hash_subtrees(parts, len, parallel.sequential) };
     }
 
