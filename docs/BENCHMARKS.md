@@ -1205,14 +1205,30 @@ Fixes, each with a planted bug its tests catch:
   noise: 405 against 389 µs in memory, and 16.4 ms either way on tmpfs (3 alternating
   rounds). Replay does not scan, so replay rows don't move.
 
-Still over 1.3×, all `variable_prepare_append`: the single-item rows (8.3× at size=64, 3.9×
-at size=1024) and most compressed size=1024 rows (1.3 to 1.6×), where `Heap`'s small
-allocations take 35 to 45 ns against smp_allocator's 15 ns (a 64-byte prepare is about four
-allocations, and with smp the same rows read 1.1 to 2.3×); and compressible 1 MiB items (3.3
-to 5.5×), which are the byte-exact libzstd level-3 encoder's match finding
-(storage-merkle's). Fixed append waits for storage-qmdb's write-side findings: the paged
-write path does not run inside its timed batch, and its tip copy is first-touch page faults
-of a fresh buffer, an allocator effect.
+Still over 1.3× in this run, all `variable_prepare_append`: the single-item rows (8.3× at
+size=64, 3.9× at size=1024), most compressed size=1024 rows (1.3 to 1.6×), and compressible
+1 MiB items (3.3 to 5.5×). Every row of this table comes from binaries before c7935b0c
+(criterion's wall-time iteration planning), so rows of benches with setup, teardown or
+`before_iter` are provisional until the re-run lands.
+
+Since then (2026-11-20):
+- `allocator.Heap` is not behind these rows. The earlier note blaming its 35 to 45 ns small
+  allocations predates 9f4eeba4's thread caches: Heap now takes 5.8 to 13 ns per alloc and
+  free against smp_allocator's 12 to 18 ns. runtime's native ABBA, 8 rounds on main: items=1
+  size=64 none 0.66× and size=1024 none 0.84× (faster), size=1024 level 3 0.82× (faster),
+  size=1024 level 3 random 1.22× (slower, the zstd encoder on incompressible input).
+- The zstd encoder moved to this lane. e96c83ca reuses one encoder per batch, a9cfb330
+  compresses `[N]u8` items in place (the encoded temporary cost twice the compression of a
+  compressible 1 MiB item), f78b7454 ports `PREPARED_SPARE_LIMIT` (the batch is no longer
+  copied into an exact buffer), and 20d5e341 keeps dfast's search state in locals (5 to 9%
+  fewer dfast cycles; its loop is no slower than libzstd 1.5.7's on the same core). With
+  storage-merkle's 896d3bf2, compressible 1 MiB rows went from 3.3–5.5× to 0.84–0.98×
+  (items=32 about 0.86×, items=1 about 0.96×, 6 of 8 rounds on c7935b0c). Random 1 MiB rows
+  read 1.35× (items=1) and 1.69× (items=32) before f78b7454 and 20d5e341.
+
+Fixed append waits for storage-qmdb's write-side findings: the paged write path does not run
+inside its timed batch, and its tip copy is first-touch page faults of a fresh buffer, an
+allocator effect.
 
 | bench | parameters | commonware | zigware | before | after |
 |---|---|---|---|---|---|
