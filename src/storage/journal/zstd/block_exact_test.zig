@@ -9,7 +9,7 @@ const corpus = @import("corpus.zig");
 const zstd = @import("../zstd.zig");
 const block_exact = @import("block_exact.zig");
 
-pub const Kind = enum { text, records, mixed, run, noise, sandwich };
+pub const Kind = enum { text, records, mixed, run, noise, sandwich, alphabet };
 
 /// Sample `kind` of `out.len` bytes, deterministic.
 pub fn sample(out: []u8, kind: Kind) void {
@@ -20,6 +20,10 @@ pub fn sample(out: []u8, kind: Kind) void {
         .records => corpus.records(random, out),
         .run => @memset(out, 0x5a),
         .noise => random.bytes(out),
+        // Uniform over 64 symbols: short samples have no match, yet Huffman codes them.
+        .alphabet => for (out) |*byte| {
+            byte.* = random.int(u8) & 63;
+        },
         .sandwich => sample_sandwich(out, random),
         .mixed => {
             const third = out.len / 3;
@@ -61,6 +65,11 @@ pub const cases = [_]Case{
     .{ .kind = .mixed, .len = 102, .frame_len = 111, .hash = hashes[8] },
     .{ .kind = .noise, .len = 300_000, .frame_len = 300018, .hash = hashes[9] },
     .{ .kind = .sandwich, .len = 262_144, .frame_len = 141340, .hash = hashes[10] },
+    // Blocks without a match whose literals Huffman still shrinks (the 1000-byte one), and
+    // blocks of 40 KiB or more of literals past the sampled histograms.
+    .{ .kind = .alphabet, .len = 1000, .frame_len = 782, .hash = hashes[11] },
+    .{ .kind = .alphabet, .len = 30_000, .frame_len = 22559, .hash = hashes[12] },
+    .{ .kind = .alphabet, .len = 300_000, .frame_len = 225099, .hash = hashes[13] },
 };
 
 const hashes = [_][]const u8{
@@ -75,6 +84,9 @@ const hashes = [_][]const u8{
     "c2a6beae4674f3fc24b27c1c6f391e05968f65cca7cc90e6496e67416617f155",
     "8764bf020379ab418a09c2cc39dc73967eb74dd7ea896003e0c16d3dedecd8b4",
     "a17829438ae9f7eb891885b6cabb5a9e80d011cb846f11c3c3c72156884240c9",
+    "9715aaa66998a01a308ad55948a5aab038b40c8bbcb3117e9d7609e6ef701b37",
+    "8e3b88aea9928cbdd4d541f87fe4755bcefab470e0c6e93c1f9c3f5c148598ab",
+    "f7ccbe6c229a418363c7d148a65399044e368ce630cb8fbe65e56c98c2c359b9",
 };
 
 pub fn frame(gpa: std.mem.Allocator, case: Case, out: *std.ArrayList(u8)) ![]const u8 {

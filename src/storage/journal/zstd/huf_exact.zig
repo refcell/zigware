@@ -590,6 +590,18 @@ fn min_literals(repeat: Repeat) usize {
     return min;
 }
 
+/// Whether `compress_literals` stores `src` raw when the block is suspected incompressible,
+/// decided without copying it: too few literals to compress, or the sampled histograms of
+/// `HUF_compress_internal` give up. False means it may compress them.
+pub fn suspect_literals_stay_raw(src: []const u8, prev: *const Tables) bool {
+    assert(src.len <= block_size_max);
+    if (src.len < min_literals(prev.repeat)) return true;
+    // `prefer_repeat` (at most 1 KiB of literals) is checked before the samples.
+    if (src.len < suspect_sample_size * suspect_sample_ratio) return false;
+    comptime assert(suspect_sample_size * suspect_sample_ratio > 1024);
+    return suspect_incompressible(src);
+}
+
 /// `ZSTD_compressLiterals` at the dfast strategy with literal compression enabled: the
 /// literals section of a block. `next` receives the tables the next block may reuse.
 pub fn compress_literals(

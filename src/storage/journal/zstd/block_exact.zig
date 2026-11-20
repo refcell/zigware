@@ -188,12 +188,22 @@ pub const Encoder = struct {
             &enc.next_rep,
         );
         const seqs = enc.sequences.items;
-        const lit_len = gather_literals(enc.literals(), src, start, end, seqs, last_literals);
-        const suspect = seqs.len == 0 or lit_len / seqs.len >= suspect_literal_ratio;
+        // Without sequences the literals are the block itself. Raw literals and the sequence
+        // count then outgrow the block, so when Huffman would not shrink them libzstd stores
+        // the block raw: decide that from the block, without copying it twice.
+        const block_literals = if (seqs.len == 0) src[start..end] else literals: {
+            const lit_len = gather_literals(enc.literals(), src, start, end, seqs, last_literals);
+            break :literals enc.literals()[0..lit_len];
+        };
+        if (seqs.len == 0) {
+            assert(last_literals == len);
+            if (huf.suspect_literals_stay_raw(block_literals, &enc.tables)) return 0;
+        }
+        const suspect = seqs.len == 0 or block_literals.len / seqs.len >= suspect_literal_ratio;
         const out = enc.scratch();
         const literals_len = huf.compress_literals(
             out,
-            enc.literals()[0..lit_len],
+            block_literals,
             &enc.tables,
             &enc.next_tables,
             suspect,
