@@ -136,7 +136,13 @@ fn race(
     const Outcome = union(enum) { attempt: anyerror!T, deadline: Io.Cancelable!void };
     var buffer: [2]Outcome = undefined;
     var select: Io.Select(Outcome) = .init(io, &buffer);
-    try select.concurrent(.attempt, attempt, args);
+    select.concurrent(.attempt, attempt, args) catch |err| {
+        // The attempt never ran, so the stream and sink (its last two arguments) are still ours.
+        var owned = args;
+        deinit_transport(&owned[owned.len - 2]);
+        deinit_transport(&owned[owned.len - 1]);
+        return err;
+    };
     select.concurrent(.deadline, wait_until, .{ io, deadline }) catch |err| {
         release(T, gpa, &select);
         return err;
@@ -162,6 +168,10 @@ fn race(
             }
         },
     }
+}
+
+fn deinit_transport(transport: anytype) void {
+    if (comptime @hasDecl(@TypeOf(transport.*), "deinit")) transport.deinit();
 }
 
 /// Cancels the attempt and returns its result.

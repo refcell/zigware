@@ -307,3 +307,30 @@ test "timeout cancels a pending admission" {
         try run_deterministic(cancels_pending_admission, .{cancel});
     }
 }
+
+/// An attempt that cannot start its tasks fails and still releases the connection it was
+/// given: the runner allows `max_tasks` live tasks, the root included.
+fn releases_without_tasks(io: Io, dialer: bool) !void {
+    var received: std.ArrayList(Parameters) = .empty;
+    defer received.deinit(gpa);
+    const opaque_upgrader: OpaqueUpgrader = .{ .outcome = .success, .received = &received };
+    const upgrader = Timeout(OpaqueUpgrader).init(opaque_upgrader, .fromSeconds(1));
+    var peer: Peer = undefined;
+    try testing.expectError(
+        error.ConcurrencyUnavailable,
+        attempt(io, upgrader, dialer, "timeout", 1, &peer),
+    );
+    try peer.expect_released();
+}
+
+test "timeout releases the connection when its tasks cannot start" {
+    // One task leaves no room for the attempt, two none for its deadline.
+    for ([_]u32{ 1, 2 }) |max_tasks| {
+        for ([_]bool{ false, true }) |dialer| {
+            const config: runtime.deterministic.Config = .{ .max_tasks = max_tasks };
+            var runner = try runtime.deterministic.Runner.init(gpa, config);
+            defer runner.deinit();
+            try (try runner.start(releases_without_tasks, .{ runner.io(), dialer }));
+        }
+    }
+}
