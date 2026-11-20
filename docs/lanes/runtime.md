@@ -244,6 +244,13 @@ time, files, and network: build on it rather than around it where it fits.
   io_uring path still writes chunk by chunk). The audit digest hashes a write's bytes, not
   its chunking, so no digest moved. journal::fixed_append items=100000, 5 alternating pairs at
   load 70-100: before 7.06-12.3 ms (median 9.11), after 6.29-6.59 ms (median 6.41).
+- commonware's `external` cargo feature is `Config.external: ?Io`, a real `Io` the runner
+  sleeps each cycle on and `pace` blocks on, so the runner never calls the OS itself. Rust
+  wakers can be called from any thread; zigware's runner is single-threaded, so in external
+  mode each iteration wakes every futex waiter whose word changed (an external thread sets an
+  `Io.Event` through the real `Io`). `pace(io, latency, event)` waits on an event rather than a
+  future: it sleeps `latency` of simulated time, then blocks the thread until the event is set.
+  Off by default, so no schedule or digest changes.
 - Shared reads are on by default, as commonware's page cache always has `page_fetches`. The
   waiting needs an `Io`, which `CacheRef.init` does not take (131 callers across lanes), so
   blobs report their backend's (`Blob.io`, forwarded by every storage wrapper) and
@@ -288,7 +295,7 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | File | Tests | Ported | Open | Not portable |
 | --- | --- | --- | --- | --- |
 | conformance.rs | 3 | 3 | 0 | 0 |
-| deterministic.rs | 50 | 38 | 0 | 12 |
+| deterministic.rs | 50 | 43 | 0 | 7 |
 | lib.rs | 59 | 50 | 0 | 9 |
 | mocks.rs | 20 | 19 | 0 | 1 |
 | network/audited.rs | 5 | 4 | 0 | 1 |
@@ -314,7 +321,7 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | utils/handle.rs | 19 | 10 | 0 | 9 |
 | utils/mod.rs | 3 | 0 | 0 | 3 |
 | utils/supervision.rs | 9 | 4 | 0 | 5 |
-| Total | 526 | 406 | 0 | 120 |
+| Total | 526 | 411 | 0 | 115 |
 
 Open (none are in runtime/src/telemetry/, the runtime-telemetry lane's directory):
 - [x] `deterministic.rs:1742` `test_logical_open_releases_retained_mutations`: unsynced fragments of
@@ -354,6 +361,10 @@ Open (none are in runtime/src/telemetry/, the runtime-telemetry lane's directory
   read_many_into reads each missing page once despite eviction
 - [x] `utils/buffer/paged/cache.rs:3361` `test_cache_at_high_offset`: caching two minimum-size pages
   just below u64::MAX
+- [x] `deterministic.rs` `test_external_realtime`, `test_external_simulated`,
+  `test_realtime_no_skip`, `test_external_realtime_variable`, `test_paced_future_moves_between_tasks`
+  (a paced wait in another task; Zig waits cannot move): `Config.external` and
+  `deterministic.pace`, in external_test.zig with real waits scaled down to milliseconds
 - [x] `utils/buffer/paged/cache.rs:2271` `test_read_many_into_joins_fetch_in_flight`,
   `:2296` `test_overlapping_reads_read_each_page_once`, `:2796` `test_failed_page_fails_its_readers`,
   `:2971` `test_each_page_routes_to_its_joiners_only`, `:3002` `test_many_reads_join_one_page`,
@@ -390,7 +401,7 @@ each checked with a planted bug;
 `test_replay_preserves_tail_during_partial_page_rewrite` was already in
 paged/partial_rewrite_test.zig (91149b1d). The rest stay: panic recovery or propagation, Rust
 future, waker, `Drop`, and borrow semantics, `IoBuf` chunk ownership, and features zigware does
-not have (the `external` mode, accept on the ring; shared in-flight page reads, the
+not have (accept on the ring; the `external` mode, shared in-flight page reads, the
 `recoverable_prefix_len` scan budget, slot hints, and a zero-copy flush in place of chained tip
 allocations have since landed).
 
@@ -398,12 +409,8 @@ Not portable:
 - `deterministic.rs` `test_retired_write_owner_releases_other_blob`,
   `test_sync_retirement_progresses_with_namespace_open`: write-owner `Drop` callbacks and `Arc` drop
   order (runtime.md: logical-open owner tests)
-- `deterministic.rs` `test_paced_future_moves_between_tasks`, `test_external_realtime`,
-  `test_external_realtime_variable`, `test_realtime_no_skip`: deterministic `external` feature
-  (real-time pacing); runtime.md: `external_*` not ported
-- `deterministic.rs` `test_recover_panic_handling`, `test_context_return`,
-  `test_external_simulated`: panic recovery across runners, a context outliving its runner, and the
-  `external` feature; `test_bad_start_time`: `start_time_ns` is a `u64`, so no time before the epoch
+- `deterministic.rs` `test_recover_panic_handling`, `test_context_return`: panic recovery across
+  runners and a context outliving its runner; `test_bad_start_time`: `start_time_ns` is a `u64`, so no time before the epoch
   exists. Their other `#[should_panic]` tests are death tests in `panic_test.zig`
 - `deterministic.rs` `test_borrowed_non_send_root`: compile-time check that the root needs no
   `Send`/`'static` bound

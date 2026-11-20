@@ -62,6 +62,13 @@ pub const Config = struct {
     /// Receives the events of `Context.tracer` (tracing's installed subscriber); none drops
     /// them unformatted.
     subscriber: ?telemetry.traces.Subscriber = null,
+    /// commonware's `external` feature, for tests of code that waits on processes outside the
+    /// runtime: a real `Io` (such as `std.Io.Threaded`'s). Each iteration then really sleeps
+    /// `cycle_ns` on it, idle time is never skipped, the runner never stalls, and a task whose
+    /// futex word another thread changed (an `Io.Event` set by an external thread) wakes on
+    /// the next iteration. `pace` needs it. Runs are no longer reproducible from the seed
+    /// alone. Never set it for code that can mock its external processes.
+    external: ?Io = null,
 
     pub fn validate(config: Config) void {
         assert(config.cycle_ns > 0 or config.timeout_ns == null);
@@ -224,6 +231,8 @@ const Task = struct {
     alarms_queued: u32,
     wake_reason: enum { notified, timeout, canceled },
     futex_address: usize,
+    /// The value `futex_address` held when the task waited (for `Config.external`).
+    futex_expected: u32,
     futex_node: std.DoublyLinkedList.Node,
     group_node: std.DoublyLinkedList.Node,
     all_node: std.DoublyLinkedList.Node,
@@ -279,6 +288,22 @@ const Alarm = struct {
 
 /// The deterministic runtime's context (see `context.zig`).
 pub const Context = context_mod.Context(network_mod.deterministic.Network);
+
+/// commonware's `Pacer::pace`: wait for `event`, which an external thread sets, as if it took
+/// exactly `latency` of simulated time. Sleeps `latency`, then, if `event` is still unset,
+/// blocks the runtime's thread until it is, so the result surfaces at the same simulated time
+/// however long the external work really took. `io` is the task's deterministic `Io`, built
+/// with `Config.external`.
+pub fn pace(io: Io, latency: Io.Duration, event: *Io.Event) Io.Cancelable!void {
+    assert(io.vtable == &Runner.vtable);
+    const runner = Runner.from(io.userdata);
+    const real = runner.config.external.?; // `pace` needs `Config.external`.
+    const target_ns = runner.time_ns +| Runner.clamp_ns(latency.nanoseconds);
+    try io.sleep(latency, .awake);
+    assert(runner.time_ns >= target_ns);
+    event.waitUncancelable(real);
+    assert(event.isSet());
+}
 
 /// Implementation of the deterministic runtime. One `Runner` may `start` several root tasks in
 /// sequence: simulated time, the RNG, and the auditor carry over, like recovering from
@@ -590,6 +615,7 @@ pub const Runner = struct {
             .alarms_queued = 0,
             .wake_reason = .notified,
             .futex_address = 0,
+            .futex_expected = 0,
             .futex_node = .{},
             .group_node = .{},
             .all_node = .{},
@@ -757,6 +783,10 @@ pub const Runner = struct {
             try runner.check_deadline();
             runner.run_batch(true);
             if (runner.root_finished) return;
+            // commonware's `external` feature sleeps each cycle so external processes progress.
+            if (runner.config.external) |real| {
+                real.sleep(.fromNanoseconds(runner.config.cycle_ns), .awake) catch {};
+            }
             runner.time_ns = std.math.add(u64, runner.time_ns, runner.config.cycle_ns) catch
                 @panic("deterministic: executor time overflowed");
             try runner.wake_until_progress();
@@ -805,8 +835,16 @@ pub const Runner = struct {
         }
     }
 
-    /// Fire timers until some task is ready, jumping over idle time.
+    /// Fire timers until some task is ready, jumping over idle time. With `Config.external`,
+    /// fire due timers and wake the tasks external threads woke, then continue: the passage of
+    /// time is progress.
     fn wake_until_progress(runner: *Runner) Error!void {
+        if (runner.config.external != null) {
+            try runner.check_deadline();
+            runner.fire_alarms();
+            runner.wake_external();
+            return;
+        }
         while (true) {
             if (runner.ready.items.len == 0) {
                 if (runner.alarms.peek()) |next| {
@@ -817,6 +855,21 @@ pub const Runner = struct {
             runner.fire_alarms();
             if (runner.ready.items.len != 0) return;
             if (runner.alarms.items.len == 0) return error.Stalled;
+        }
+    }
+
+    /// Wake every futex waiter whose word no longer holds the value it waited on: another
+    /// thread changed it (commonware's waker called from an external thread).
+    fn wake_external(runner: *Runner) void {
+        assert(runner.config.external != null);
+        var node = runner.futex_waiters.first;
+        while (node) |n| {
+            node = n.next;
+            const task: *Task = @alignCast(@fieldParentPtr("futex_node", n));
+            const word: *const u32 = @ptrFromInt(task.futex_address);
+            if (@atomicLoad(u32, word, .acquire) != task.futex_expected) {
+                runner.wake(task, .notified);
+            }
         }
     }
 
@@ -1133,6 +1186,7 @@ pub const Runner = struct {
         if (@atomicLoad(u32, ptr, .acquire) != expected) return;
         const task = runner.current.?;
         task.futex_address = @intFromPtr(ptr);
+        task.futex_expected = expected;
         runner.futex_waiters.append(&task.futex_node);
         if (runner.deadline_of(timeout)) |deadline_ns| runner.arm_alarm(task, deadline_ns);
         if (runner.block(true) == .canceled) {
@@ -1146,6 +1200,7 @@ pub const Runner = struct {
         if (@atomicLoad(u32, ptr, .acquire) != expected) return;
         const task = runner.current.?;
         task.futex_address = @intFromPtr(ptr);
+        task.futex_expected = expected;
         runner.futex_waiters.append(&task.futex_node);
         const reason = runner.block(false);
         assert(reason == .notified);
