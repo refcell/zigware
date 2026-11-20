@@ -75,6 +75,26 @@ fn hash_leaf(comptime H: type, position: u32, leaf: *const H.Digest) H.Digest {
     return H.hash(&[_][]const u8{ &prefix, &leaf.bytes });
 }
 
+/// The leaves of two positions at once, through the hasher's paired kernel.
+fn hash_leaf_pair(
+    comptime H: type,
+    first: Pending(H.Digest),
+    second: Pending(H.Digest),
+) [2]H.Digest {
+    const first_prefix = be32(first.position);
+    const second_prefix = be32(second.position);
+    return H.hash_pair(
+        &[_][]const u8{ &first_prefix, &first.leaf.bytes },
+        &[_][]const u8{ &second_prefix, &second.leaf.bytes },
+        {},
+    );
+}
+
+/// A leaf the builder has not hashed yet, waiting to be paired with the next one.
+fn Pending(comptime D: type) type {
+    return struct { position: u32, leaf: D };
+}
+
 fn hash_node(comptime H: type, left: *const H.Digest, right: *const H.Digest) H.Digest {
     return H.hash(&[_][]const u8{ &left.bytes, &right.bytes });
 }
@@ -104,8 +124,11 @@ pub fn Builder(comptime H: type) type {
     return struct {
         const Self = @This();
 
-        /// Position-hashed leaves added so far.
+        /// Position-hashed leaves added so far; the slot of `pending`, if any, is not hashed
+        /// yet.
         leaves: std.ArrayList(H.Digest) = .empty,
+        /// The last added leaf while its position is even: leaves are hashed two at a time.
+        pending: ?Pending(H.Digest) = null,
 
         /// A builder with room for `leaves` leaves.
         pub fn init(gpa: Allocator, leaves: usize) Allocator.Error!Self {
@@ -125,7 +148,19 @@ pub fn Builder(comptime H: type) type {
         pub fn add(self: *Self, gpa: Allocator, leaf: *const H.Digest) Allocator.Error!u32 {
             assert(self.leaves.items.len < std.math.maxInt(u32));
             const position: u32 = @intCast(self.leaves.items.len);
-            try self.leaves.append(gpa, hash_leaf(H, position, leaf));
+            const current: Pending(H.Digest) = .{ .position = position, .leaf = leaf.* };
+            try self.leaves.ensureUnusedCapacity(gpa, 1);
+            if (self.pending) |first| {
+                assert(first.position + 1 == position);
+                const hashed = hash_leaf_pair(H, first, current);
+                self.leaves.items[first.position] = hashed[0];
+                self.leaves.appendAssumeCapacity(hashed[1]);
+                self.pending = null;
+            } else {
+                // Its slot holds a placeholder until the next leaf, or `build`, hashes it.
+                self.leaves.appendAssumeCapacity(std.mem.zeroes(H.Digest));
+                self.pending = current;
+            }
             assert(self.leaves.items.len == @as(usize, position) + 1);
             return position;
         }
@@ -133,7 +168,7 @@ pub fn Builder(comptime H: type) type {
         /// Builds the tree from the leaves added so far. A tree without leaves holds one
         /// placeholder node, and no leaf of it is provable. The builder stays valid.
         pub fn build(self: *const Self, gpa: Allocator) Allocator.Error!Tree(H.Digest) {
-            return Tree(H.Digest).init(H, gpa, self.leaves.items);
+            return Tree(H.Digest).init_pending(H, gpa, self.leaves.items, self.pending);
         }
     };
 }
@@ -161,7 +196,18 @@ pub fn Tree(comptime D: type) type {
 
         /// Builds the tree over position-hashed `leaves` with hasher `H`.
         pub fn init(comptime H: type, gpa: Allocator, leaves: []const D) Allocator.Error!Self {
+            return init_pending(H, gpa, leaves, null);
+        }
+
+        /// `init` where the leaf of `pending` (the last) is still to be hashed.
+        fn init_pending(
+            comptime H: type,
+            gpa: Allocator,
+            leaves: []const D,
+            pending: ?Pending(D),
+        ) Allocator.Error!Self {
             comptime assert(H.Digest == D);
+            if (pending) |last| assert(last.position + 1 == leaves.len);
             assert(leaves.len < std.math.maxInt(u32));
             const width: u32 = @intCast(@max(leaves.len, 1));
             var self: Self = .{
@@ -184,6 +230,9 @@ pub fn Tree(comptime D: type) type {
                 self.nodes[0] = H.hash(&.{});
             } else {
                 @memcpy(self.nodes[0..leaves.len], leaves);
+                if (pending) |last| {
+                    self.nodes[last.position] = hash_leaf(H, last.position, &last.leaf);
+                }
             }
             for (1..self.levels) |depth| {
                 const above = self.nodes[self.starts[depth]..self.starts[depth + 1]];
