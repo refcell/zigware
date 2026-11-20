@@ -16,6 +16,7 @@ test {
     _ = @import("batch_test.zig");
     _ = @import("bounded_test.zig");
     _ = @import("conformance_test.zig");
+    _ = @import("storage_conformance_test.zig");
     _ = @import("db_test.zig");
     _ = @import("fuzz_test.zig");
     _ = @import("prune_test.zig");

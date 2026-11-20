@@ -20,4 +20,5 @@ test {
     _ = @import("variable_test.zig");
     _ = @import("fuzz_test.zig");
     _ = @import("conformance_test.zig");
+    _ = @import("storage_conformance_test.zig");
 }

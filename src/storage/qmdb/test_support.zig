@@ -45,6 +45,49 @@ pub fn verify_codec(comptime T: type, type_name: []const u8) !void {
     );
 }
 
+/// The partitions of commonware's storage-audit workloads, `{name}-{seed}-{kind}` (its
+/// `format!("{name}-{seed}")` suffix) for the Merkle journal (`mj`), Merkle metadata (`mm`),
+/// and log (`log`).
+pub const AuditPartitions = struct {
+    buffers: [3][96]u8 = undefined,
+    journal: []const u8 = "",
+    metadata: []const u8 = "",
+    log: []const u8 = "",
+
+    pub fn init(self: *AuditPartitions, name: []const u8, seed: u64) !void {
+        const kinds = [_][]const u8{ "mj", "mm", "log" };
+        var names: [3][]const u8 = undefined;
+        for (kinds, &self.buffers, &names) |kind, *buffer, *out| {
+            out.* = try std.fmt.bufPrint(buffer, "{s}-{d}-{s}", .{ name, seed, kind });
+        }
+        self.journal = names[0];
+        self.metadata = names[1];
+        self.log = names[2];
+        std.debug.assert(self.log.len > name.len);
+    }
+};
+
+/// Commonware's `StorageConformance<W>`: the memory storage's audit after `Workload.run(gpa,
+/// storage, seed)`.
+pub fn StorageAudit(comptime Workload: type) type {
+    return struct {
+        pub fn commit(gpa: Allocator, seed: u64) ![]u8 {
+            var memory = runtime.storage.memory.Storage.init(gpa);
+            defer memory.deinit();
+            try Workload.run(gpa, memory.storage(), seed);
+            const audit = memory.audit();
+            return gpa.dupe(u8, &audit);
+        }
+    };
+}
+
+/// Checks `StorageAudit(Workload)` against commonware's `StorageConformance<{name}>` hash.
+pub fn verify_storage(comptime Workload: type, comptime name: []const u8, cases: u64) !void {
+    const full = "commonware_storage::qmdb::conformance::tests::StorageConformance<" ++ name ++ ">";
+    const gpa = std.testing.allocator;
+    try conformance.verify(StorageAudit(Workload), gpa, full, cases, conformance_file);
+}
+
 /// Commonware's conformance log configuration for the database log type `LogCfg`: the fixed
 /// journal with 7 items per blob, or the variable journal with 7 items per section, no
 /// compression, and a codec configuration bounding byte values to 10000 bytes (commonware's

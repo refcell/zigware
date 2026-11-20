@@ -33,32 +33,38 @@ fn ImmutableConformance(comptime Db: type) type {
             defer harness.deinit();
             var db = try harness.open_db(Db, null);
             errdefer db.deinit();
-            const n = seed % 30 + 5;
-            const prefix: u8 = @intCast(seed % 256);
-            const keys = try gpa.alloc(support.Digest, 2 * n);
-            defer gpa.free(keys);
-            const values = try gpa.alloc(support.Digest, 2 * n);
-            defer gpa.free(values);
-            for (0..n) |i| {
-                keys[i] = to_digest(i);
-                values[i] = to_val(i, 1);
-            }
-            try apply_sets(&db, keys[0..n], values[0..n]);
-            for (n..2 * n) |i| {
-                keys[i] = to_digest(i);
-                values[i] = to_val(i, 2);
-            }
-            try apply_sets(&db, keys[n .. 2 * n], values[n .. 2 * n]);
-            for (0..n / 2) |i| {
-                keys[i] = support.colliding_digest(prefix, 10000 + i);
-                values[i] = to_val(i, 3);
-            }
-            try apply_sets(&db, keys[0 .. n / 2], values[0 .. n / 2]);
+            try workload(gpa, &db, seed);
             const root = db.root();
             try db.destroy();
             return gpa.dupe(u8, &root.bytes);
         }
     };
+}
+
+/// Commonware's `immutable_root!` workload for `seed`: n keys, n more, then n / 2 keys sharing
+/// a translator bucket, each set in one batch at the floor.
+pub fn workload(gpa: Allocator, db: anytype, seed: u64) !void {
+    const n = seed % 30 + 5;
+    const prefix: u8 = @intCast(seed % 256);
+    const keys = try gpa.alloc(support.Digest, 2 * n);
+    defer gpa.free(keys);
+    const values = try gpa.alloc(support.Digest, 2 * n);
+    defer gpa.free(values);
+    for (0..n) |i| {
+        keys[i] = to_digest(i);
+        values[i] = to_val(i, 1);
+    }
+    try apply_sets(db, keys[0..n], values[0..n]);
+    for (n..2 * n) |i| {
+        keys[i] = to_digest(i);
+        values[i] = to_val(i, 2);
+    }
+    try apply_sets(db, keys[n .. 2 * n], values[n .. 2 * n]);
+    for (0..n / 2) |i| {
+        keys[i] = support.colliding_digest(prefix, 10000 + i);
+        values[i] = to_val(i, 3);
+    }
+    try apply_sets(db, keys[0 .. n / 2], values[0 .. n / 2]);
 }
 
 const name_prefix = "commonware_storage::qmdb::conformance::tests::";

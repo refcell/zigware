@@ -13,4 +13,5 @@ test {
     _ = @import("fuzz_test.zig");
     _ = @import("policy_test.zig");
     _ = @import("start_sync_test.zig");
+    _ = @import("storage_conformance_test.zig");
 }

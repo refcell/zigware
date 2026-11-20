@@ -26,7 +26,7 @@ fn Encoding(comptime is_variable: bool) type {
     return if (is_variable) value.Variable(Bytes) else value.Fixed(U64);
 }
 
-fn Db(comptime F: type, comptime is_variable: bool) type {
+pub fn Db(comptime F: type, comptime is_variable: bool) type {
     const E = Encoding(is_variable);
     const Op = keyless.Operation(F, E);
     const J = if (is_variable) variable.Journal(Op) else fixed.Journal(Op);
@@ -56,6 +56,14 @@ fn apply_appends(comptime F: type, comptime V: bool, db: *Db(F, V), first: u64, 
     };
     defer merkleized.release();
     try db.apply_batch(merkleized);
+}
+
+/// Commonware's `keyless_root!` workload for `seed`: n values, n more, then n / 2 from `!seed`.
+pub fn workload(comptime F: type, comptime V: bool, db: *Db(F, V), seed: u64) !void {
+    const n = seed % 30 + 5;
+    try apply_appends(F, V, db, seed, n);
+    try apply_appends(F, V, db, seed +% n, n);
+    try apply_appends(F, V, db, ~seed, n / 2);
 }
 
 fn KeylessConformance(comptime F: type, comptime V: bool) type {
@@ -95,10 +103,7 @@ fn KeylessConformance(comptime F: type, comptime V: bool) type {
             const scope = metrics.Scope.init(&registry).child("db");
             var db = try Db(F, V).init(gpa, storage.interface(), scope, cfg, null);
             errdefer db.deinit();
-            const n = seed % 30 + 5;
-            try apply_appends(F, V, &db, seed, n);
-            try apply_appends(F, V, &db, seed +% n, n);
-            try apply_appends(F, V, &db, ~seed, n / 2);
+            try workload(F, V, &db, seed);
             const root = db.root();
             try db.destroy();
             return gpa.dupe(u8, &root.bytes);
