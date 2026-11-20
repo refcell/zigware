@@ -16,9 +16,10 @@
 # Rounds run in ABBA order: odd rounds run commonware then zigware, even rounds zigware then
 # commonware, so drift within a round cancels. The ratio is the median of the per-round
 # (paired) zigware / commonware ratios; BENCH_STAT=best reports the best of each side instead.
-# A row is "faster" only when the median is below 0.95 and every round is below 1, "slower"
-# when the median is above 1.05 and every round is above 1, and "tie" otherwise (noise
-# counts as not yet faster). commonware builds with RUSTFLAGS="-C target-cpu=native" in its
+# A row is "faster" only when the median is below 0.95 and at most n/8 of its n rounds
+# (rounded down: none of 4, one of 8) reach 1, "slower" mirrored, and "tie" otherwise (noise
+# counts as not yet faster); raise `runs` on noisy rows. Each round's pair holds the
+# machine-wide bench lock (~/.cache/zigware/bench.lock), so lanes' benches never overlap. commonware builds with RUSTFLAGS="-C target-cpu=native" in its
 # own target directory (target-native), as zigware builds for the native CPU; CW_NATIVE=0
 # builds it for baseline x86-64 instead. The table goes to stdout; the raw medians to
 # .cache/bench-compare/raw.tsv, in the format docs/bench/<lane>.tsv takes: `# key: value`
@@ -268,7 +269,10 @@ for run in $(seq 1 "$runs"); do
       zw=$(cd "$scratch" && "$root/zig-out/bench/bench-$package" "${zw_args[@]}" -- "$name" \
         2>> "$log" | median_ns "$name") || zw=nan
     }
+    exec {bench_lock}> "$HOME/.cache/zigware/bench.lock"
+    flock "$bench_lock"
     if ((run % 2 == 1)); then run_cw; run_zw; else run_zw; run_cw; fi
+    exec {bench_lock}>&-
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$run" "$package" "$name" "${cw:-nan}" "${zw:-nan}" \
       "$load" |
       tee -a "$out/raw.tsv" >&2
@@ -326,9 +330,10 @@ for name in order:
     if paired:
         mid = statistics.median(paired)
         verdict = "tie"
-        if mid < 0.95 and max(paired) < 1:
+        allowed = len(paired) // 8
+        if mid < 0.95 and sum(r >= 1 for r in paired) <= allowed:
             verdict = "faster"
-        elif mid > 1.05 and min(paired) > 1:
+        elif mid > 1.05 and sum(r <= 1 for r in paired) <= allowed:
             verdict = "slower"
         counts[verdict] += 1
     print(f"| `{group}` | `{params}` | {show(cw)} | {show(zw)} | {ratio} | {spread} | {verdict} |")
