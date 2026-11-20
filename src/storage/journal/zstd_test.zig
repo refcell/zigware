@@ -1,16 +1,17 @@
 //! Tests of the zstd compressor: ratios on sample inputs, and a round-trip fuzz that decodes
-//! every frame with `std.compress.zstd`.
+//! every frame with both zigware's decoder and `std.compress.zstd`, an independent one.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
 const codec = @import("codec");
 const zstd = @import("zstd.zig");
+const std_decompress = @import("zstd/decode_test.zig").std_decompress;
 
 const gpa = testing.allocator;
 const corpus = zstd.corpus;
 
-/// Compresses `data` and checks that `std.compress.zstd` restores it; returns the frame size.
+/// Compresses `data` and checks that both decoders restore it; returns the frame size.
 fn round_trip(data: []const u8, mode: zstd.Mode) !usize {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(gpa);
@@ -20,6 +21,9 @@ fn round_trip(data: []const u8, mode: zstd.Mode) !usize {
     const decoded = try zstd.decompress(gpa, frame);
     defer gpa.free(decoded);
     try testing.expectEqualSlices(u8, data, decoded);
+    const independent = (try std_decompress(frame)).?;
+    defer gpa.free(independent);
+    try testing.expectEqualSlices(u8, data, independent);
     return frame.len;
 }
 

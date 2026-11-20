@@ -252,8 +252,12 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 ## Decisions
 - Errors: `journal.Error` is an error set without payloads (section, offset, sizes);
   codec failures keep their codec error instead of being wrapped in `Error::Codec`.
-- zstd: no C libzstd. Decompression uses `std.compress.zstd` and reads every libzstd frame
-  (checked with libzstd 1.5.7 vectors). Compression (storage-merkle's, 00abad1) writes
+- zstd: no C libzstd. Decompression (`zstd/decode.zig`) reads every single libzstd frame
+  with libzstd's checks (exact bitstream ends, offsets within the output, dictionary IDs,
+  checksums), regenerating literals into the output's tail as libzstd does. It replaced
+  `std.compress.zstd`, which copies matches a byte at a time (0.6 GB/s on 16 KiB records
+  against several GB/s for libzstd); std stays as the independent decoder its tests and
+  fuzzers compare against (checked with libzstd 1.5.7 vectors). Compression (storage-merkle's, 00abad1) writes
   exactly libzstd 1.5.7's level-3 frames, checked by the compressed journal conformance
   hashes; the configured level is not read, since commonware's workloads use only 3. A frame declaring more than
   `(len / 3 + 1) * 128 KiB` of content is rejected before allocating.

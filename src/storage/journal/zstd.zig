@@ -3,7 +3,8 @@
 //! commonware compresses journal payloads with libzstd (`zstd::bulk`), one independent frame
 //! per item that declares its decompressed size. zigware has no C dependencies, so:
 //!
-//! - decompression uses `std.compress.zstd` and reads any frame libzstd writes;
+//! - decompression (`zstd/decode.zig`) reads any single frame libzstd writes, with libzstd's
+//!   checks; `std.compress.zstd` decodes the same frames but copies matches a byte at a time;
 //! - compression (`compress_into`) writes exactly the frame `zstd::bulk::compress(.., 3)`
 //!   writes with libzstd 1.5.7, the version commonware pins: its frame header, double-fast
 //!   match finder, pre-splitter, Huffman literals, and FSE sequences (`zstd/*_exact.zig`), so
@@ -15,6 +16,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const block = @import("zstd/block.zig");
 const block_exact = @import("zstd/block_exact.zig");
+const decode = @import("zstd/decode.zig");
 const params = @import("zstd/params.zig");
 
 /// Sample inputs for tests and benchmarks.
@@ -217,23 +219,12 @@ pub fn decompress(gpa: Allocator, compressed: []const u8) DecompressError![]u8 {
     const blocks_max = compressed.len / 3 + 1;
     if (declared > blocks_max * block_size_max) return error.DecompressionFailed;
     const size: usize = @intCast(declared);
-
-    var out = try std.Io.Writer.Allocating.initCapacity(gpa, size);
-    defer out.deinit();
-    var input: std.Io.Reader = .fixed(compressed);
-    var stream: std.compress.zstd.Decompress = .init(&input, &.{}, .{
-        .window_len = @intCast(@min(std.math.maxInt(u32) / 2, @max(size, block_size_max))),
-    });
-    _ = stream.reader.streamRemaining(&out.writer) catch |err| switch (err) {
-        error.WriteFailed => return error.OutOfMemory,
-        error.ReadFailed => return error.DecompressionFailed,
-    };
+    const out = try gpa.alloc(u8, size);
+    errdefer gpa.free(out);
     // Exactly one frame, holding exactly the declared bytes.
-    if (out.written().len != size) return error.DecompressionFailed;
-    if (input.bufferedLen() != 0) return error.DecompressionFailed;
-    const result = try out.toOwnedSlice();
-    assert(result.len == size);
-    return result;
+    try decode.decode_frame(compressed, out);
+    assert(out.len == size);
+    return out;
 }
 
 const testing = std.testing;
@@ -244,6 +235,7 @@ test {
     _ = @import("zstd/huffman.zig");
     _ = @import("zstd/match.zig");
     _ = @import("zstd/level3.zig");
+    _ = @import("zstd/decode_test.zig");
     _ = @import("zstd_test.zig");
     _ = block;
 }
