@@ -1,7 +1,8 @@
 name: nightly
 
 # The heaviest tests (-Dslow-tests) in ReleaseSafe: golden DKG rounds and the largest
-# conformance hashes, which take minutes each and stay out of the per-push ci.yml jobs.
+# conformance hashes, which take minutes each and stay out of the per-push ci.yml jobs. Also
+# a fuzz soak of every package (the soak-* jobs), with a fresh -Dfuzz-seed each run.
 on:
   schedule:
     - cron: "17 6 * * *"
@@ -35,6 +36,10 @@ jobs:
         # minutes, mostly skip_heavy tests (golden DKG rounds, 2 to 3 minutes each), which
         # three cryptography jobs split with -Dheavy-shard. The rest job runs test-others,
         # every other package: with cryptography's first shard it took 62 minutes on arm.
+        # The soak-* jobs run the same four package sets without -Dslow-tests, at
+        # -Dfuzz-soak=10 with the run number as -Dfuzz-seed, so the seeded loops
+        # (runtime.deterministic.soak, minifuzz, fuzz_soak counts) see fresh seeds each night;
+        # a failing round prints the -Dfuzz-seed that replays it.
         run: |
           jobs='[
             {"job": "consensus-marshal", "steps": "test-consensus", "group": "marshal"},
@@ -59,7 +64,11 @@ jobs:
             {"job": "rest", "steps": "test-others"},
             {"job": "cryptography-0", "steps": "test-cryptography", "heavy_shard": 0},
             {"job": "cryptography-1", "steps": "test-cryptography", "heavy_shard": 1},
-            {"job": "cryptography-2", "steps": "test-cryptography", "heavy_shard": 2}
+            {"job": "cryptography-2", "steps": "test-cryptography", "heavy_shard": 2},
+            {"job": "soak-consensus", "steps": "test-consensus", "soak": 10},
+            {"job": "soak-glue", "steps": "test-glue", "soak": 10},
+            {"job": "soak-cryptography", "steps": "test-cryptography", "soak": 10},
+            {"job": "soak-others", "steps": "test-others", "soak": 10}
           ]'
           include=$(echo "$jobs" | jq -c --arg only "$ONLY" '
             [.[] | select($only == "" or .job == $only)
@@ -92,8 +101,13 @@ jobs:
           STEPS: ${{ matrix.steps }}
           GROUP: ${{ matrix.group }}
           SHARD: ${{ matrix.heavy_shard || 0 }}
+          SOAK: ${{ matrix.soak }}
         run: |
           set -- -Doptimize=ReleaseSafe -Dslow-tests -Dheavy-shards=3 -Dheavy-shard="$SHARD"
+          if [ -n "$SOAK" ]; then
+            set -- -Doptimize=ReleaseSafe -Dfuzz-soak="$SOAK" -Dfuzz-soak-budget-s=30 \
+              -Dfuzz-seed="$GITHUB_RUN_NUMBER"
+          fi
           if [ -n "$FILTER" ]; then
             set -- "$@" -Dtest-filter="$FILTER"
           elif [ -n "$GROUP" ]; then
