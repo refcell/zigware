@@ -130,6 +130,22 @@ pub fn mul_gls(point: G2, scalar: u256) G2 {
     return result;
 }
 
+/// The GLS split of one MSM term: k mod r = sum d_i |x|^i with four digits below
+/// 2^64, and [|x|^i] Q = (-psi)^i (Q), so [k] Q = sum [d_i] (-psi)^i (Q). Public scalars.
+/// Precondition: `point` is in the order-r subgroup (psi acts as [x] only there).
+pub fn gls_split(point: Affine, scalar: u256, points: *[4]Affine, scalars: *[4]u256) void {
+    assert(!point.infinity);
+    var k = if (scalar < fields.r) scalar else scalar % fields.r;
+    for (scalars) |*digit| {
+        const high = k / x_abs;
+        digit.* = k - high * x_abs;
+        k = high;
+    }
+    assert(k == 0);
+    points[0] = point;
+    for (1..4) |power| points[power] = psi_affine(points[power - 1]).neg();
+}
+
 /// RFC 9380 clear_cofactor_bls12381_g2 (multiplication by h_eff).
 pub fn clear_cofactor(point: G2) G2 {
     const t1 = mul_by_x(point);

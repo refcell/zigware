@@ -59,14 +59,79 @@ pub fn msm(comptime C: type, points: []const C.Affine, scalars: []const u256) C 
     if (points.len == 0) return C.identity;
     if (points.len == 1) return single_mul(C, points[0], scalars[0]);
     if (points.len <= straus_points_max(C)) return msm_straus(C, points, scalars);
-    if (C == g1.G1 and points.len >= batch_affine_points_min) {
-        return msm_batch_affine(C, points, scalars);
+    if (points.len <= chunk_points_max) return msm_split(C, points, scalars);
+    return pippenger(C, points, scalars, window_bits(C, points.len), scalar_bits);
+}
+
+/// Endomorphism images per point: GLV's two for G1, GLS's four for G2.
+fn split_parts(comptime C: type) comptime_int {
+    return if (C == g1.G1) 2 else 4;
+}
+
+/// Splits every term with the curve's endomorphism (GLV for G1, GLS for G2) into terms
+/// with 128- or 64-bit scalars, so Pippenger runs a half or a quarter of the windows over
+/// two or four times the points, as blst does. Inputs are in the order-r subgroup.
+fn msm_split(comptime C: type, points: []const C.Affine, scalars: []const u256) C {
+    assert(points.len == scalars.len and points.len <= chunk_points_max);
+    const parts = comptime split_parts(C);
+    const nbits = scalar_bits / parts;
+    var split_points: [chunk_points_max * parts]C.Affine = undefined;
+    var split_scalars: [chunk_points_max * parts]u256 = undefined;
+    var count: usize = 0;
+    for (points, scalars) |point, scalar| {
+        if (point.infinity) continue;
+        const out_points = split_points[count..][0..parts];
+        const out_scalars = split_scalars[count..][0..parts];
+        if (C == g1.G1) {
+            g1.glv_split(point, scalar, out_points, out_scalars);
+        } else {
+            g2.gls_split(point, scalar, out_points, out_scalars);
+        }
+        count += parts;
     }
-    const bits = window_bits(C, points.len);
+    if (count == 0) return C.identity;
+    assert(count % parts == 0);
+    const bits = split_window_bits(C, count, nbits);
+    return pippenger(C, split_points[0..count], split_scalars[0..count], bits, nbits);
+}
+
+/// The window width with the fewest bucket additions for `count` scalars of `nbits` bits:
+/// each window adds every point into a bucket and folds 2^(c-1) buckets at two additions.
+fn split_window_bits(comptime C: type, count: usize, nbits: u32) u32 {
+    assert(count > 0 and nbits > 0);
+    var best: u32 = window_bits_min;
+    var best_cost: u64 = std.math.maxInt(u64);
+    var bits: u32 = window_bits_min;
+    while (bits <= window_bits_max(C)) : (bits += 1) {
+        const windows: u64 = nbits / bits + 1;
+        const cost = windows * (count + (@as(u64, 1) << @intCast(bits)));
+        if (cost < best_cost) {
+            best = bits;
+            best_cost = cost;
+        }
+    }
+    assert(best >= window_bits_min and best <= window_bits_max(C));
+    return best;
+}
+
+/// Pippenger over scalars below 2^nbits with `bits`-wide windows; G1 counts from
+/// `batch_affine_points_min` share inversions across bucket additions.
+fn pippenger(
+    comptime C: type,
+    points: []const C.Affine,
+    scalars: []const u256,
+    bits: u32,
+    nbits: u32,
+) C {
+    assert(points.len == scalars.len and points.len > 0);
+    assert(nbits <= scalar_bits);
+    if (C == g1.G1 and points.len >= batch_affine_points_min) {
+        return msm_batch_affine(C, points, scalars, bits, nbits);
+    }
     const bucket_count = @as(usize, 1) << @intCast(bits - 1);
     var buckets: [1 << (window_bits_max(C) - 1)]C = undefined;
     var result = C.identity;
-    var window = window_count_for(bits);
+    var window = nbits / bits + 1;
     while (window > 0) {
         window -= 1;
         if (!result.is_identity()) {
@@ -218,13 +283,19 @@ fn BatchAffine(comptime C: type) type {
     };
 }
 
-fn msm_batch_affine(comptime C: type, points: []const C.Affine, scalars: []const u256) C {
+fn msm_batch_affine(
+    comptime C: type,
+    points: []const C.Affine,
+    scalars: []const u256,
+    bits: u32,
+    nbits: u32,
+) C {
     assert(points.len == scalars.len and points.len >= batch_affine_points_min);
-    const bits = window_bits(C, points.len);
+    assert(bits >= window_bits_min and bits <= window_bits_max(C));
     const bucket_count = @as(usize, 1) << @intCast(bits - 1);
     var state: BatchAffine(C) = .{};
     var result = C.identity;
-    var window = window_count_for(bits);
+    var window = nbits / bits + 1;
     while (window > 0) {
         window -= 1;
         if (!result.is_identity()) {
@@ -507,6 +578,7 @@ const Draws = @import("codec").fuzz.Draws;
 const Prng = @import("prng.zig").Prng;
 const g1 = @import("g1.zig");
 const g2 = @import("g2.zig");
+const fields = @import("fields.zig");
 
 test "msm: signed recoding reconstructs the scalar" {
     var prng = Prng.init(0x4d534d);
@@ -564,6 +636,20 @@ test "msm: G2 matches the sum of scalar multiplications" {
     for ([_]usize{ 2, 7, 16, 17 }, 0..) |count, seed| {
         try check_msm(g2.G2, g2.generator, count, seed, max_scalar);
     }
+}
+
+test "msm: the endomorphism split matches across window widths" {
+    // 33..256 G1 and 17..256 G2 points split; 256 split G1 points reach batch-affine, and
+    // full-width scalars (above r) exercise the reduction before the split.
+    for ([_]usize{ 33, 67, 128, 256 }, 0..) |count, seed| {
+        try check_msm(g1.G1, g1.generator, count, 40 + seed, max_scalar);
+    }
+    for ([_]usize{ 17, 67 }, 0..) |count, seed| {
+        try check_msm(g2.G2, g2.generator, count, 50 + seed, max_scalar);
+    }
+    // Scalars masked below r, and tiny scalars with many cancellations.
+    try check_msm(g1.G1, g1.generator, 40, 60, fields.r - 1);
+    try check_msm(g2.G2, g2.generator, 20, 61, 3);
 }
 
 test "msm: many points with a wide window" {

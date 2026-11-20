@@ -131,6 +131,18 @@ pub fn mul_glv(point: G1, scalar: u256) G1 {
     return result;
 }
 
+/// The GLV split of one MSM term: [k] P = [k1] P + [k2] (-phi(P)) with k mod r =
+/// k1 + k2 x^2, so both scalars are below 2^128. Public scalars only.
+/// Precondition: `point` is in the order-r subgroup (phi acts as -x^2 only there).
+pub fn glv_split(point: Affine, scalar: u256, points: *[2]Affine, scalars: *[2]u256) void {
+    assert(!point.infinity);
+    const k = if (scalar < fields.r) scalar else scalar % fields.r;
+    const high = k / x_squared;
+    scalars.* = .{ k - high * x_squared, high };
+    assert(scalars[0] < x_squared and scalars[1] <= std.math.maxInt(u128));
+    points.* = .{ point, .{ .x = point.x.mul(beta), .y = point.y.neg(), .infinity = false } };
+}
+
 /// Maps a curve point into G1: multiplication by h_eff = 1 - x = 1 + |x|.
 pub fn clear_cofactor(point: G1) G1 {
     const result = point.add(point.mul_u64(x_abs));
