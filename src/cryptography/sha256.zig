@@ -63,7 +63,7 @@ pub const Core = struct {
         if (comptime !blocks.available) return stream(parts, out);
         if (total > short_max) {
             // One long part (`hash_message`) skips the streaming buffer and its copies.
-            if (parts.len == 1) return blocks.digest_message(parts[0], out);
+            if (parts.len == 1) return blocks.digest_messages(1, .{parts[0]}, .{out});
             return stream(parts, out);
         }
         if (shape_of(parts)) |shape| switch (shape) {
@@ -121,7 +121,12 @@ pub const Core = struct {
         for (right) |part| totals[1] +|= part.len;
         const short = totals[0] <= short_max and totals[1] <= short_max;
         if (comptime !blocks.available) return separate(left, right, out);
-        if (!short) return separate(left, right, out);
+        if (!short) {
+            // Two one-part messages of one length (`hash_many`'s short runs) interleave.
+            const single = left.len == 1 and right.len == 1;
+            if (!single or totals[0] != totals[1]) return separate(left, right, out);
+            return blocks.digest_messages(2, .{ left[0], right[0] }, .{ &out[0], &out[1] });
+        }
         const shape_left = shape_of(left);
         if (shape_left != null and shape_left == shape_of(right)) switch (shape_left.?) {
             inline else => |s| return blocks.digest_shape(2, s, .{ left, right }, .{
@@ -221,6 +226,14 @@ test "sha256 block runs match std across lengths and split points" {
             StdSha256.hash(data[1..][0..len], &shifted, .{});
             const got = Sha256.hash(&.{data[1..][0..len]});
             try testing.expectEqualSlices(u8, &shifted, &got.bytes);
+            // A pair of one length interleaves; one of two lengths hashes each alone.
+            const seq = parallel.sequential;
+            const pair = Sha256.hash_pair(&.{data[0..len]}, &.{data[1..][0..len]}, seq);
+            try testing.expectEqualSlices(u8, &expected, &pair[0].bytes);
+            try testing.expectEqualSlices(u8, &shifted, &pair[1].bytes);
+            const uneven = Sha256.hash_pair(&.{data[1..][0..len]}, &.{data[0 .. len + 1]}, seq);
+            try testing.expectEqualSlices(u8, &shifted, &uneven[0].bytes);
+            try testing.expect(uneven[1].eql(streamed(&.{data[0 .. len + 1]})));
         }
         // Unaligned starts, splits inside and on block boundaries, and empty parts.
         const a = prng.random().uintAtMost(usize, len);

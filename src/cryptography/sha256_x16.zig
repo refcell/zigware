@@ -19,8 +19,11 @@ pub const supported = builtin.cpu.arch == .x86_64 and
     std.Target.x86.featureSetHas(builtin.cpu.features, .avx512f);
 const sha_ni = builtin.cpu.arch == .x86_64 and
     std.Target.x86.featureSetHas(builtin.cpu.features, .sha);
-/// The fewest equal-length messages the kernel hashes; shorter runs hash one at a time.
-pub const minimum_batch_len: usize = if (sha_ni) 7 else 2;
+/// The fewest equal-length messages the kernel hashes; shorter runs hash in SHA-NI pairs.
+/// commonware's is 7, against one SHA-NI message at a time; a call costs all 16 lanes, and
+/// against interleaved pairs (64 B: 37 ns a message, 4 KiB: 1.26 us) the kernel (27 ns,
+/// 0.75 us a lane) breaks even at 9 to 11 messages here.
+pub const minimum_batch_len: usize = if (sha_ni) 10 else 2;
 /// Messages per batch unit `hash_many` hands the strategy (commonware's `lanes`): whole kernel
 /// calls without SHA-NI, where idle lanes cost as much as busy ones; one with SHA-NI, where a
 /// share too small for the kernel hashes on SHA-NI instead.

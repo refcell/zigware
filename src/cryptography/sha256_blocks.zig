@@ -64,24 +64,34 @@ pub fn digest_n(comptime n: usize, inputs: [n][]const u8, outs: [n]*[32]u8) void
     store_digests(n, x, y, outs);
 }
 
-/// The SHA-256 digest of `message`, of any length, with the state kept in registers from the
-/// IV to the digest bytes: the whole blocks compress straight from `message`, then the tail is
-/// padded on the stack (the streaming state's buffer and its copies are skipped).
-pub fn digest_message(message: []const u8, out: *[32]u8) void {
+/// The SHA-256 digests of `messages`, of one length (any), with the states kept in registers
+/// from the IV to the digest bytes: the whole blocks compress straight from the messages, then
+/// the tails are padded on the stack (the streaming state's buffer and its copies are
+/// skipped). Two messages interleave, so each fills the other's SHA instruction latency.
+pub fn digest_messages(comptime n: usize, messages: [n][]const u8, outs: [n]*[32]u8) void {
     comptime assert(available);
-    const whole = message.len - message.len % 64;
-    var x: [1]V4u32 = .{iv_x};
-    var y: [1]V4u32 = .{iv_y};
-    blocks_n(1, &x, &y, .{message[0..whole]});
-    const rest = message[whole..];
-    assert(rest.len < 64);
-    var padded: [128]u8 align(16) = @splat(0);
-    @memcpy(padded[0..rest.len], rest);
-    padded[rest.len] = 0x80;
-    const len: usize = if (rest.len + 9 <= 64) 64 else 128;
-    std.mem.writeInt(u64, padded[len - 8 ..][0..8], @as(u64, message.len) * 8, .big);
-    blocks_n(1, &x, &y, .{padded[0..len]});
-    store_digests(1, x, y, .{out});
+    comptime assert(n == 1 or n == 2);
+    const len = messages[0].len;
+    for (messages) |message| assert(message.len == len);
+    const whole = len - len % 64;
+    var x: [n]V4u32 = @splat(iv_x);
+    var y: [n]V4u32 = @splat(iv_y);
+    var heads: [n][]const u8 = undefined;
+    inline for (0..n) |j| heads[j] = messages[j][0..whole];
+    blocks_n(n, &x, &y, heads);
+    const rest = len - whole;
+    assert(rest < 64);
+    const padded_len: usize = if (rest + 9 <= 64) 64 else 128;
+    var padded: [n][128]u8 align(16) = @splat(@splat(0));
+    var tails: [n][]const u8 = undefined;
+    inline for (0..n) |j| {
+        @memcpy(padded[j][0..rest], messages[j][whole..]);
+        padded[j][rest] = 0x80;
+        std.mem.writeInt(u64, padded[j][padded_len - 8 ..][0..8], @as(u64, len) * 8, .big);
+        tails[j] = padded[j][0..padded_len];
+    }
+    blocks_n(n, &x, &y, tails);
+    store_digests(n, x, y, outs);
 }
 
 /// The Merkle shapes whose words load straight into registers, skipping the padded copy on

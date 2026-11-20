@@ -222,7 +222,16 @@ fn hash_runs(
             messages[end].len == len) end += 1;
         const count = end - start;
         if (count < Kernel.minimum_batch_len) {
-            hash_each(H, messages[start..end], digests[start..end]);
+            // Pairs of the run hash together, where `H.hash_pair` interleaves them (SHA-NI).
+            var index = start;
+            while (index + 2 <= end) : (index += 2) {
+                const left: []const []const u8 = &.{messages[index]};
+                const right: []const []const u8 = &.{messages[index + 1]};
+                const pair = H.hash_pair(left, right, parallel.sequential);
+                digests[index] = pair[0];
+                digests[index + 1] = pair[1];
+            }
+            hash_each(H, messages[index..end], digests[index..end]);
         } else {
             var inputs: [Kernel.lanes][]const u8 = @splat(messages[start]);
             @memcpy(inputs[0..count], messages[start..end]);

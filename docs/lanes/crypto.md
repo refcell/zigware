@@ -573,3 +573,12 @@ hold whole units of lanes" over coding's lane-aware `hash_batches`, and `sha512/
   ReleaseFast check. Planted bugs in the Collins condition, the shifted-copy correction, a
   cofactor update, and a coefficient shift fail it. The step-margin guard is a proof bound
   that no sampled input reaches (dropping it still matched on 2 million).
+- 2026-11-20: `Sha256.hash_many` hashes a run too short for the x16 kernel in interleaved SHA-NI
+  pairs (`hash_pair` on two one-part messages of one length, any length, through
+  `blocks.digest_messages(2, ...)`), where commonware hashes it one message at a time. A
+  16-lane call costs all its lanes, so against pairs the kernel breaks even at 9 to 11
+  messages here (64 B: 37 ns a message in pairs, 27 ns a lane; 4 KiB: 1.26 us, 0.75 us);
+  `minimum_batch_len` is 10 with SHA-NI (commonware 7). Digests are unchanged. batch count=7
+  len=4096 went 13.6 -> 9.1 us and count=2 len=256 298 -> 207 ns standalone. Planted bugs in the
+  pair's digest order, the tail padding boundary, the second message's tail, and the
+  equal-length check fail the std comparison tests.
