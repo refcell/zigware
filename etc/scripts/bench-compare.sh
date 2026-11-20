@@ -9,6 +9,10 @@
 # commonware's tokio runner uses `env::temp_dir()` and zigware's benches `./.zig-cache/tmp`,
 # so commonware runs with TMPDIR and zigware with its working directory under it.
 # BENCH_FILTER keeps only the benches whose name contains it.
+# BENCH_SET=all compares every bench a zigware harness lists that a commonware criterion bench
+# also lists under the same name, instead of the hand-picked rows below; BENCH_SET=<package>
+# (such as formatting or storage) does the same for one zigware package. The rows come from
+# both sides' `--bench --list`, and the set's commonware crates build in one cargo call.
 # Rounds run in ABBA order: odd rounds run commonware then zigware, even rounds zigware then
 # commonware, so drift within a round cancels. The ratio is the median of the per-round
 # (paired) zigware / commonware ratios; BENCH_STAT=best reports the best of each side instead.
@@ -17,7 +21,10 @@
 # counts as not yet faster). commonware builds with RUSTFLAGS="-C target-cpu=native" in its
 # own target directory (target-native), as zigware builds for the native CPU; CW_NATIVE=0
 # builds it for baseline x86-64 instead. The table goes to stdout; the raw medians to
-# .cache/bench-compare/raw.tsv.
+# .cache/bench-compare/raw.tsv, in the format docs/bench/<lane>.tsv takes: `# key: value`
+# header lines (date, zigware, commonware, method), then one row per bench and round of
+# round, zigware package, bench name, commonware ns, zigware ns, and 1-minute load (tab
+# separated; a failed side is nan).
 set -euo pipefail
 
 runs=${1:-4}
@@ -118,15 +125,42 @@ cw_env=()
 if [[ "${CW_NATIVE:-1}" == 1 ]]; then
   cw_env=(RUSTFLAGS="-C target-cpu=native" CARGO_TARGET_DIR="$ref/target-native")
 fi
+bench_set=${BENCH_SET:-}
+cargo_args=(
+  -p commonware-codec -p commonware-cryptography -p commonware-storage -p commonware-runtime
+  --features commonware-storage/test-traits
+  --bench codec --bench sha256 --bench ed25519 --bench bls12381
+  --bench journal --bench qmdb --bench merkle --bench bmt --bench rmap --bench buffer_paged
+  --bench chacha20_poly1305 --bench sake
+  --bench secp256r1
+)
+if [[ -n "$bench_set" ]]; then
+  # Every commonware crate with bench targets (all), or the one named after the package:
+  # commonware-<package>, or commonware-*-<package> (curve25519).
+  mapfile -t crates < <(cd "$ref" && cargo metadata --no-deps --format-version 1 |
+    python3 -I -c '
+import json, sys
+want = sys.argv[1]
+for package in json.load(sys.stdin)["packages"]:
+    if not any("bench" in target["kind"] for target in package["targets"]):
+        continue
+    name = package["name"]
+    if want == "all" or name == "commonware-" + want or name.endswith("-" + want):
+        print(name)
+' "$bench_set")
+  if ((${#crates[@]} == 0)); then
+    echo "BENCH_SET=$bench_set: no commonware crate with benches matches" >&2
+    exit 1
+  fi
+  cargo_args=(--benches)
+  for crate in "${crates[@]}"; do
+    cargo_args+=(-p "$crate")
+    [[ "$crate" == commonware-storage ]] && cargo_args+=(--features commonware-storage/test-traits)
+  done
+fi
 echo "building commonware benches (cargo bench --no-run, release, ${cw_env[*]:-baseline})" >&2
 (cd "$ref" && env "${cw_env[@]}" cargo bench --no-run --message-format=json \
-  -p commonware-codec -p commonware-cryptography -p commonware-storage -p commonware-runtime \
-  --features commonware-storage/test-traits \
-  --bench codec --bench sha256 --bench ed25519 --bench bls12381 \
-  --bench journal --bench qmdb --bench merkle --bench bmt --bench rmap --bench buffer_paged \
-  --bench chacha20_poly1305 --bench sake \
-  --bench secp256r1 \
-  2> "$out/cargo.log") |
+  "${cargo_args[@]}" 2> "$out/cargo.log") |
   python3 -I -c '
 import json, sys
 for line in sys.stdin:
@@ -142,6 +176,48 @@ echo "building zigware benches (zig build bench-install, ReleaseFast)" >&2
 (cd "$root" && zig build bench-install)
 
 cw_bin() { awk -v n="$1" '$1 == n { print $2 }' "$out/cargo-bins"; }
+
+# The names a criterion-style `--bench --list` prints (`<name>: benchmark`), one per line.
+list_names() { sed -n 's/: benchmark$//p'; }
+
+if [[ -n "$bench_set" ]]; then
+  # Pair every name a zigware harness lists with the commonware target listing the same name.
+  # A harness whose listing fails (stderr in list.log) contributes no rows.
+  : > "$out/zigware-names" && : > "$out/commonware-names" && : > "$out/list.log"
+  for harness in "$root"/zig-out/bench/bench-*; do
+    package=${harness##*/bench-}
+    [[ "$bench_set" == all || "$bench_set" == "$package" ]] || continue
+    (cd "$scratch" && "$harness" --bench --list 2>> "$out/list.log") | list_names |
+      sed "s|^|$package\t|" >> "$out/zigware-names" || true
+  done
+  while read -r target executable; do
+    (cd "$ref" && TMPDIR="$scratch" "$executable" --bench --list 2>> "$out/list.log") |
+      list_names | sed "s|^|$target\t|" >> "$out/commonware-names" || true
+  done < "$out/cargo-bins"
+  mapfile -t benches < <(python3 -I - "$out/zigware-names" "$out/commonware-names" << 'EOF'
+import collections, sys
+targets = {}
+for line in open(sys.argv[2]):
+    target, name = line.rstrip("\n").split("\t", 1)
+    targets.setdefault(name, target)
+seen = set()
+counts = collections.Counter()
+listed = collections.Counter()
+for line in open(sys.argv[1]):
+    package, name = line.rstrip("\n").split("\t", 1)
+    listed[package] += 1
+    if name in targets and name not in seen:
+        seen.add(name)
+        counts[package] += 1
+        print(f"{targets[name]}|{package}|{name}")
+for package in sorted(listed):
+    print(f"{package}: {counts[package]} of {listed[package]} zigware benches have a commonware "
+          "counterpart", file=sys.stderr)
+print(f"{len(seen)} rows; {len(targets) - len(seen)} commonware benches without a zigware one",
+      file=sys.stderr)
+EOF
+  )
+fi
 
 # The median (ns) of the block named exactly `$1` in criterion-style output on stdin. It reads
 # all of stdin: zigware's filters match substrings, so later benches may follow, and closing
@@ -167,7 +243,15 @@ if found is not None:
 ' "$1"
 }
 
-: > "$out/raw.tsv"
+cw_cpu=baseline
+[[ "${CW_NATIVE:-1}" == 1 ]] && cw_cpu=native
+method="ABBA rounds=$runs, ${cw_args[*]} | ${zw_args[*]}, commonware target-cpu=$cw_cpu"
+{
+  echo "# date: $(date -u +%F)"
+  echo "# zigware: $(git -C "$root" rev-parse --short HEAD)"
+  echo "# commonware: $(git -C "$ref" rev-parse --short HEAD)"
+  echo "# method: $method"
+} > "$out/raw.tsv"
 : > "$out/bench.log"
 for run in $(seq 1 "$runs"); do
   for entry in "${benches[@]}"; do
@@ -185,7 +269,8 @@ for run in $(seq 1 "$runs"); do
         2>> "$log" | median_ns "$name") || zw=nan
     }
     if ((run % 2 == 1)); then run_cw; run_zw; else run_zw; run_cw; fi
-    printf '%s\t%s\t%s\t%s\t%s\n' "$run" "$name" "${cw:-nan}" "${zw:-nan}" "$load" |
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$run" "$package" "$name" "${cw:-nan}" "${zw:-nan}" \
+      "$load" |
       tee -a "$out/raw.tsv" >&2
   done
 done
@@ -199,7 +284,9 @@ ratios = {}
 loads = []
 order = []
 for line in open(sys.argv[1]):
-    run, name, cw, zw, load = line.rstrip("\n").split("\t")
+    if line.startswith("#"):
+        continue
+    run, _package, name, cw, zw, load = line.rstrip("\n").split("\t")
     loads.append(float(load))
     if name not in best:
         order.append(name)

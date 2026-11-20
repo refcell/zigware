@@ -52,8 +52,15 @@ zig-out/bench/bench-<package> --bench --warm-up-ms 1000 --measurement-ms 3000 --
   -- '<name>'
 ```
 
+`BENCH_SET=all` compares every bench a zigware harness lists (`--bench --list`) that a
+commonware criterion bench also lists under the same name, building all of commonware's bench
+crates in one cargo call; `BENCH_SET=<package>` (such as `formatting`) does the same for one
+zigware package and the commonware crate of that name.
+
 It prints the table above and writes the raw medians and the load average for each run to
-`.cache/bench-compare/raw.tsv`. Both sides keep their storage benches' files in a scratch
+`.cache/bench-compare/raw.tsv`, in docs/bench/<lane>.tsv's format: `# date:`, `# zigware:`,
+`# commonware:`, and `# method:` lines, then tab-separated round, zigware package, bench,
+commonware ns, zigware ns, and load. Both sides keep their storage benches' files in a scratch
 directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it through `TMPDIR`
 (its tokio runner uses `env::temp_dir()`), and zigware runs from it (its benches use
 `./.zig-cache/tmp`).
