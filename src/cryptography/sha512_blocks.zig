@@ -108,11 +108,13 @@ fn schedule(
 inline fn rounds(state: *[8]u64, wk: *const [80][group]u64, comptime lane: usize) void {
     comptime assert(lane < group);
     var v = state.*;
+    // `b ^ c` of the next round is `a ^ b` of this one, so majority costs one xor, one and, and
+    // one xor (as sha2's x86_avx2 `bool3ary_232`, kept off the `a` chain).
+    var b_xor_c = v[1] ^ v[2];
     inline for (0..80) |i| {
         // Round i's a is v[(8 - i % 8) % 8]; the others follow it cyclically.
         const a = (8 - i % 8) % 8;
         const b = (a + 1) % 8;
-        const c = (a + 2) % 8;
         const d = (a + 3) % 8;
         const e = (a + 4) % 8;
         const f = (a + 5) % 8;
@@ -123,7 +125,9 @@ inline fn rounds(state: *[8]u64, wk: *const [80][group]u64, comptime lane: usize
             std.math.rotr(u64, v[e], 41);
         const sigma0 = std.math.rotr(u64, v[a], 28) ^ std.math.rotr(u64, v[a], 34) ^
             std.math.rotr(u64, v[a], 39);
-        const majority = (v[a] & (v[b] | v[c])) | (v[b] & v[c]);
+        const a_xor_b = v[a] ^ v[b];
+        const majority = v[b] ^ (a_xor_b & b_xor_c);
+        b_xor_c = a_xor_b;
         const t1 = early +% sigma1;
         v[d] = (v[d] +% early) +% sigma1;
         v[h] = t1 +% (sigma0 +% majority);

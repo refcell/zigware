@@ -598,3 +598,9 @@ hold whole units of lanes" over coding's lane-aware `hash_batches`, and `sha512/
   2.0 us of a 9.4 us sign. Results are identical; the test checks `invert` against std on
   the edge and random elements and `encode` against std on 64 base-point multiples. Planted
   bugs in the inversion chain and the sign bit's coordinate fail it.
+- 2026-11-20: sha512 rounds compute majority as `b ^ ((a ^ b) & (b ^ c))`, carrying `a ^ b`
+  into the next round's `b ^ c`, as sha2 0.11's `x86_avx2` backend does. Pinned standalone:
+  16 KiB 19.1 -> 15.9 us, 256 KiB 0.30 -> 0.26 ms, 96 B 158 -> 121 ns (commonware 13.6 us at
+  16 KiB). Interleaving sha2's 2-word vector schedule with the rounds was slower (28 us), and so
+  was `Ch` as two disjoint adds. Planted bugs in the carried value and the majority formula fail
+  the std comparison tests.
