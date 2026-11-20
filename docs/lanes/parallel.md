@@ -707,8 +707,6 @@ Reported to their owners, with an O(1) replacement each:
   knows the position it wrote.
 - storage-archive: `freezer/records.zig:153` recomputes the CRC it just stored, and
   `insert_sorted` in freezer, ordinal and cache rescans the whole list after an O(n) insert.
-- codec (not bench-covered): `types/map.zig:99,133,217,248` scan for sortedness in `init`,
-  which is otherwise O(1).
-- Not bench-covered and generic in the block type: marshal `coding/types.zig:214,387,472` and
-  `standard/variant.zig:143` compare `digest()`, which recomputes when an application block
-  hashes on demand (commonware's blocks cache it in `Digested`).
+- codec (not bench-covered): `types/map.zig` scanned for sortedness in `init`, which is
+  otherwise O(1). Fixed here: `Map.write` checks adjacent keys on its encoding walk, and `init`
+  and `Set.write` check the order only with runtime safety.
