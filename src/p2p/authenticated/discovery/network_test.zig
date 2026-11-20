@@ -297,6 +297,34 @@ fn connectivity_at(
         try expect_no_rate_limiting(text);
     }
     try expect_connected_metrics(text, n);
+    try expect_mailbox_backoff(text, n);
+}
+
+/// Every node exposes commonware's mailbox `backoff` counters by name, one per channel too,
+/// and none backed off (no kill met a full control queue).
+fn expect_mailbox_backoff(text: []const u8, n: usize) !void {
+    const names = [_][]const u8{
+        "peer_network_tracker_mailbox_backoff_total",
+        "peer_network_router_mailbox_backoff_total",
+        "peer_network_spawner_mailbox_backoff_total",
+        "peer_network_spawner_peer_mailbox_backoff_total",
+        "peer_network_spawner_peer_relay_high_backoff_total",
+        "peer_network_spawner_peer_relay_low_backoff_total",
+        "peer_network_channel_mailbox_backoff_total",
+    };
+    for (names) |name| {
+        var samples = metrics.metric_samples(text, name);
+        var count: usize = 0;
+        while (samples.next()) |sample| : (count += 1) {
+            try testing.expectEqualStrings("0", sample.value);
+        }
+        // A channel's `index` attribute replaces the node's, so all nodes share one sample.
+        const expected: usize = if (std.mem.indexOf(u8, name, "channel") != null) 1 else n;
+        testing.expectEqual(expected, count) catch |err| {
+            std.debug.print("{s}: {d} samples, expected {d}\n", .{ name, count, expected });
+            return err;
+        };
+    }
 }
 
 /// commonware `assert_no_rate_limiting`: rate-limited counters exist, all at zero.
@@ -495,8 +523,8 @@ fn Watched(comptime function: anytype) type {
 pub fn run_production(comptime function: anytype) !void {
     // Not `testing.allocator`: on Darwin its free captures a stack trace through the MachO
     // unwinder, which takes a cancelable lock and so consumes a task's pending cancel. A
-    // network loop freeing after its cancel then runs on (the likely cause of macOS CI hanging
-    // "while stopping", run 44752935852). This one still checks leaks but takes no traces.
+    // network task freeing after its cancel then never stops (macOS CI hung "while stopping",
+    // run 44752935852). This allocator still checks for leaks but captures no traces.
     var traceless: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{
         .stack_trace_frames = 0,
     });

@@ -49,6 +49,63 @@ const cleanup_interval: u32 = 16_384;
 /// Consecutive accept failures after which the listener stops.
 const accept_failures_max: u32 = 1024;
 
+/// The `backoff` counter of each mailbox commonware's discovery network creates
+/// (`actor::mailbox::new(context.child(..), size)`), with the same names. A mailbox counts an
+/// enqueue that its full inbox handed to the overflow policy. Here the tracker and router are
+/// called directly and the spawner starts a task per connection, so theirs stay at zero; the
+/// relay and channel policies reject instead of backing off, as commonware's do; a peer's
+/// counts a kill that finds its control queue full (commonware's `Kill` overflow).
+pub const MailboxBackoff = struct {
+    tracker: metrics.Counter,
+    router: metrics.Counter,
+    spawner: metrics.Counter,
+    peer: metrics.Counter,
+    relay_high: metrics.Counter,
+    relay_low: metrics.Counter,
+
+    const help = "number of enqueue calls that requested backoff";
+    const count = 6;
+
+    pub fn init(scope: metrics.Scope) Allocator.Error!MailboxBackoff {
+        const peer = scope.child("spawner").child("peer");
+        const relay = peer.child("relay");
+        const scopes = [count]metrics.Scope{
+            scope.child("tracker").child("mailbox"),
+            scope.child("router").child("mailbox"),
+            scope.child("spawner").child("mailbox"),
+            peer.child("mailbox"),
+            relay.child("high"),
+            relay.child("low"),
+        };
+        var counters: [count]metrics.Counter = undefined;
+        var registered: usize = 0;
+        errdefer for (counters[0..registered]) |*counter| counter.deinit();
+        for (&scopes, &counters) |*child, *counter| {
+            counter.* = try child.counter("backoff", help);
+            registered += 1;
+        }
+        assert(registered == count);
+        return .{
+            .tracker = counters[0],
+            .router = counters[1],
+            .spawner = counters[2],
+            .peer = counters[3],
+            .relay_high = counters[4],
+            .relay_low = counters[5],
+        };
+    }
+
+    pub fn deinit(backoff: *MailboxBackoff) void {
+        backoff.tracker.deinit();
+        backoff.router.deinit();
+        backoff.spawner.deinit();
+        backoff.peer.deinit();
+        backoff.relay_high.deinit();
+        backoff.relay_low.deinit();
+        backoff.* = undefined;
+    }
+};
+
 /// The listener's and dialer's counters (commonware `discovery/actors/{listener,dialer}.rs`),
 /// under the network scope's `listener` and `dialer` children.
 pub fn Counters(comptime P: type) type {
@@ -177,6 +234,11 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
         tracker: Tracker,
         peer_config: Peer.Config,
         counters: Counters(P),
+        backoff: MailboxBackoff,
+        /// Each registered channel's mailbox `backoff` (`channel{index}_mailbox`), which its
+        /// rejecting policy never moves.
+        channel_backoff: std.ArrayList(metrics.Counter) = .empty,
+        scope: metrics.Scope,
         families: Peer.Families,
         tracers: Tracers,
         /// The dialer, listener, unblock timer, handshakes, and connections.
@@ -225,10 +287,14 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
                 .tracker = undefined,
                 .peer_config = make_peer_config(&config, ip_namespace),
                 .counters = try .init(scope),
+                .backoff = undefined,
+                .scope = scope,
                 .families = undefined,
                 .tracers = .init(config.tracer),
             };
             errdefer network.counters.deinit();
+            network.backoff = try .init(scope);
+            errdefer network.backoff.deinit();
             network.families = try .init(scope);
             errdefer network.families.deinit();
             network.router = try Router.init(gpa, io);
@@ -249,6 +315,9 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
             network.router.deinit();
             network.tracker.deinit();
             network.counters.deinit();
+            network.backoff.deinit();
+            for (network.channel_backoff.items) |*counter| counter.deinit();
+            network.channel_backoff.deinit(gpa);
             network.families.deinit();
             gpa.free(network.stream_namespace);
             gpa.free(network.ip_namespace);
@@ -328,7 +397,13 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
         /// Registers `channel` with a per-peer `quota` (commonware `Network::register`); call
         /// before `run`. Panics on a duplicate channel.
         pub fn register(network: *Self, channel: p2p.Channel, quota: rate_limit.Quota) !Registered {
-            return network.channels.register(channel, quota);
+            try network.channel_backoff.ensureUnusedCapacity(network.gpa, 1);
+            const scope = network.scope.child("channel").with_attribute("index", channel);
+            var backoff = try scope.child("mailbox").counter("backoff", MailboxBackoff.help);
+            errdefer backoff.deinit();
+            const registered = try network.channels.register(channel, quota);
+            network.channel_backoff.appendAssumeCapacity(backoff);
+            return registered;
         }
 
         /// Tracks, inspects, and blocks peers.
@@ -500,6 +575,7 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
         ) Io.Cancelable!void {
             const gpa = network.gpa;
             var outbox = Outbox.init(gpa, network.io, @intCast(network.config.mailbox_size));
+            outbox.kill_backoff = network.backoff.peer.metric();
             var result: Io.Cancelable!void = {};
             const tracer = network.tracers.spawner;
             const greeting = network.tracker.connect(peer, &outbox, metadata == .dialer);

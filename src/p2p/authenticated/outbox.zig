@@ -10,6 +10,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const metrics = @import("runtime").telemetry.metrics;
 const p2p = @import("../root.zig");
 const data = @import("data.zig");
 
@@ -88,6 +89,9 @@ pub const Outbox = struct {
     /// Frames each queue holds before sends are rejected.
     capacity: u32,
     killed: bool = false,
+    /// Counts a kill that finds the control queue full: commonware's peer mailbox takes
+    /// `Kill` into its overflow then, which its `backoff` counter records.
+    kill_backoff: ?*metrics.raw.Counter = null,
     control: std.Deque(*Frame) = .empty,
     high: std.Deque(*Frame) = .empty,
     low: std.Deque(*Frame) = .empty,
@@ -147,6 +151,8 @@ pub const Outbox = struct {
     pub fn kill(outbox: *Outbox) void {
         outbox.mutex.lockUncancelable(outbox.io);
         defer outbox.mutex.unlock(outbox.io);
+        const full = !outbox.killed and outbox.control.len >= outbox.capacity;
+        if (full) if (outbox.kill_backoff) |counter| counter.inc();
         outbox.killed = true;
         outbox.drain();
         outbox.condition.broadcast(outbox.io);
@@ -237,15 +243,27 @@ test "control frames go ahead of data and drop when full" {
     try testing.expect(!outbox.send_control(control));
 }
 
-test "a kill lands when the control queue is full" {
+test "a kill lands when the control queue is full, and counts as backoff" {
+    var backoff: metrics.raw.Counter = .{};
+    // A kill with room in the control queue is not backoff.
+    var roomy = Outbox.init(testing.allocator, Io.failing, 1);
+    defer roomy.deinit();
+    roomy.kill_backoff = &backoff;
+    roomy.kill();
+    try testing.expectEqual(@as(u64, 0), backoff.get());
     var outbox = Outbox.init(testing.allocator, Io.failing, 1);
     defer outbox.deinit();
+    outbox.kill_backoff = &backoff;
     const control = try Frame.adopt(testing.allocator, try testing.allocator.dupe(u8, "peers"));
     defer control.release();
     try testing.expect(outbox.send_control(control));
     try testing.expect(!outbox.send_control(control));
     outbox.kill();
     try testing.expect(outbox.try_next().? == .killed);
+    try testing.expectEqual(@as(u64, 1), backoff.get());
+    // A second kill finds the connection already killed.
+    outbox.kill();
+    try testing.expectEqual(@as(u64, 1), backoff.get());
 }
 
 test "frame bytes encode a data message" {
