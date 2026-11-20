@@ -500,6 +500,14 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
         ) !*Parent {
             var levels = try self.hash_plan(gpa);
             defer levels_deinit(gpa, &levels);
+            // Dirty nodes below the parent's size land in `overwrites`, so size it once instead
+            // of rehashing as it grows, as commonware does.
+            const parent_size = self.parent.size();
+            var overwritten: u32 = 0;
+            for (&levels) |*level| {
+                for (level.items) |position| overwritten += @intFromBool(position < parent_size);
+            }
+            try self.overwrites.ensureUnusedCapacity(gpa, overwritten);
             for (&levels, 0..) |*level, height| {
                 if (level.items.len == 0) continue;
                 const positions = level.items;
@@ -573,7 +581,7 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
                 while (bits.next()) |bit| try updated.append(gpa, start + bit);
             }
             if (updated.items.len == 0) return levels;
-            std.mem.sort(u64, updated.items, {}, std.sort.asc(u64));
+            std.sort.pdq(u64, updated.items, {}, std.sort.asc(u64)); // `sort_unstable`.
             try plan_dirty(F, gpa, self.size(), self.parent.size(), updated.items, &levels);
             return levels;
         }
