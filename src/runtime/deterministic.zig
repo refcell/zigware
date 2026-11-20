@@ -775,8 +775,12 @@ pub const Runner = struct {
             .group => |group| {
                 group.members.remove(&task.group_node);
                 group.count -= 1;
+                // An awaiter canceled in the same batch is ready already and reads the count
+                // when it runs.
                 if (group.count == 0) {
-                    if (group.awaiter) |awaiter| runner.wake(awaiter, .notified);
+                    if (group.awaiter) |awaiter| {
+                        if (awaiter.state == .blocked) runner.wake(awaiter, .notified);
+                    }
                 }
             },
         }
@@ -1614,6 +1618,33 @@ test "leftover tasks are canceled when the root finishes (test_root_finishes)" {
     var group: Io.Group = .init;
     runner.start(Root.run, .{ runner.io(), &group }) catch unreachable;
     try testing.expectEqual(@as(u32, 0), runner.task_count);
+}
+
+test "a group's last member may finish after its canceled awaiter is ready" {
+    // The parent is canceled while awaiting its group, and the member it waits for finishes
+    // in the same batch: with the member first, the parent is already ready when it finishes.
+    const Root = struct {
+        fn member(io: Io, event: *Io.Event) void {
+            event.waitUncancelable(io);
+        }
+        fn parent(io: Io, event: *Io.Event) !void {
+            var group: Io.Group = .init;
+            try group.concurrent(io, member, .{ io, event });
+            try group.await(io);
+        }
+        fn run(io: Io) !void {
+            var event: Io.Event = .unset;
+            var future = try io.concurrent(parent, .{ io, &event });
+            try io.sleep(.fromMilliseconds(1), .awake);
+            event.set(io);
+            future.cancel(io) catch |err| try testing.expectEqual(error.Canceled, err);
+        }
+    };
+    for (0..16) |seed| {
+        var runner = try test_runner(.{ .seed = seed });
+        defer runner.deinit();
+        try (try runner.start(Root.run, .{runner.io()}));
+    }
 }
 
 test "groups await all members and propagate cancelation" {
