@@ -69,8 +69,8 @@ Read this whole file before you change anything. These rules are not optional.
    CPU. A row is "faster" only when the median is below 0.95 and at most n/8 of its n
    rounds reach 1; a row inside the noise is not yet faster. Every timed run, in
    bench-compare or a lane's own script, takes a slot through `etc/scripts/bench-lock.sh`
-   (a first-come, first-served queue onto two CCD-pinned slots), holding it for one pair
-   only; never flock `~/.cache/zigware/bench.lock` or hold a slot for a whole run. Run soaks, fuzzing and long
+   (a first-come, first-served queue onto two CCD-pinned slots), holding it for one bench
+   name's pair only, a couple of minutes at most, never a whole group or run; never flock `~/.cache/zigware/bench.lock` or hold a slot for a whole run. Run soaks, fuzzing and long
    test sweeps at `nice 19` so they don't skew other lanes' benches. Record rows with their verdict and load in
    docs/BENCHMARKS.md.
 
