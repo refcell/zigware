@@ -283,7 +283,15 @@ fn connectivity_at(
     const text = try scope.encode(gpa);
     defer gpa.free(text);
     errdefer std.debug.print("connectivity metrics failed:\n{s}\n", .{text});
-    try expect_no_rate_limiting(text);
+    // On real sockets a slow host bunches gossip (macOS CI, 3 vCPUs: two `bit_vec`s arrived
+    // within half a gossip period after a redial), and the throttle rightly delays one. Only
+    // this test's own channel must be unthrottled there; simulated runs keep commonware's
+    // full check.
+    if (probe_listeners) {
+        try expect_no_data_rate_limiting(text);
+    } else {
+        try expect_no_rate_limiting(text);
+    }
     try expect_connected_metrics(text, n);
 }
 
@@ -293,6 +301,19 @@ fn expect_no_rate_limiting(text: []const u8) !void {
     var count: usize = 0;
     while (samples.next()) |sample| : (count += 1) {
         try testing.expectEqualStrings("0", sample.value);
+    }
+    try testing.expect(count > 0);
+}
+
+/// `expect_no_rate_limiting` for the data channels only (`message="data_<channel>"`), which
+/// must be registered.
+fn expect_no_data_rate_limiting(text: []const u8) !void {
+    var samples = metrics.metric_samples(text, "messages_rate_limited_total");
+    var count: usize = 0;
+    while (samples.next()) |sample| {
+        if (std.mem.indexOf(u8, sample.labels, "message=\"data_") == null) continue;
+        try testing.expectEqualStrings("0", sample.value);
+        count += 1;
     }
     try testing.expect(count > 0);
 }
