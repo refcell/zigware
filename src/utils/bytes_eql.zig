@@ -14,17 +14,41 @@ const chunk = 32;
 /// True when the `n` bytes at `a` equal the `n` bytes at `b`. Runs in time that depends only
 /// on `n`, never on where (or whether) the arrays differ.
 pub fn eql(comptime n: usize, a: *const [n]u8, b: *const [n]u8) bool {
-    comptime assert(chunk % 8 == 0);
-    comptime assert(n / chunk * chunk + n % chunk == n);
+    if (n < chunk) return eql_short(n, a, b) else return eql_long(n, a, b);
+}
+
+/// `eql` from one vector up: whole vectors, then the last vector's worth.
+fn eql_long(comptime n: usize, a: *const [n]u8, b: *const [n]u8) bool {
+    comptime assert(n >= chunk);
     var diff: @Vector(chunk, u8) = @splat(0);
-    inline for (0..n / chunk) |i| {
-        const left: @Vector(chunk, u8) = a[i * chunk ..][0..chunk].*;
-        const right: @Vector(chunk, u8) = b[i * chunk ..][0..chunk].*;
-        diff |= left ^ right;
-    }
-    var tail: u8 = 0;
-    inline for (n / chunk * chunk..n) |i| tail |= a[i] ^ b[i];
-    return (@reduce(.Or, diff) | tail) == 0;
+    inline for (0..n / chunk) |i| diff |= window(chunk, n, a, b, i * chunk);
+    // The last `chunk` bytes cover any tail; bytes compared twice do not change the result.
+    if (n % chunk != 0) diff |= window(chunk, n, a, b, n - chunk);
+    return @reduce(.Or, diff) == 0;
+}
+
+/// `eql` below one vector: two overlapping windows of the widest power of two that fits.
+fn eql_short(comptime n: usize, a: *const [n]u8, b: *const [n]u8) bool {
+    comptime assert(n < chunk);
+    if (n == 0) return true;
+    const width = comptime std.math.floorPowerOfTwo(usize, n);
+    comptime assert(width <= n and n < 2 * width);
+    const diff = window(width, n, a, b, 0) | window(width, n, a, b, n - width);
+    return @reduce(.Or, diff) == 0;
+}
+
+/// The XOR of `width` bytes of `a` and `b` from `start`.
+inline fn window(
+    comptime width: usize,
+    comptime n: usize,
+    a: *const [n]u8,
+    b: *const [n]u8,
+    comptime start: usize,
+) @Vector(width, u8) {
+    comptime assert(start + width <= n);
+    const left: @Vector(width, u8) = a[start..][0..width].*;
+    const right: @Vector(width, u8) = b[start..][0..width].*;
+    return left ^ right;
 }
 
 test "bytes_eql agrees with std.mem.eql at every length and position" {
