@@ -528,3 +528,7 @@ hold whole units of lanes" over coding's lane-aware `hash_batches`, and `sha512/
   XOF over `lanes` output blocks: 32 bytes take 99 ns (std's `Blake3.hash` 133 ns), 1 KiB
   1.38 µs (std 1.65 µs). Tested against std at every XOF test length; a dropped root flag is
   caught.
+- 2026-11-20: `Blake3.hash` hashes a message of at most one chunk through `blake3_tree.hash`
+  (one root compression; std's setup and finalize cost more), so 32 bytes take about 99 ns
+  instead of 133 ns. The `Blake3.hash` test lengths gain 32 and 65; hashing only the first
+  part is caught.

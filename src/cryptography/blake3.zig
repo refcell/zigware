@@ -49,7 +49,9 @@ pub const Blake3 = struct {
         for (parts) |part| {
             len = std.math.add(usize, len, part.len) catch return Streaming.hash(parts);
         }
-        if (len <= tree.chunk_len or len >= tree.subtree_len_min) return Streaming.hash(parts);
+        // One chunk compresses its root once (std's setup and finalize cost more than that).
+        if (len <= tree.chunk_len) return .{ .bytes = tree.hash(parts) };
+        if (len >= tree.subtree_len_min) return Streaming.hash(parts);
         return .{ .bytes = tree.hash_subtrees(parts, len, parallel.sequential) };
     }
 
