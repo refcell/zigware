@@ -25,7 +25,8 @@
 # RUSTFLAGS="-C target-cpu=native" in its
 # own target directory (target-native), as zigware builds for the native CPU; CW_NATIVE=0
 # builds it for baseline x86-64 instead. The table goes to stdout; the raw medians to
-# .cache/bench-compare/raw.tsv, in the format docs/bench/<lane>.tsv takes: `# key: value`
+# .cache/bench-compare/raw.tsv (a previous one moves to raw.<UTC time>.tsv), in the format
+# docs/bench/<lane>.tsv takes: `# key: value`
 # header lines (date, zigware, commonware, method), then one row per bench and round of
 # round, zigware package, bench name, commonware ns, zigware ns, and 1-minute load (tab
 # separated; a failed side is nan).
@@ -284,6 +285,8 @@ if found is not None:
 cw_cpu=baseline
 [[ "${CW_NATIVE:-1}" == 1 ]] && cw_cpu=native
 method="ABBA rounds=$runs, ${cw_args[*]} | ${zw_args[*]}, commonware target-cpu=$cw_cpu"
+# A restart keeps the previous run's rows: raw.tsv moves to raw.<UTC time>.tsv first.
+[ -s "$out/raw.tsv" ] && mv "$out/raw.tsv" "$out/raw.$(date -u +%Y%m%dT%H%M%S).tsv"
 {
   echo "# date: $(date -u +%F)"
   echo "# zigware: $(git -C "$root" rev-parse --short HEAD)"
