@@ -1,9 +1,9 @@
 //! BLAKE3 implementation of the hasher interface (commonware `cryptography/src/blake3`).
 //!
-//! Backed by `std.crypto.hash.Blake3`, which hashes chunks with SIMD, except that one-shot
-//! messages of 1 to 16 KiB hash in `blake3_tree.zig`'s kernel. `hash_across` splits a
-//! message of at least 128 KiB along the BLAKE3 tree and hashes the subtrees across the given
-//! strategy (`blake3_tree.zig`); the digest is identical either way.
+//! Backed by `std.crypto.hash.Blake3` for streaming; one-shot messages hash in
+//! `blake3_tree.zig`'s kernel. `hash_across` splits a message of at least 128 KiB along the
+//! BLAKE3 tree and hashes the subtrees across the given strategy (`blake3_tree.zig`); the
+//! digest is identical either way.
 
 const std = @import("std");
 const parallel = @import("parallel");
@@ -40,10 +40,11 @@ pub const Blake3 = struct {
         return self.streaming.finalize();
     }
 
-    /// The digest of the concatenation of `parts`. A message of more than one chunk and less
-    /// than `tree.subtree_len_min` bytes compresses its chunks side by side in `blake3_tree`'s
-    /// kernel: `Core` compresses a batch of fewer than four chunks one at a time (2 KiB: 3.4
-    /// µs against 1.7). Longer messages stay on `Core`, which is faster there.
+    /// The digest of the concatenation of `parts`. A message of more than one chunk
+    /// compresses its chunks side by side in `blake3_tree`'s kernel, which beats `Core` at
+    /// every length: `Core` compresses a batch of fewer than four chunks one at a time (2 KiB:
+    /// 3.4 µs against 1.6), and its wide batches gather their message words one at a time (1
+    /// MiB: 137 µs against 111).
     pub fn hash(parts: []const []const u8) Value {
         var len: usize = 0;
         for (parts) |part| {
@@ -51,7 +52,6 @@ pub const Blake3 = struct {
         }
         // One chunk compresses its root once (std's setup and finalize cost more than that).
         if (len <= tree.chunk_len) return .{ .bytes = tree.hash(parts) };
-        if (len >= tree.subtree_len_min) return Streaming.hash(parts);
         return .{ .bytes = tree.hash_subtrees(parts, len, parallel.sequential) };
     }
 

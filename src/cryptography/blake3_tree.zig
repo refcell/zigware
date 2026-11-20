@@ -16,6 +16,7 @@
 const std = @import("std");
 const parallel = @import("parallel");
 const assert = std.debug.assert;
+const native_endian = @import("builtin").cpu.arch.endian();
 
 pub const chunk_len = 1024;
 const block_len = 64;
@@ -142,6 +143,61 @@ fn lane_cvs(comptime n: usize, cv: [8]Vec(n), out: *[n]Cv) void {
     }
 }
 
+/// Transposes the 16 rows of a 16-by-16 matrix of words into its columns, swapping the
+/// off-diagonal blocks of each power-of-two size in turn (one two-source permute per row and
+/// stage, as the BLAKE3 reference's AVX-512 transpose).
+inline fn transpose16(rows: *[16]Vec(16)) void {
+    inline for (.{ 8, 4, 2, 1 }) |s| {
+        comptime var low: [16]i32 = undefined;
+        comptime var high: [16]i32 = undefined;
+        inline for (0..16) |j| {
+            low[j] = if (j & s == 0) j else ~@as(i32, j - s);
+            high[j] = if (j & s == 0) j + s else ~@as(i32, j);
+        }
+        inline for (0..16) |i| {
+            if (i & s == 0) {
+                const a = rows[i];
+                const b = rows[i + s];
+                rows[i] = @shuffle(u32, a, b, low);
+                rows[i + s] = @shuffle(u32, a, b, high);
+            }
+        }
+    }
+}
+
+/// The 16 words of each 64-byte block at `blocks`, one block per lane, read in native byte
+/// order (chaining values) or as little-endian words (message bytes) with `little`. One vector
+/// load per block: copying a `[64]u8` instead lowers to byte loads.
+inline fn load_transposed(blocks: *const [16][*]const u8, comptime little: bool) [16]Vec(16) {
+    var m: [16]Vec(16) = undefined;
+    inline for (&m, blocks) |*row, block| {
+        row.* = @as(*align(1) const Vec(16), @ptrCast(block)).*;
+        if (little and native_endian == .big) row.* = @byteSwap(row.*);
+    }
+    transpose16(&m);
+    return m;
+}
+
+/// The message words of block `block` of each of the `n` chunks at `chunks`, one per lane.
+inline fn chunk_words(comptime n: usize, chunks: *const [n][*]const u8, block: usize) [16]Vec(n) {
+    assert(block < blocks_per_chunk);
+    var m: [16]Vec(n) = undefined;
+    if (n == 16) {
+        var blocks: [16][*]const u8 = undefined;
+        inline for (&blocks, chunks) |*b, chunk| b.* = chunk + block * block_len;
+        return load_transposed(&blocks, true);
+    }
+    var rows: [n][16]u32 = undefined;
+    for (&rows, chunks) |*row, chunk| {
+        const bytes = chunk + block * block_len;
+        for (row, 0..) |*word, w| word.* = read_word(bytes[4 * w ..][0..4]);
+    }
+    for (&m, 0..) |*word, w| {
+        inline for (0..n) |lane| word[lane] = rows[lane][w];
+    }
+    return m;
+}
+
 /// The chaining values of the `n` whole chunks at `chunks`, the first at chunk `counter`.
 fn chunk_cvs(comptime n: usize, chunks: *const [n][*]const u8, counter: u64, out: *[n]Cv) void {
     var low: [n]u32 = undefined;
@@ -152,24 +208,17 @@ fn chunk_cvs(comptime n: usize, chunks: *const [n][*]const u8, counter: u64, out
     }
     var cv = splat_cv(n, iv);
     for (0..blocks_per_chunk) |block| {
-        var rows: [n][16]u32 = undefined;
-        for (&rows, chunks) |*row, chunk| {
-            const bytes = chunk + block * block_len;
-            for (row, 0..) |*word, w| word.* = read_word(bytes[4 * w ..][0..4]);
-        }
-        var m: [16]Vec(n) = undefined;
-        for (&m, 0..) |*word, w| {
-            inline for (0..n) |lane| word[lane] = rows[lane][w];
-        }
+        const m = chunk_words(n, chunks, block);
         var flags: u32 = 0;
         if (block == 0) flags |= flag_chunk_start;
         if (block == blocks_per_chunk - 1) flags |= flag_chunk_end;
-        cv = compress(n, cv, &m, .{
+        // Inlined, so the chaining value stays in registers across the chunk's blocks.
+        cv = @call(.always_inline, compress, .{ n, cv, &m, Words(n){
             .counter_low = low,
             .counter_high = high,
             .block_len = @splat(block_len),
             .flags = @splat(flags),
-        });
+        } });
     }
     lane_cvs(n, cv, out);
 }
@@ -179,10 +228,17 @@ fn chunk_cvs(comptime n: usize, chunks: *const [n][*]const u8, counter: u64, out
 fn parent_cvs(comptime n: usize, children: *const [2 * n]Cv, extra_flags: u32, out: *[n]Cv) void {
     assert(extra_flags & ~flag_root == 0);
     var m: [16]Vec(n) = undefined;
-    inline for (0..16) |w| {
-        var column: [n]u32 = undefined;
-        for (&column, 0..) |*c, lane| c.* = children[2 * lane + w / 8][w % 8];
-        m[w] = column;
+    if (n == 16) {
+        // Each parent's block is its two children's chaining values, adjacent in `children`.
+        var blocks: [16][*]const u8 = undefined;
+        inline for (&blocks, 0..) |*b, lane| b.* = @ptrCast(&children[2 * lane]);
+        m = load_transposed(&blocks, false);
+    } else {
+        inline for (0..16) |w| {
+            var column: [n]u32 = undefined;
+            for (&column, 0..) |*c, lane| c.* = children[2 * lane + w / 8][w % 8];
+            m[w] = column;
+        }
     }
     const cv = compress(n, splat_cv(n, iv), &m, .{
         .counter_low = @splat(0),
@@ -682,4 +738,33 @@ fn compress_full(cv: [8]Vec(lanes), m: *const [16]Vec(lanes), words: Words(lanes
         out[i + 8] = v[i + 8] ^ cv[i];
     }
     return out;
+}
+
+// `lanes` is 8 in Debug builds and 16 in ReleaseFast on AVX-512, so the 16-lane transposed
+// loads get their own check at that width whatever `lanes` is.
+test "blake3 16-lane chunk and parent compressions match one lane at a time" {
+    var random = std.Random.DefaultPrng.init(0x16);
+    var data: [16][chunk_len]u8 = undefined;
+    random.random().bytes(std.mem.asBytes(&data));
+    var chunks: [16][*]const u8 = undefined;
+    for (&chunks, &data) |*chunk, *bytes| chunk.* = bytes;
+    // Lane counters cross the high word of the chunk counter.
+    const counter: u64 = (1 << 32) - 5;
+    var wide: [16]Cv = undefined;
+    chunk_cvs(16, &chunks, counter, &wide);
+    for (wide, &chunks, 0..) |cv, *chunk, lane| {
+        var one: [1]Cv = undefined;
+        chunk_cvs(1, chunk[0..1], counter + lane, &one);
+        try std.testing.expectEqualSlices(u32, &one[0], &cv);
+    }
+    var children: [32]Cv = undefined;
+    random.random().bytes(std.mem.asBytes(&children));
+    for ([_]u32{ 0, flag_root }) |extra_flags| {
+        var parents: [16]Cv = undefined;
+        parent_cvs(16, &children, extra_flags, &parents);
+        for (parents, 0..) |cv, lane| {
+            const expected = parent_cv(children[2 * lane], children[2 * lane + 1], extra_flags);
+            try std.testing.expectEqualSlices(u32, &expected, &cv);
+        }
+    }
 }
