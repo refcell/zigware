@@ -8,8 +8,8 @@
 //! - `reads`, `writes`, and `write_bytes` count every blob `read_at` and `write_at`
 //!   (commonware's recorded reads and `runtime_storage_write_bytes_total`).
 //! - `syncs` counts every blob `sync`, started syncs included (commonware's `SyncTrackingBlob`
-//!   full plus range syncs: zigware's durable write is a write and a full sync), and
-//!   `resizes` counts every blob `resize`.
+//!   full syncs), `range_syncs` every `write_at` with `sync` set (its range syncs), and
+//!   `resizes` every blob `resize`.
 //! - `allow_mutations(n)` is `MutationFaults::allow`: `n` more mutations (creating a blob,
 //!   `remove`, `write_at`, `resize`, `sync`) succeed, then every later one fails with `Io` and
 //!   sets `mutation_refused`. Reads and opens of stored blobs are not mutations.
@@ -39,6 +39,8 @@ pub const Storage = struct {
     write_bytes: u64 = 0,
     /// Calls to `sync` across all blobs, started syncs included.
     syncs: u64 = 0,
+    /// Calls to `write_at` with `sync` set: writes that are their own barrier.
+    range_syncs: u64 = 0,
     /// Calls to `resize` across all blobs.
     resizes: u64 = 0,
     /// When set, removals fail with `Io` once this many more have succeeded.
@@ -208,6 +210,7 @@ const Blob = struct {
         for (chunks) |chunk| len += chunk.len;
         self.storage.writes += 1;
         if (options.dont_cache) self.storage.dont_cache_writes += 1;
+        if (options.sync) self.storage.range_syncs += 1;
         self.storage.write_bytes += len;
         return self.inner.write_at_vectored(offset, chunks, options);
     }

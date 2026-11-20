@@ -2,9 +2,10 @@
 //! durability operations of buffer and paged writer syncs (commonware `utils/buffer/mod.rs`
 //! and `paged/writer.rs` tests over `DelayedSyncBlob` and `SyncTrackingBlob`).
 //!
-//! commonware's `SyncTrackingBlob` tells full syncs from range syncs; zigware's `Blob` has no
-//! range sync (a durable write is a write and a full sync), so the counts here are writes and
-//! total syncs: commonware's `full_syncs + range_syncs`.
+//! commonware's `SyncTrackingBlob` tells full syncs from range syncs (a write with
+//! `WriteOptions::SYNC`, which `SyncState` uses when nothing earlier is owed). `expect_ops`
+//! checks writes and total barriers, `full_syncs + range_syncs`; `expect_range` checks the
+//! range syncs alone.
 
 const std = @import("std");
 const testing = std.testing;
@@ -65,7 +66,12 @@ const Fixture = struct {
     /// Check the writes and syncs that reached storage so far.
     fn expect_ops(self: *Fixture, writes: u64, syncs: u64) !void {
         try testing.expectEqual(writes, self.inner.writes);
-        try testing.expectEqual(syncs, self.inner.syncs);
+        try testing.expectEqual(syncs, self.inner.syncs + self.inner.range_syncs);
+    }
+
+    /// Check how many of the barriers so far were sync writes (commonware's `range_syncs`).
+    fn expect_range(self: *Fixture, range_syncs: u64) !void {
+        try testing.expectEqual(range_syncs, self.inner.range_syncs);
     }
 
     fn expect_durable(self: *Fixture, name: []const u8, expected: []const u8) !void {
@@ -284,6 +290,7 @@ test "write sync durability operations (test_write_*_range_sync_*, *_full_sync_a
     try started.sync();
     try f.expect_durable("started", "abcd");
     try f.expect_ops(2, 2);
+    try f.expect_range(1);
     // Nothing left to sync.
     const idle = try started.start_sync();
     try testing.expect(!idle.is_pending());
@@ -303,6 +310,7 @@ test "write sync durability operations (test_write_*_range_sync_*, *_full_sync_a
     try w.sync();
     try f.expect_durable("resized", "abcd");
     try f.expect_ops(3, 5);
+    try f.expect_range(2);
 }
 
 test "paged sync durability operations after plain flushes" {
@@ -319,6 +327,7 @@ test "paged sync durability operations after plain flushes" {
     try single.sync();
     try single.sync();
     try f.expect_ops(1, 2);
+    try f.expect_range(1);
     single.deinit();
     try f.expect_reopened("single", "hello world");
 
@@ -331,9 +340,11 @@ test "paged sync durability operations after plain flushes" {
     try plain.sync();
     try plain.sync();
     try f.expect_ops(3, 3);
+    try f.expect_range(1);
     _ = try plain.append("tip");
     try plain.sync();
     try f.expect_ops(4, 4);
+    try f.expect_range(2);
     @memcpy(data[capacity + 1 ..], "tip");
     var check: [data.len]u8 = undefined;
     try plain.read_at(0, &check);
@@ -350,6 +361,7 @@ test "paged sync durability operations after plain flushes" {
     try f.expect_ops(5, 4);
     try replayed.sync();
     try f.expect_ops(5, 5);
+    try f.expect_range(2);
 }
 
 test "paged recreated writer sync barriers (test_recreated_sync_*)" {

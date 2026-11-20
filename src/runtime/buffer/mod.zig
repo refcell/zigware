@@ -98,6 +98,15 @@ pub const SyncState = union(enum) {
         assert(!options.sync);
         try self.wait_for_pending();
         assert(self.* != .pending);
+        if (durable and self.* == .clean) {
+            // No earlier mutation is owed, so the write carries its own barrier (commonware's
+            // `WriteOptions::SYNC`, one `RWF_DSYNC` write on Linux).
+            var synced = options;
+            synced.sync = true;
+            try blob.write_at_vectored(offset, chunks, synced);
+            assert(self.is_clean());
+            return;
+        }
         try blob.write_at_vectored(offset, chunks, options);
         if (!durable) {
             self.* = .dirty;

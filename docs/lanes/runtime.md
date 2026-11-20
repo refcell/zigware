@@ -260,6 +260,27 @@ time, files, and network: build on it rather than around it where it fits.
   flight: a futex wake with no waiters does nothing on the deterministic runner. Turning it
   on moved no conformance or replay digest: test-storage passed unchanged, and `just push`
   ran the full suite.
+- Production storage's blob barrier (`sync`, `start_sync`, the first open's settle) is
+  `fdatasync` on Linux, as commonware's `sync_data`; header and directory syncs stay `fsync`
+  (`sync_all`). On Linux without a ring, a sync write of at most 64 chunks is one
+  `pwritev2(RWF_DSYNC)` that owes no sync and leaves earlier unsynced writes owed, as
+  commonware fuses one that fits a submission (its batch is 1024 iovecs; zigware's vectored
+  window is 64). A failed fused write leaves the blob dirty. The ring path writes and then
+  syncs with `IORING_FSYNC_DATASYNC`.
+- Fiber switches skip the floating-point control state (MXCSR and x87 control word, FPCR) in
+  ReleaseFast and ReleaseSmall, about 2.5 ns of a 10 ns switch. It is callee-saved, so the
+  skip is equivalent only while every fiber switches with the default state; safe builds keep
+  the save and assert that at every switch (sticky exception flags excepted).
+- `SyncState` makes a durable write with nothing earlier owed one sync write
+  (`WriteOptions.sync`), as commonware's does: on production storage that is the fused
+  `RWF_DSYNC` write. Writes with earlier debt still write, then sync. The buffer mock counts
+  sync writes as `range_syncs`, so the durability-count ports check commonware's full/range
+  split, not only the total.
+- The deterministic ready queue dedupes a task woken twice in one cycle. commonware's
+  `Tasks::queue` pushes one id per wake, so a batch can hold [root, root] where zigware's holds
+  [root] (for example, joining a finished spawned task wakes the awaiter twice), and the
+  shuffle draws differ. Kept: changing it would move every replay hash. stream's conformance
+  port (1c7a872e) reproduces commonware's draw in its test.
 
 ## Log
 - 2026-11-13: fibers, rand-compatible shuffle, deterministic executor implementing `std.Io`.
