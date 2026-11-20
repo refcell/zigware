@@ -119,13 +119,13 @@ test "sha512 known answers and reset" {
 }
 
 test "sha512 one-shot and streaming match std across block groups" {
-    // Every length through five blocks (the padding boundaries and the four-block groups), then
-    // longer ones, as one aligned part, one unaligned part, and three parts.
+    // Every length through nine blocks (the padding boundaries and the four- or eight-block
+    // groups), then longer ones, as one aligned part, one unaligned part, and three parts.
     var data: [4200]u8 = undefined;
     message_bytes(&data, 7);
     var prng = std.Random.DefaultPrng.init(0x5ad512);
-    for (0..700) |i| {
-        const len = if (i < 641) i else prng.random().uintAtMost(usize, data.len - 1);
+    for (0..1250) |i| {
+        const len = if (i < 1170) i else prng.random().uintAtMost(usize, data.len - 1);
         var expected: [digest_length]u8 = undefined;
         StdSha512.hash(data[0..len], &expected, .{});
         try testing.expectEqualSlices(u8, &expected, &Sha512.hash(&.{data[0..len]}).bytes);
