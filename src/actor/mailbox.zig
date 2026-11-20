@@ -503,9 +503,19 @@ fn Ready(comptime T: type) type {
     return struct {
         const Self = @This();
         const Slot = struct { stamp: std.atomic.Value(usize), message: T };
+        const Padded = struct {
+            value: std.atomic.Value(usize) align(padded_bytes) = .init(0),
+            const padded_bytes = 128;
+            comptime {
+                assert(@sizeOf(@This()) == padded_bytes);
+            }
+        };
 
-        head: std.atomic.Value(usize) align(std.atomic.cache_line) = .init(0),
-        tail: std.atomic.Value(usize) align(std.atomic.cache_line) = .init(0),
+        /// Each index on 128 bytes of its own (crossbeam's `CachePadded`, which covers the
+        /// adjacent-line prefetcher), so a producer's CAS on `tail` does not evict the
+        /// read-only fields below or the consumer's `head`.
+        head: Padded = .{},
+        tail: Padded = .{},
         slots: []Slot,
         capacity: u32,
         /// A power of two above `capacity`: positions are `lap * one_lap + index`.
@@ -536,15 +546,18 @@ fn Ready(comptime T: type) type {
 
         /// Push `message`, or hand it back when ready is full.
         pub fn push(ready: *Self, message: T) ?T {
-            var tail = ready.tail.load(.monotonic);
+            var tail = ready.tail.value.load(.monotonic);
+            var backoff: Backoff = .{};
             while (true) {
                 const slot = &ready.slots[tail & (ready.one_lap - 1)];
                 const stamp = slot.stamp.load(.acquire);
                 if (stamp == tail) {
                     const moved_to = ready.next(tail);
-                    const moved = ready.tail.cmpxchgWeak(tail, moved_to, .seq_cst, .monotonic);
+                    const index = &ready.tail.value;
+                    const moved = index.cmpxchgWeak(tail, moved_to, .seq_cst, .monotonic);
                     if (moved) |seen| {
                         tail = seen;
+                        backoff.spin();
                         continue;
                     }
                     slot.message = message;
@@ -553,27 +566,30 @@ fn Ready(comptime T: type) type {
                 }
                 if (stamp +% ready.one_lap == tail + 1) {
                     // The slot is still full from the previous lap.
-                    const head = ready.head.load(.seq_cst);
+                    const head = ready.head.value.load(.seq_cst);
                     if (head +% ready.one_lap == tail) return message;
                 } else {
                     // Another producer moved the tail but has not stamped its slot yet.
                     std.atomic.spinLoopHint();
                 }
-                tail = ready.tail.load(.monotonic);
+                tail = ready.tail.value.load(.monotonic);
             }
         }
 
         /// Pop the oldest message, or null when ready is empty.
         fn pop(ready: *Self) ?T {
-            var head = ready.head.load(.monotonic);
+            var head = ready.head.value.load(.monotonic);
+            var backoff: Backoff = .{};
             while (true) {
                 const slot = &ready.slots[head & (ready.one_lap - 1)];
                 const stamp = slot.stamp.load(.acquire);
                 if (stamp == head + 1) {
                     const moved_to = ready.next(head);
-                    const moved = ready.head.cmpxchgWeak(head, moved_to, .seq_cst, .monotonic);
+                    const index = &ready.head.value;
+                    const moved = index.cmpxchgWeak(head, moved_to, .seq_cst, .monotonic);
                     if (moved) |seen| {
                         head = seen;
+                        backoff.spin();
                         continue;
                     }
                     const message = slot.message;
@@ -581,17 +597,32 @@ fn Ready(comptime T: type) type {
                     return message;
                 }
                 if (stamp == head) {
-                    const tail = ready.tail.load(.seq_cst);
+                    const tail = ready.tail.value.load(.seq_cst);
                     if (tail == head) return null;
                 } else {
                     // Another consumer moved the head but has not stamped its slot yet.
                     std.atomic.spinLoopHint();
                 }
-                head = ready.head.load(.monotonic);
+                head = ready.head.value.load(.monotonic);
             }
         }
     };
 }
+
+/// crossbeam's `Backoff::spin` after a lost CAS: 1, 2, 4, ... up to 64 spin hints, so
+/// contending producers stop bouncing the index's cache line on every retry.
+const Backoff = struct {
+    step: u32 = 0,
+
+    const spin_limit = 6;
+
+    fn spin(backoff: *Backoff) void {
+        assert(backoff.step <= spin_limit);
+        const spins = @as(u32, 1) << @intCast(backoff.step);
+        for (0..spins) |_| std.atomic.spinLoopHint();
+        if (backoff.step < spin_limit) backoff.step += 1;
+    }
+};
 
 /// Receiver parking (futures `AtomicWaker`): a futex word whose high bits count wakes and
 /// whose low bit marks a parked receiver. Both sides change it with a read-modify-write, so
