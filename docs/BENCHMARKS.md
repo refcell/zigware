@@ -1647,6 +1647,17 @@ ratios). Raw rounds are in `docs/bench/sweep.tsv`. Load 5 to 15 on 32 threads.
 | `sha512::hash_many::individual` | `count=1 len=262144` | 230 µs | 212 µs | 0.92× | 0.89–0.93 (8) | faster |
 | `archive::get` | `variant=prunable mode=concurrent`, 4 rows | 7.8–8.9 ms | 2.7–2.9 ms | 0.32–0.35× | ≤0.38 (6) | faster |
 | `lthash::checksum` | | 1.17 µs | 1.26 µs | 1.08× | 1.07–1.08 (6) | slower |
+| `blake3::hash_message` | `msg_len=4096`, conc=1 and 8 | 1.35 µs | 1.50 µs | 1.11–1.12× | 1.10–1.14 (6) | slower |
+| `journal::variable_read_random` | `mode=read_many items=10000 size=32` | 11.5 ms | 10.3 ms | 0.89× | 0.35–0.95 (6) | faster |
+| `cache::insert` | `capacity=1024` | 48.0 µs | 30.3 µs | 0.63× | 0.61–0.70 (6) | faster |
+| `cache::insert` | `capacity=16384` | 63.8 µs | 34.4 µs | 0.54× | 0.47–0.57 (6) | faster |
+| `cache::insert` | `capacity=262144` | 67.5 µs | 50.6 µs | 0.77× | 0.57–0.88 (6) | faster |
+| `merkle::update` | `updates=100000 leaves=100000 strategy=BatchedSerial family=mmr` | 18.2 ms | 17.6 ms | 0.97× | 0.93–0.99 (8) | tie |
+| `merkle::add_many` | `items=65536 workers=8 family=mmb` | 1.05 ms | 1.08 ms | 1.03× | 1.02–1.04 (8) | tie |
+| `bls12381::msm` | `group=g1 n=50 conc=1` | 944 µs | 924 µs | 0.98× | 0.97–1.01 (6) | tie |
+| `bls12381::msm` | `group=g1 n=100 conc=1` | 1.60 ms | 1.60 ms | 1.00× | 0.97–1.29 (6) | tie |
+| `bls12381::msm` | `group=g2 n=10 conc=1` | 724 µs | 694 µs | 0.95× | 0.94–0.97 (6) | tie |
+| `bls12381::msm` | `group=g2 n=10 conc=8` | 409 µs | 241 µs | 0.58× | 0.21–1.75 (6) | tie |
 
 - **sha512** was 1.10× at 1 KiB and a tie from 16 KiB on b9f83fde (4 rounds). Two changes
   flipped it, both in `sha512_blocks.zig`: blocks schedule eight at a time on AVX-512, where
@@ -1669,6 +1680,22 @@ ratios). Raw rounds are in `docs/bench/sweep.tsv`. Load 5 to 15 on 32 threads.
   waits on the vector chain. Rotates as byte shuffles were rewritten back into `vprold` by
   LLVM, and forced `vpshufb` was slower. Not yet faster; the same kernel holds
   `blake3::hash_message/msg_len=4096` at 1.12×.
+- **merkle** rows above ran on bcd218db (`add_many` hashes leaves in pairs through the SHA-NI
+  pair kernel), 949b51e4 (overwrites keyed by a folded-multiply position hash) and 9757335d
+  (merkleize reads a parent's children from the height just hashed below through a sorted
+  cursor, not a map lookup each). `update` was 1.05× before them. 02f95ab0 then radix-sorts the
+  updated leaf locations, which pdq sorted in hash order (11% of the row): standalone
+  18.2 → 16.4 ms, to be re-measured. `add_many` w8 is 10% faster than before the pairing
+  (1.19 → 1.06 ms standalone) and is bound by SHA-256 across its eight workers.
+- **bls msm** rows above ran before five msm commits, which standalone take g1 n=50 conc=1
+  from 965 to 775 µs, g1 n=100 from 1.61 to 1.30 ms, g2 n=50 from 2.27 to 1.82 ms, g2 n=200
+  from 7.34 to 5.80 ms, and g1/g2 n=1000 conc=1 (1.12–1.13× in a 1-round screen) from
+  14.1/33.2 to 9.4/24 ms: the tiled msm past 256 points splits scalars by GLV/GLS and
+  accumulates batch-affine (dd3848b6), Straus splits its terms the same way (988b5a01), the
+  split window is chosen for batch-affine costs (7b610f79), a point whose bucket is already in
+  the batch waits for the next batch instead of a Jacobian side bucket (7c1b1dca), and as many
+  windows as the buckets hold share one batch-affine pass and its inversions (0f4975ec).
+  Verdicts follow. This is blst code on commonware's side, not commonware's.
 
 ## Appendix: bench coverage
 

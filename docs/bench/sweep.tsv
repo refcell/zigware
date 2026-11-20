@@ -72,3 +72,80 @@
 4	cryptography	lthash::checksum	1179.4	1269.0	4.75
 5	cryptography	lthash::checksum	1179.8	1271.7	4.71
 6	cryptography	lthash::checksum	1178.9	1277.0	4.60
+# batch 2: zigware on origin/main 3ac948ab..ec9b8ee5 with bcd218db/949b51e4/9757335d (merkle), bls msm before dd3848b6; blake3, journal, cache on main at 966c5df3
+1	cryptography	blake3::hash_message/msg_len=4096 conc=1	1348.0	1500.6	14.38
+1	cryptography	blake3::hash_message/msg_len=4096 conc=8	1344.5	1526.4	14.08
+2	cryptography	blake3::hash_message/msg_len=4096 conc=1	1341.1	1496.3999999999999	14.07
+2	cryptography	blake3::hash_message/msg_len=4096 conc=8	1354.1000000000001	1495.6000000000001	13.29
+3	cryptography	blake3::hash_message/msg_len=4096 conc=1	1360.4	1504.6999999999998	13.26
+3	cryptography	blake3::hash_message/msg_len=4096 conc=8	1345.1	1515.0	13.37
+4	cryptography	blake3::hash_message/msg_len=4096 conc=1	1341.0	1499.6000000000001	13.47
+4	cryptography	blake3::hash_message/msg_len=4096 conc=8	1351.9	1499.9	13.47
+5	cryptography	blake3::hash_message/msg_len=4096 conc=1	1355.6999999999998	1516.8	14.91
+5	cryptography	blake3::hash_message/msg_len=4096 conc=8	1349.9	1520.3	14.92
+6	cryptography	blake3::hash_message/msg_len=4096 conc=1	1366.4	1515.1	14.86
+6	cryptography	blake3::hash_message/msg_len=4096 conc=8	1347.2	1505.2	14.73
+1	storage	journal::variable_read_random/mode=read_many items=10000 size=32	11025000.0	10428000.0	10.01
+2	storage	journal::variable_read_random/mode=read_many items=10000 size=32	11400000.0	10269000.0	9.39
+3	storage	journal::variable_read_random/mode=read_many items=10000 size=32	10928000.0	10109000.0	8.80
+4	storage	journal::variable_read_random/mode=read_many items=10000 size=32	11531000.0	10078000.0	8.10
+5	storage	journal::variable_read_random/mode=read_many items=10000 size=32	32942000.0	11451000.0	7.62
+6	storage	journal::variable_read_random/mode=read_many items=10000 size=32	14013000.0	11452000.0	15.41
+1	utils	cache::insert/capacity=1024	42970.0	30003.0	14.20
+1	utils	cache::insert/capacity=16384	69342.0	33610.0	11.79
+1	utils	cache::insert/capacity=262144	74156.0	50447.0	9.91
+2	utils	cache::insert/capacity=1024	47797.0	29765.0	8.45
+2	utils	cache::insert/capacity=16384	64444.0	34064.0	7.17
+2	utils	cache::insert/capacity=262144	61637.0	50675.0	5.84
+3	utils	cache::insert/capacity=1024	48227.0	30585.0	4.99
+3	utils	cache::insert/capacity=16384	73392.0	34740.0	4.48
+3	utils	cache::insert/capacity=262144	63564.0	50577.0	4.00
+4	utils	cache::insert/capacity=1024	51121.0	31281.0	3.70
+4	utils	cache::insert/capacity=16384	63189.0	36282.0	3.32
+4	utils	cache::insert/capacity=262144	69143.0	51566.0	4.03
+5	utils	cache::insert/capacity=1024	49552.0	31063.0	4.41
+5	utils	cache::insert/capacity=16384	61603.0	35352.0	4.32
+5	utils	cache::insert/capacity=262144	65943.0	57944.0	4.18
+6	utils	cache::insert/capacity=1024	45073.0	29735.0	4.35
+6	utils	cache::insert/capacity=16384	61575.0	34017.0	4.12
+6	utils	cache::insert/capacity=262144	88814.0	50258.0	3.87
+1	storage	merkle::update/updates=100000 leaves=100000 strategy=BatchedSerial family=mmr	18817000.0	18532000.0	6.32
+2	storage	merkle::update/updates=100000 leaves=100000 strategy=BatchedSerial family=mmr	20167000.0	18687000.0	6.28
+3	storage	merkle::update/updates=100000 leaves=100000 strategy=BatchedSerial family=mmr	18665000.0	17468000.0	6.55
+4	storage	merkle::update/updates=100000 leaves=100000 strategy=BatchedSerial family=mmr	18016000.0	17441000.0	6.38
+5	storage	merkle::update/updates=100000 leaves=100000 strategy=BatchedSerial family=mmr	17649000.0	17485000.0	6.25
+6	storage	merkle::update/updates=100000 leaves=100000 strategy=BatchedSerial family=mmr	17735000.0	17262000.0	6.06
+7	storage	merkle::update/updates=100000 leaves=100000 strategy=BatchedSerial family=mmr	18221000.0	17749000.0	5.97
+8	storage	merkle::update/updates=100000 leaves=100000 strategy=BatchedSerial family=mmr	18160000.0	17639000.0	6.06
+1	storage	merkle::add_many/items=65536 workers=8 family=mmb	1052400.0	1072700.0	3.78
+2	storage	merkle::add_many/items=65536 workers=8 family=mmb	1050100.0	1085600.0	4.51
+3	storage	merkle::add_many/items=65536 workers=8 family=mmb	1061800.0	1085100.0	5.12
+4	storage	merkle::add_many/items=65536 workers=8 family=mmb	1047700.0000000001	1091800.0	5.47
+5	storage	merkle::add_many/items=65536 workers=8 family=mmb	1050700.0	1077600.0	5.65
+6	storage	merkle::add_many/items=65536 workers=8 family=mmb	1052400.0	1080000.0	6.25
+7	storage	merkle::add_many/items=65536 workers=8 family=mmb	1052400.0	1082000.0	6.47
+8	storage	merkle::add_many/items=65536 workers=8 family=mmb	1061100.0	1100700.0	6.30
+1	cryptography	bls12381::msm/group=g1 n=100 conc=1	1611800.0	1617500.0	9.17
+2	cryptography	bls12381::msm/group=g1 n=100 conc=1	1675000.0	1629300.0	8.55
+3	cryptography	bls12381::msm/group=g1 n=100 conc=1	1671100.0	2154800.0	18.45
+4	cryptography	bls12381::msm/group=g1 n=100 conc=1	1570300.0	1592400.0	12.46
+5	cryptography	bls12381::msm/group=g1 n=100 conc=1	1555900.0	1555100.0	9.16
+6	cryptography	bls12381::msm/group=g1 n=100 conc=1	1595200.0	1554700.0	7.43
+1	cryptography	bls12381::msm/group=g1 n=50 conc=1	953330.0	924500.0	6.27
+2	cryptography	bls12381::msm/group=g1 n=50 conc=1	926310.0	926230.0	6.58
+3	cryptography	bls12381::msm/group=g1 n=50 conc=1	939460.0	922800.0	5.35
+4	cryptography	bls12381::msm/group=g1 n=50 conc=1	944720.0	914200.0	4.34
+5	cryptography	bls12381::msm/group=g1 n=50 conc=1	946270.0	915240.0	3.44
+6	cryptography	bls12381::msm/group=g1 n=50 conc=1	943940.0	952770.0	4.12
+1	cryptography	bls12381::msm/group=g2 n=10 conc=1	715700.0	680870.0	4.42
+1	cryptography	bls12381::msm/group=g2 n=10 conc=8	393510.0	228720.0	5.76
+2	cryptography	bls12381::msm/group=g2 n=10 conc=1	713710.0	675380.0	5.54
+2	cryptography	bls12381::msm/group=g2 n=10 conc=8	1133300.0	237010.0	5.92
+3	cryptography	bls12381::msm/group=g2 n=10 conc=1	730240.0	695070.0	9.24
+3	cryptography	bls12381::msm/group=g2 n=10 conc=8	406670.0	244690.0	8.36
+4	cryptography	bls12381::msm/group=g2 n=10 conc=1	724100.0	695840.0	6.34
+4	cryptography	bls12381::msm/group=g2 n=10 conc=8	412320.0	240570.0	5.39
+5	cryptography	bls12381::msm/group=g2 n=10 conc=1	733160.0	692690.0	13.13
+5	cryptography	bls12381::msm/group=g2 n=10 conc=8	412980.0	241490.0	7.10
+6	cryptography	bls12381::msm/group=g2 n=10 conc=1	723020.0	700740.0	9.03
+6	cryptography	bls12381::msm/group=g2 n=10 conc=8	391360.0	685580.0	6.97
