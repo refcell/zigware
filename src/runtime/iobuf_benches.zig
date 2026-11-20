@@ -49,13 +49,12 @@ fn run_size(runner: *bench.Runner, comptime size: usize) !void {
     var native = native_mut.freeze();
     defer native.deinit(gpa);
     const borrowed = IoBuf.from_static(&payload);
-    for (std.enums.values(Mode)) |mode| {
+    inline for (comptime std.enums.values(Mode)) |mode| {
         const benchmark = bench.Benchmark.init("iobuf::iobuf::decode_fixed")
             .with_param("mode", mode)
             .with_param("size", size);
-        var workload: Decode(size) = .{
+        var workload: Decode(size, mode) = .{
             .gpa = gpa,
-            .mode = mode,
             .payload = &payload,
             .borrowed = borrowed,
             .native = native,
@@ -64,19 +63,18 @@ fn run_size(runner: *bench.Runner, comptime size: usize) !void {
     }
 }
 
-fn Decode(comptime size: usize) type {
+fn Decode(comptime size: usize, comptime mode: Mode) type {
     const Value = [size]u8;
     return struct {
         const Self = @This();
 
         gpa: Allocator,
-        mode: Mode,
         payload: *const Value,
         borrowed: IoBuf,
         native: IoBuf,
 
-        pub fn iter(self: *Self) !Value {
-            const value: Value = switch (self.mode) {
+        pub fn iter(self: *Self) !void {
+            const value: Value = switch (mode) {
                 .iobuf_bytes => try self.decode_whole(self.borrowed),
                 .iobuf_bytes_ref => try self.decode_ref(self.borrowed),
                 .iobuf_native => try self.decode_whole(self.native),
@@ -90,7 +88,8 @@ fn Decode(comptime size: usize) type {
                 .slice => try codec.decode(Value, self.gpa, self.payload),
             };
             assert(value[0] == self.payload[0]);
-            return value;
+            // As `black_box(decode())`: the value escapes through memory.
+            std.mem.doNotOptimizeAway(&value);
         }
 
         /// Decode a clone of `source` whole, then drop it.
