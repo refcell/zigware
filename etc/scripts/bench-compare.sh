@@ -9,6 +9,9 @@
 # commonware's tokio runner uses `env::temp_dir()` and zigware's benches `./.zig-cache/tmp`,
 # so commonware runs with TMPDIR and zigware with its working directory under it.
 # BENCH_FILTER keeps only the benches whose name contains it.
+# BENCH_WARMUP_MS, BENCH_MEASURE_MS, and BENCH_SAMPLES (default 1000, 3000, 50) set both sides'
+# warm-up, measurement time, and sample count, for rows whose iterations rebuild a large fixture
+# (qmdb's groups run at commonware's own sample_size(10)); raw.tsv's method line records them.
 # BENCH_SET=all compares every bench a zigware harness lists that a commonware criterion bench
 # also lists under the same name, instead of the hand-picked rows below; BENCH_SET=<package>
 # (such as formatting or storage) does the same for one zigware package. The rows come from
@@ -41,8 +44,13 @@ mkdir -p "$out"
 scratch=$(mktemp -d "${BENCH_DIR:-${TMPDIR:-/tmp}}/bench-compare.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT
 # The same criterion settings on both sides.
-cw_args=(--bench --noplot --warm-up-time 1 --measurement-time 3 --sample-size 50)
-zw_args=(--bench --warm-up-ms 1000 --measurement-ms 3000 --samples 50)
+warmup_ms=${BENCH_WARMUP_MS:-1000}
+measure_ms=${BENCH_MEASURE_MS:-3000}
+samples=${BENCH_SAMPLES:-50}
+seconds() { awk -v ms="$1" 'BEGIN { print ms / 1000 }'; }
+cw_args=(--bench --noplot --warm-up-time "$(seconds "$warmup_ms")"
+  --measurement-time "$(seconds "$measure_ms")" --sample-size "$samples")
+zw_args=(--bench --warm-up-ms "$warmup_ms" --measurement-ms "$measure_ms" --samples "$samples")
 
 # commonware bench target | zigware package | the bench name both print.
 benches=(

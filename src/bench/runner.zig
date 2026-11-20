@@ -1,10 +1,12 @@
 //! `Runner`: measures workloads the way Criterion does for `zig build bench`, runs each once
 //! for `zig build test`, and lists names for `--list`.
 //!
-//! A measured run warms up by doubling the iteration count until the warm-up time passes,
-//! estimates the time per iteration, then takes `samples` samples of an equal iteration count
-//! sized to fill the measurement time, and reports the fastest, median, and slowest time per
-//! iteration. Every loop is bounded by the configured times and `iters_max`.
+//! A measured run warms up by doubling the iteration count until the warm-up's wall time
+//! passes, and estimates the wall time per iteration: the warm-up's total over its iterations,
+//! counting the `setup`, `before_iter`, and `teardown` hooks, as Criterion's `iter_custom` counts
+//! the fixture commonware's benches build inside it. It then takes `samples` samples of an equal
+//! iteration count sized to fill the measurement time, and reports the fastest, median, and
+//! slowest time per iteration. Every loop is bounded by the configured times and `iters_max`.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -101,14 +103,23 @@ pub const Runner = struct {
         var iters: u64 = 1;
         var warm_ns: u64 = 0;
         var last_ns: u64 = 0;
-        // Doubling from one reaches `iters_max` within 64 rounds.
+        var warm_iters: u64 = 0;
+        // Doubling from one reaches `iters_max` within 64 rounds. As Criterion's `iter_custom`
+        // does, the warm-up and the estimate count wall time, every hook included, so a workload
+        // that rebuilds a large fixture (per call in `setup`, or per iteration in `before_iter`)
+        // runs as many iterations as its commonware counterpart.
         for (0..64) |_| {
-            last_ns = try bench.criterion(runner.io, workload, iters);
+            const start = std.Io.Clock.awake.now(runner.io);
+            _ = try bench.criterion(runner.io, workload, iters);
+            const end = std.Io.Clock.awake.now(runner.io);
+            last_ns = @intCast(@max(end.nanoseconds - start.nanoseconds, 0));
             warm_ns +|= last_ns;
+            warm_iters += iters;
             if (warm_ns >= config.warm_up_ns or iters >= config.iters_max) break;
             iters = @min(iters * 2, config.iters_max);
         }
-        const per_iter_ns = @max(last_ns / iters, 1);
+        assert(warm_iters >= iters);
+        const per_iter_ns = @max(warm_ns / warm_iters, 1);
         const sample_ns = config.measurement_ns / config.samples;
         const sample_iters = std.math.clamp(sample_ns / per_iter_ns, 1, config.iters_max);
 
@@ -214,6 +225,48 @@ test "runner measures ordered per-iteration times" {
     try testing.expect(summary.iters_per_sample >= 1);
     try runner.run(bench.Benchmark.init("bench::sum"), &workload);
     try testing.expect(std.mem.indexOf(u8, out.buffered(), "time:   [") != null);
+}
+
+/// A workload whose untimed setup costs far more than its timed iteration.
+const SlowSetup = struct {
+    io: std.Io,
+    iters: u64 = 0,
+
+    pub fn before_iter(workload: *SlowSetup) void {
+        const start = std.Io.Clock.awake.now(workload.io);
+        while (true) {
+            const now = std.Io.Clock.awake.now(workload.io);
+            if (now.nanoseconds - start.nanoseconds >= 100 * std.time.ns_per_us) break;
+        }
+    }
+
+    pub fn iter(workload: *SlowSetup) u64 {
+        workload.iters += 1;
+        return workload.iters;
+    }
+};
+
+test "runner plans samples from wall time, setup included, as criterion does" {
+    var out_buffer: [64]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&out_buffer);
+    var runner: Runner = .{
+        .io = testing.io,
+        .allocator = testing.allocator,
+        .out = &out,
+        .inputs = .standard,
+        .config = .{
+            .warm_up_ns = 10 * std.time.ns_per_ms,
+            .measurement_ns = 20 * std.time.ns_per_ms,
+            .samples = 2,
+            .iters_max = 1000,
+        },
+    };
+    var workload: SlowSetup = .{ .io = testing.io };
+    const summary = try runner.measure(&workload);
+    // About 100 µs per iteration of wall time fits at most 100 in a 10 ms sample; planning from
+    // the timed span alone would run `iters_max`.
+    try testing.expect(summary.iters_per_sample >= 1);
+    try testing.expect(summary.iters_per_sample <= 100);
 }
 
 test "times print with four significant digits" {
