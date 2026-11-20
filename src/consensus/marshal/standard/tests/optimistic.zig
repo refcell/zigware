@@ -30,6 +30,7 @@ const Marshal = @FieldType(Validator, "mailbox");
 const Stream = @import("../../ancestry.zig").AncestorStream(Marshal);
 const Recording = mocks.verifying.RecordingVerifyingApp(harness.B, Ctx, harness.Ctx, Stream);
 const Observed = mocks.verifying.Observed(D);
+const soak = @import("../../mocks/soak.zig");
 const Wrapper = @import("../deferred.zig").Deferred(
     Ctx,
     harness.S,
@@ -312,9 +313,7 @@ fn Case(comptime linked: bool) type {
 
         fn run() !Outcome {
             const config: runtime.deterministic.Config = .{ .timeout_ns = 30 * std.time.ns_per_s };
-            var runner = try runtime.deterministic.Runner.init(gpa, config);
-            defer runner.deinit();
-            try try runner.start_context(body, .{});
+            try soak.run(gpa, config, body, .{});
             return outcome;
         }
     };

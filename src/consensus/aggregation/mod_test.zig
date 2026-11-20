@@ -661,11 +661,13 @@ const AdmittedSigner = struct {
     }
 
     fn run() !void {
-        var runner = try runtime.deterministic.Runner.init(gpa, .{
-            .timeout_ns = 10 * std.time.ns_per_s,
-        });
-        defer runner.deinit();
-        try (try runner.start(body, .{ runner.io(), runner.storage(), runner.metrics() }));
+        const config: runtime.deterministic.Config = .{ .timeout_ns = 10 * std.time.ns_per_s };
+        try runtime.deterministic.soak(gpa, config, {}, struct {
+            fn round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+                const args = .{ runner.io(), runner.storage(), runner.metrics() };
+                try (try runner.start(body, args));
+            }
+        }.round);
     }
 };
 
@@ -741,10 +743,15 @@ fn UncleanByzantineShutdown(comptime S: type, comptime fixture: anytype) type {
         }
 
         fn run() !void {
-            var runner = try runtime.deterministic.Runner.init(gpa, .{
-                .timeout_ns = 45 * std.time.ns_per_s,
-            });
-            defer runner.deinit();
+            const config: runtime.deterministic.Config = .{ .timeout_ns = 45 * std.time.ns_per_s };
+            try runtime.deterministic.soak(gpa, config, {}, struct {
+                fn round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+                    try shut_down_until_complete(runner);
+                }
+            }.round);
+        }
+
+        fn shut_down_until_complete(runner: *runtime.deterministic.Runner) !void {
             const min_shutdowns = 4;
             const max_shutdowns = 10;
             var shutdowns: u32 = 0;
@@ -814,12 +821,14 @@ fn UncleanShutdownWithUnsignedHeight(comptime S: type, comptime fixture: anytype
         }
 
         fn run() !void {
-            var runner = try runtime.deterministic.Runner.init(gpa, .{
-                .timeout_ns = 60 * std.time.ns_per_s,
-            });
-            defer runner.deinit();
-            try (try runner.start(first, .{ runner.io(), runner.storage(), runner.metrics() }));
-            try (try runner.start(second, .{ runner.io(), runner.storage(), runner.metrics() }));
+            const config: runtime.deterministic.Config = .{ .timeout_ns = 60 * std.time.ns_per_s };
+            try runtime.deterministic.soak(gpa, config, {}, struct {
+                fn round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+                    const args = .{ runner.io(), runner.storage(), runner.metrics() };
+                    try (try runner.start(first, args));
+                    try (try runner.start(second, args));
+                }
+            }.round);
         }
     };
 }

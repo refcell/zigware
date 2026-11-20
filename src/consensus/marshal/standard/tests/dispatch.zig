@@ -27,6 +27,7 @@ const relay_api = @import("../../application/relay.zig");
 const gpa = testing.allocator;
 const H = harness.StandardHarness;
 const App = @import("../../mocks/application.zig").Application(harness.B);
+const soak = @import("../../mocks/soak.zig");
 const Ctx = runtime.deterministic.Context;
 const Height = types.Height;
 const Round = types.Round;
@@ -36,9 +37,7 @@ const Started = common.Started(harness.Provider, App, common.RecordingBuffer);
 
 fn run(comptime body: fn (Ctx) anyerror!void) !void {
     const config: runtime.deterministic.Config = .{ .timeout_ns = 30 * std.time.ns_per_s };
-    var runner = try runtime.deterministic.Runner.init(gpa, config);
-    defer runner.deinit();
-    try try runner.start_context(body, .{});
+    try soak.run(gpa, config, body, .{});
 }
 
 /// A fixture and a buffered actor started at genesis (commonware `start_standard_actor` with
@@ -983,9 +982,7 @@ fn processed_invariant_body(ctx: Ctx) anyerror!void {
 
 test "standard update block processed height invariant" {
     const config: runtime.deterministic.Config = .{ .timeout_ns = 60 * std.time.ns_per_s };
-    var runner = try runtime.deterministic.Runner.init(gpa, config);
-    defer runner.deinit();
-    try try runner.start_context(processed_invariant_body, .{});
+    try soak.run(gpa, config, processed_invariant_body, .{});
 }
 
 const Marshal = Started.A.Mailbox;
@@ -1457,9 +1454,11 @@ fn read_failure_body(ctx: Ctx, runner: *runtime.deterministic.Runner) anyerror!v
 
 test "standard failed digest lookup read stops the actor" {
     const config: runtime.deterministic.Config = .{ .timeout_ns = 30 * std.time.ns_per_s };
-    var runner = try runtime.deterministic.Runner.init(gpa, config);
-    defer runner.deinit();
-    try try runner.start_context(read_failure_body, .{&runner});
+    try runtime.deterministic.soak(gpa, config, {}, struct {
+        fn round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start_context(read_failure_body, .{runner});
+        }
+    }.round);
 }
 
 fn processed_is_one(ctx: Ctx) bool {

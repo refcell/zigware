@@ -21,6 +21,7 @@ const update = @import("../update.zig");
 const handler = @import("../resolver/handler.zig");
 const variant = @import("variant.zig");
 const actor = @import("actor.zig");
+const soak = @import("../mocks/soak.zig");
 
 const gpa = testing.allocator;
 const Sha256 = cryptography.Sha256;
@@ -298,9 +299,7 @@ fn finalize_at(node: *Node, fixture: *const Fixture, blocks: []const V.Block, in
 }
 
 fn run(comptime body: fn (Ctx) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try try runner.start_context(body, .{});
+    try soak.run(gpa, .{}, body, .{});
 }
 
 test "finalized blocks reach the application in height order" {

@@ -10,6 +10,7 @@ const utils = @import("utils");
 const Sha256 = @import("cryptography").Sha256;
 const types = @import("../../types.zig");
 const gates = @import("gates.zig");
+const soak = @import("../mocks/soak.zig");
 
 const Round = types.Round;
 const D = Sha256.Digest;
@@ -202,7 +203,7 @@ test "resolve" {
 }
 
 test "forward cancels input when output closes" {
-    _ = try run(0, struct {
+    try soak.run_io(gpa, .{ .seed = 0 }, struct {
         fn body(io: Io) anyerror!void {
             var input = try oneshot.channel(bool, gpa, io);
             defer input.sender.deinit();
@@ -226,7 +227,7 @@ fn forward_task(
 }
 
 test "forward cancels in flight input when output closes" {
-    _ = try run(0, struct {
+    try soak.run_io(gpa, .{ .seed = 0 }, struct {
         fn body(io: Io) anyerror!void {
             var input = try oneshot.channel(bool, gpa, io);
             defer input.sender.deinit();
@@ -251,7 +252,7 @@ test "forward cancels in flight input when output closes" {
 test "a canceled forward stops its waits before returning" {
     // A crash cancels a forward that waits on both channels; its select branches must end
     // before the frame that owns them, or they later touch freed memory.
-    _ = try run(0, struct {
+    try soak.run_io(gpa, .{ .seed = 0 }, struct {
         fn body(io: Io) anyerror!void {
             var input = try oneshot.channel(bool, gpa, io);
             defer input.sender.deinit();
@@ -275,7 +276,7 @@ test "a canceled forward stops its waits before returning" {
 }
 
 test "drive adopts a ready verdict without fallback" {
-    _ = try run(0, struct {
+    try soak.run_io(gpa, .{ .seed = 0 }, struct {
         fn body(io: Io) anyerror!void {
             for ([_]bool{ true, false }) |verdict| {
                 var task = try oneshot.channel(GateOutcome, gpa, io);
@@ -290,7 +291,7 @@ test "drive adopts a ready verdict without fallback" {
 }
 
 test "drive recovers through the fallback" {
-    _ = try run(0, struct {
+    try soak.run_io(gpa, .{ .seed = 0 }, struct {
         fn body(io: Io) anyerror!void {
             // A recover outcome, then a dropped gate sender, each publish the fallback verdict.
             for ([_]bool{ true, false }) |recover| {
@@ -309,7 +310,7 @@ test "drive recovers through the fallback" {
 }
 
 test "drive abandons when the consensus receiver is dropped" {
-    _ = try run(0, struct {
+    try soak.run_io(gpa, .{ .seed = 0 }, struct {
         fn body(io: Io) anyerror!void {
             var task = try oneshot.channel(GateOutcome, gpa, io);
             defer task.sender.deinit();
@@ -322,7 +323,7 @@ test "drive abandons when the consensus receiver is dropped" {
 }
 
 test "stage handshake" {
-    _ = try run(0, struct {
+    try soak.run_io(gpa, .{ .seed = 0 }, struct {
         fn body(io: Io) anyerror!void {
             var registry: TestGates = try .init(gpa, io);
             defer registry.deinit();
@@ -360,7 +361,7 @@ const RestagePersist = struct {
 };
 
 test "claim takes the gate with its staged proposal" {
-    _ = try run(0, struct {
+    try soak.run_io(gpa, .{ .seed = 0 }, struct {
         fn body(io: Io) anyerror!void {
             var registry: TestGates = try .init(gpa, io);
             defer registry.deinit();
@@ -418,7 +419,7 @@ test "claim releases the other gates of its round" {
 }
 
 test "send staged marks sent and keeps the entry" {
-    _ = try run(0, struct {
+    try soak.run_io(gpa, .{ .seed = 0 }, struct {
         fn body(io: Io) anyerror!void {
             var registry: TestGates = try .init(gpa, io);
             defer registry.deinit();
@@ -441,7 +442,7 @@ test "send staged marks sent and keeps the entry" {
 }
 
 test "restaging after a take or a claim stays sent" {
-    _ = try run(0, struct {
+    try soak.run_io(gpa, .{ .seed = 0 }, struct {
         fn body(io: Io) anyerror!void {
             var registry: TestGates = try .init(gpa, io);
             defer registry.deinit();
@@ -476,7 +477,7 @@ test "restaging after a take or a claim stays sent" {
 }
 
 test "the retain cutoff suppresses sends" {
-    _ = try run(0, struct {
+    try soak.run_io(gpa, .{ .seed = 0 }, struct {
         fn body(io: Io) anyerror!void {
             var registry: TestGates = try .init(gpa, io);
             defer registry.deinit();
@@ -498,7 +499,7 @@ test "the retain cutoff suppresses sends" {
 }
 
 test "retain after drops staged proposals and abandons the handshake" {
-    _ = try run(0, struct {
+    try soak.run_io(gpa, .{ .seed = 0 }, struct {
         fn body(io: Io) anyerror!void {
             var registry: TestGates = try .init(gpa, io);
             defer registry.deinit();

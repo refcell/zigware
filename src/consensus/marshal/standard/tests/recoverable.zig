@@ -26,6 +26,7 @@ const Marshal = @FieldType(Validator, "mailbox");
 const Stream = @import("../../ancestry.zig").AncestorStream(Marshal);
 const Mock = mocks.verifying.MockVerifyingApp(B, Ctx, harness.Ctx, Stream);
 const InlineWrapper = @import("../inline.zig").Inline(Ctx, harness.S, Mock, B, types.FixedEpocher);
+const soak = @import("../../mocks/soak.zig");
 const DeferredWrapper =
     @import("../deferred.zig").Deferred(Ctx, harness.S, Mock, B, types.FixedEpocher);
 
@@ -35,9 +36,7 @@ fn epocher() types.FixedEpocher {
 
 fn run(comptime body: fn (Ctx) anyerror!void) !void {
     const config: runtime.deterministic.Config = .{ .timeout_ns = 30 * std.time.ns_per_s };
-    var runner = try runtime.deterministic.Runner.init(gpa, config);
-    defer runner.deinit();
-    try try runner.start_context(body, .{});
+    try soak.run(gpa, config, body, .{});
 }
 
 fn round_at(view: u64) Round {

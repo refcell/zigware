@@ -21,6 +21,7 @@ const common = @import("common.zig");
 const gpa = testing.allocator;
 const H = harness.StandardHarness;
 const App = @import("../../mocks/application.zig").Application(harness.B);
+const soak = @import("../../mocks/soak.zig");
 const Ctx = runtime.deterministic.Context;
 const Height = types.Height;
 const Round = types.Round;
@@ -31,9 +32,7 @@ const Block = common.Block;
 const timed: runtime.deterministic.Config = .{ .timeout_ns = 30 * std.time.ns_per_s };
 
 fn run(comptime body: fn (Ctx) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, timed);
-    defer runner.deinit();
-    try try runner.start_context(body, .{});
+    try soak.run(gpa, timed, body, .{});
 }
 
 fn round_at(view: u64) Round {
@@ -1396,11 +1395,14 @@ test "standard finalized delivery verifies with verify-only scope" {
     state.finalization = try harness.make_finalization(gpa, &state.fixture, proposal, quorum);
     defer state.finalization.deinit(gpa);
 
-    var runner = try runtime.deterministic.Runner.init(gpa, timed);
-    defer runner.deinit();
-    try try runner.start_context(VerifyOnly.deliver_and_stop, .{&state});
-    // A second start on the same runner recovers its storage (commonware's `Checkpoint`).
-    try try runner.start_context(VerifyOnly.recover, .{&state});
+    try runtime.deterministic.soak(gpa, timed, &state, struct {
+        fn round(self: *const VerifyOnly, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start_context(VerifyOnly.deliver_and_stop, .{self});
+            // A second start on the same runner recovers its storage (commonware's
+            // `Checkpoint`).
+            try try runner.start_context(VerifyOnly.recover, .{self});
+        }
+    }.round);
 }
 
 // A valid certificate only authorizes the bytes whose digest it commits to.
@@ -2561,9 +2563,12 @@ test "standard application shutdown redelivers pending ack after restart" {
     defer state.fixture.deinit(gpa);
     state.block = try block_at(try genesis_digest(), 1, 100);
     defer state.block.deinit();
-    var runner = try runtime.deterministic.Runner.init(gpa, timed);
-    defer runner.deinit();
-    try try runner.start_context(Shutdown.shut_down_pending, .{&state});
-    // A second start on the same runner recovers its storage (commonware's `Checkpoint`).
-    try try runner.start_context(Shutdown.redeliver, .{&state});
+    try runtime.deterministic.soak(gpa, timed, &state, struct {
+        fn round(self: *const Shutdown, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start_context(Shutdown.shut_down_pending, .{self});
+            // A second start on the same runner recovers its storage (commonware's
+            // `Checkpoint`).
+            try try runner.start_context(Shutdown.redeliver, .{self});
+        }
+    }.round);
 }

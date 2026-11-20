@@ -21,6 +21,7 @@ const core = @import("../core/root.zig");
 const harness = @import("harness.zig");
 const scenarios = @import("scenarios.zig");
 const Application = @import("application.zig").Application;
+const soak = @import("soak.zig");
 
 const Ctx = runtime.deterministic.Context;
 const Height = types.Height;
@@ -42,12 +43,10 @@ fn run_timed(
     args: anytype,
 ) !void {
     assert(timeout_s > 0);
-    var runner = try runtime.deterministic.Runner.init(gpa, .{
+    try soak.run(gpa, .{
         .seed = seed,
         .timeout_ns = timeout_s * std.time.ns_per_s,
-    });
-    defer runner.deinit();
-    try try runner.start_context(body, args);
+    }, body, args);
 }
 
 /// The height of a marshal block.

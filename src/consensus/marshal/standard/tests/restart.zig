@@ -14,6 +14,7 @@ const common = @import("common.zig");
 const gpa = testing.allocator;
 const H = harness.StandardHarness;
 const App = @import("../../mocks/application.zig").Application(harness.B);
+const soak = @import("../../mocks/soak.zig");
 const Validator = H.Validator(App);
 const Ctx = runtime.deterministic.Context;
 const Height = types.Height;
@@ -177,9 +178,7 @@ fn repairs_trailing_missing_body(ctx: Ctx) anyerror!void {
 }
 
 test "standard restart repairs trailing missing finalized block" {
-    var runner = try runtime.deterministic.Runner.init(gpa, timed);
-    defer runner.deinit();
-    try try runner.start_context(repairs_trailing_missing_body, .{});
+    try soak.run(gpa, timed, repairs_trailing_missing_body, .{});
 }
 
 /// Validator 0 has blocks 1 and 3 and the finalizations of 2 and 3, but not block 2.
@@ -204,9 +203,7 @@ fn repairs_internal_missing_body(ctx: Ctx) anyerror!void {
 }
 
 test "standard restart repairs internal missing finalized block" {
-    var runner = try runtime.deterministic.Runner.init(gpa, timed);
-    defer runner.deinit();
-    try try runner.start_context(repairs_internal_missing_body, .{});
+    try soak.run(gpa, timed, repairs_internal_missing_body, .{});
 }
 
 /// Validator 0 has blocks 1 and 2 but only the finalization of block 1.
@@ -234,9 +231,7 @@ fn surfaces_unfinalized_block_body(ctx: Ctx) anyerror!void {
 }
 
 test "standard restart surfaces block without finalization" {
-    var runner = try runtime.deterministic.Runner.init(gpa, timed);
-    defer runner.deinit();
-    try try runner.start_context(surfaces_unfinalized_block_body, .{});
+    try soak.run(gpa, timed, surfaces_unfinalized_block_body, .{});
 }
 
 /// A finalized block can be durable without its finalization when a crash interrupts the
@@ -278,9 +273,7 @@ fn stores_late_finalization_body(ctx: Ctx) anyerror!void {
 }
 
 test "standard restart stores reported finalization for processed block" {
-    var runner = try runtime.deterministic.Runner.init(gpa, timed);
-    defer runner.deinit();
-    try try runner.start_context(stores_late_finalization_body, .{});
+    try soak.run(gpa, timed, stores_late_finalization_body, .{});
 }
 
 /// Validator 0 has block 1 and the finalizations of blocks 1 through 5.
@@ -298,9 +291,7 @@ fn repairs_multiple_trailing_body(ctx: Ctx) anyerror!void {
 }
 
 test "standard restart repairs multiple trailing missing finalized blocks" {
-    var runner = try runtime.deterministic.Runner.init(gpa, timed);
-    defer runner.deinit();
-    try try runner.start_context(repairs_multiple_trailing_body, .{});
+    try soak.run(gpa, timed, repairs_multiple_trailing_body, .{});
 }
 
 /// The finalized tip is far ahead of the last stored block and only the tip has a
@@ -341,11 +332,9 @@ fn repairs_large_pending_tip_body(ctx: Ctx) anyerror!void {
 }
 
 test "standard restart repairs large pending tip by commitment" {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{
+    try soak.run(gpa, .{
         .timeout_ns = 120 * std.time.ns_per_s,
-    });
-    defer runner.deinit();
-    try try runner.start_context(repairs_large_pending_tip_body, .{});
+    }, repairs_large_pending_tip_body, .{});
 }
 
 /// Every finalized block is on disk, so restart needs no repair.
@@ -365,9 +354,7 @@ fn consistent_restart_body(ctx: Ctx) anyerror!void {
 }
 
 test "standard restart no trailing finalizations is noop" {
-    var runner = try runtime.deterministic.Runner.init(gpa, timed);
-    defer runner.deinit();
-    try try runner.start_context(consistent_restart_body, .{});
+    try soak.run(gpa, timed, consistent_restart_body, .{});
 }
 
 /// Block 2 was notarized into the cache but never reached the finalized archive; with no
@@ -391,9 +378,7 @@ fn repairs_from_cache_body(ctx: Ctx) anyerror!void {
 }
 
 test "standard restart repairs trailing block from local cache" {
-    var runner = try runtime.deterministic.Runner.init(gpa, timed);
-    defer runner.deinit();
-    try try runner.start_context(repairs_from_cache_body, .{});
+    try soak.run(gpa, timed, repairs_from_cache_body, .{});
 }
 
 /// A resolved acknowledgement is handled before a later mailbox message (commonware's biased
@@ -420,9 +405,7 @@ fn ack_precedes_mailbox_body(ctx: Ctx) anyerror!void {
 }
 
 test "standard acknowledgement is processed before a later mailbox message" {
-    var runner = try runtime.deterministic.Runner.init(gpa, timed);
-    defer runner.deinit();
-    try try runner.start_context(ack_precedes_mailbox_body, .{});
+    try soak.run(gpa, timed, ack_precedes_mailbox_body, .{});
 }
 
 fn subscribed_once(buffer: common.RecordingBuffer) bool {
@@ -470,8 +453,6 @@ test "standard ready buffer waiter is handled before a later mailbox message" {
     for (0..8) |run_seed| {
         var config = timed;
         config.seed = run_seed;
-        var runner = try runtime.deterministic.Runner.init(gpa, config);
-        defer runner.deinit();
-        try try runner.start_context(waiter_precedes_mailbox_body, .{});
+        try soak.run(gpa, config, waiter_precedes_mailbox_body, .{});
     }
 }

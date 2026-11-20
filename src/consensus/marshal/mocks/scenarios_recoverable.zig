@@ -15,6 +15,7 @@ const types = @import("../../types.zig");
 const simplex_types = @import("../../simplex/types.zig");
 const harness = @import("harness.zig");
 const Application = @import("application.zig").Application;
+const soak = @import("soak.zig");
 
 const Ctx = runtime.deterministic.Context;
 const Height = types.Height;
@@ -120,12 +121,14 @@ pub fn SuccessRecoverable(comptime H: type, comptime acknowledged: Acknowledged)
             const parent = harness.genesis_parent();
             state.block = try H.make_test_block(gpa, parent, parent_commitment, .new(1), 100, 4);
             defer H.Variant.deinit_block(gpa, &state.block);
-            var runner = try runtime.deterministic.Runner.init(gpa, contract_config(seed));
-            defer runner.deinit();
-            try try runner.start_context(acknowledge, .{&state});
-            for (0..restart_cycles_for_seed(seed)) |cycle| {
-                try try runner.start_context(recover, .{ &state, cycle });
-            }
+            try runtime.deterministic.soak(gpa, contract_config(seed), &state, struct {
+                fn round(shared: *const State, runner: *runtime.deterministic.Runner) !void {
+                    try try runner.start_context(acknowledge, .{shared});
+                    for (0..restart_cycles_for_seed(shared.seed)) |cycle| {
+                        try try runner.start_context(recover, .{ shared, cycle });
+                    }
+                }
+            }.round);
         }
 
         fn acknowledge(ctx: Ctx, state: *const State) anyerror!void {
@@ -183,9 +186,7 @@ fn run_timed(gpa: Allocator, comptime H: type, comptime body: anytype) !void {
     var fixture = try H.fixture(gpa, &rng);
     defer fixture.deinit(gpa);
     const config: runtime.deterministic.Config = .{ .timeout_ns = 60 * std.time.ns_per_s };
-    var runner = try runtime.deterministic.Runner.init(gpa, config);
-    defer runner.deinit();
-    try try runner.start_context(body, .{&fixture});
+    try soak.run(gpa, config, body, .{&fixture});
 }
 
 /// Whether `get_block(digest)` finds the block at `validator`.
@@ -347,11 +348,13 @@ pub fn ReverifySameRound(comptime H: type, comptime action: Reverify) type {
             state.block_b = try H.make_test_block(gpa, parent, commitment, .new(1), 2, 4);
             defer H.Variant.deinit_block(gpa, &state.block_b);
             assert(!H.digest(&state.block_a).eql(H.digest(&state.block_b)));
-            var runner = try runtime.deterministic.Runner.init(gpa, contract_config(0));
-            defer runner.deinit();
-            try try runner.start_context(verify_a, .{&state});
-            try try runner.start_context(phase_two, .{&state});
-            try try runner.start_context(recover, .{&state});
+            try runtime.deterministic.soak(gpa, contract_config(0), &state, struct {
+                fn round(shared: *const State, runner: *runtime.deterministic.Runner) !void {
+                    try try runner.start_context(verify_a, .{shared});
+                    try try runner.start_context(phase_two, .{shared});
+                    try try runner.start_context(recover, .{shared});
+                }
+            }.round);
         }
 
         fn verify_a(ctx: Ctx, state: *const State) anyerror!void {
@@ -434,12 +437,14 @@ pub fn DeliveryVisibilityRecoverable(comptime H: type) type {
             state.finalization =
                 try H.make_finalization(gpa, &state.fixture, proposal, harness.quorum);
             defer state.finalization.deinit(gpa);
-            var runner = try runtime.deterministic.Runner.init(gpa, contract_config(seed));
-            defer runner.deinit();
-            try try runner.start_context(deliver, .{&state});
-            for (0..restart_cycles_for_seed(seed)) |cycle| {
-                try try runner.start_context(recover, .{ &state, cycle });
-            }
+            try runtime.deterministic.soak(gpa, contract_config(seed), &state, struct {
+                fn round(shared: *const State, runner: *runtime.deterministic.Runner) !void {
+                    try try runner.start_context(deliver, .{shared});
+                    for (0..restart_cycles_for_seed(shared.seed)) |cycle| {
+                        try try runner.start_context(recover, .{ shared, cycle });
+                    }
+                }
+            }.round);
         }
 
         fn deliver(ctx: Ctx, state: *const State) anyerror!void {

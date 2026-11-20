@@ -29,13 +29,12 @@ const Round = types.Round;
 const D = harness.D;
 const Block = common.Block;
 const core_mailbox = @import("../../core/mailbox.zig");
+const soak = @import("../../mocks/soak.zig");
 const BlockReceiver = utils.channel.oneshot.Receiver(Block);
 
 fn run_for(seconds: u64, comptime body: fn (Ctx) anyerror!void) !void {
     const config: runtime.deterministic.Config = .{ .timeout_ns = seconds * std.time.ns_per_s };
-    var runner = try runtime.deterministic.Runner.init(gpa, config);
-    defer runner.deinit();
-    try try runner.start_context(body, .{});
+    try soak.run(gpa, config, body, .{});
 }
 
 fn round_at(view: u64) Round {

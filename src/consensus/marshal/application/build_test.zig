@@ -25,6 +25,7 @@ const ConsensusContext = simplex_types.Context(D, Key);
 const TestGates = gates.Gates(D, V);
 const gpa = testing.allocator;
 const Receiver = @import("utils").channel.oneshot.Receiver;
+const soak = @import("../mocks/soak.zig");
 
 /// The ancestry handed to the application: only the parent height.
 const Ancestry = struct {
@@ -126,9 +127,7 @@ fn prepare(ctx: Ctx, registry: TestGates, app: TestApp, checks: Checks) !Receive
 }
 
 fn run(comptime body: fn (Ctx) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try try runner.start_context(body, .{});
+    try soak.run(gpa, .{}, body, .{});
 }
 
 test "propose stages the built block before publishing its digest" {

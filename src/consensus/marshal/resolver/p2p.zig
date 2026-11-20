@@ -15,6 +15,7 @@ const resolver_api = @import("resolver");
 const utils = @import("utils");
 const metrics = @import("runtime").telemetry.metrics;
 const handler = @import("handler.zig");
+const soak = @import("../mocks/soak.zig");
 
 /// Configuration for the p2p resolver (commonware `resolver::p2p::Config`).
 pub fn Config(comptime P: type, comptime C: type, comptime B: type) type {
@@ -220,7 +221,5 @@ fn fetch_body(io: Io) anyerror!void {
 
 test "p2p resolver delivers what a peer's handler produces" {
     const timeout_ns = 60 * std.time.ns_per_s;
-    var runner = try runtime.deterministic.Runner.init(test_gpa, .{ .timeout_ns = timeout_ns });
-    defer runner.deinit();
-    try try runner.start(fetch_body, .{runner.io()});
+    try soak.run_io(test_gpa, .{ .timeout_ns = timeout_ns }, fetch_body);
 }

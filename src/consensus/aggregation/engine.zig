@@ -930,11 +930,13 @@ const TestHarness = struct {
     const Body = fn (Io, runtime.storage.Storage, runtime.telemetry.metrics.Scope) anyerror!void;
 
     fn run(comptime body: Body) !void {
-        var runner = try runtime.deterministic.Runner.init(testing.allocator, .{
-            .timeout_ns = 10 * std.time.ns_per_s,
-        });
-        defer runner.deinit();
-        try (try runner.start(body, .{ runner.io(), runner.storage(), runner.metrics() }));
+        const config: runtime.deterministic.Config = .{ .timeout_ns = 10 * std.time.ns_per_s };
+        try runtime.deterministic.soak(testing.allocator, config, {}, struct {
+            fn round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+                const args = .{ runner.io(), runner.storage(), runner.metrics() };
+                try (try runner.start(body, args));
+            }
+        }.round);
     }
 };
 

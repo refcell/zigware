@@ -18,6 +18,7 @@ const common = @import("common.zig");
 const gpa = testing.allocator;
 const H = harness.StandardHarness;
 const App = @import("../../mocks/application.zig").Application(harness.B);
+const soak = @import("../../mocks/soak.zig");
 const Ctx = runtime.deterministic.Context;
 const Round = types.Round;
 const D = harness.D;
@@ -41,9 +42,7 @@ test "standard mailbox provides application blocks" {
 
 fn run_for(seconds: u64, comptime body: fn (Ctx) anyerror!void) !void {
     const config: runtime.deterministic.Config = .{ .timeout_ns = seconds * std.time.ns_per_s };
-    var runner = try runtime.deterministic.Runner.init(gpa, config);
-    defer runner.deinit();
-    try try runner.start_context(body, .{});
+    try soak.run(gpa, config, body, .{});
 }
 
 fn round_at(view: u64) Round {

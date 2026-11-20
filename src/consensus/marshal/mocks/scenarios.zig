@@ -16,6 +16,7 @@ const types = @import("../../types.zig");
 const simplex_types = @import("../../simplex/types.zig");
 const harness = @import("harness.zig");
 const Application = @import("application.zig").Application;
+const soak = @import("soak.zig");
 
 const Ctx = runtime.deterministic.Context;
 const Height = types.Height;
@@ -573,12 +574,10 @@ pub fn AckPipeline(comptime H: type) type {
         }
 
         fn run_seeded(gpa: Allocator, seed: u64, comptime body: fn (Ctx) anyerror!void) !void {
-            var runner = try runtime.deterministic.Runner.init(gpa, .{
+            try soak.run(gpa, .{
                 .seed = seed,
                 .timeout_ns = 120 * std.time.ns_per_s,
-            });
-            defer runner.deinit();
-            try try runner.start_context(body, .{});
+            }, body, .{});
         }
 
         fn start(self: *Self, ctx: Ctx) !void {

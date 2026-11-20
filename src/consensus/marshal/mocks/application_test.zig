@@ -8,6 +8,7 @@ const utils = @import("utils");
 const types = @import("../../types.zig");
 const block_mod = @import("block.zig");
 const application = @import("application.zig");
+const soak = @import("soak.zig");
 
 const Sha256 = cryptography.Sha256;
 const B = block_mod.EmptyBlock(Sha256);
@@ -18,9 +19,7 @@ const Height = types.Height;
 const gpa = testing.allocator;
 
 fn run(comptime body: fn (Ctx) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try try runner.start_context(body, .{});
+    try soak.run(gpa, .{}, body, .{});
 }
 
 /// Reports the block at `height` (timestamped `stamp`) and returns its acknowledgement waiter.

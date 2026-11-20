@@ -72,6 +72,7 @@ const cryptography = @import("cryptography");
 const types = @import("../../types.zig");
 const mocks = @import("../mocks/root.zig");
 const standard = @import("../standard/root.zig");
+const soak = @import("../mocks/soak.zig");
 
 const oneshot = utils.channel.oneshot;
 const Round = types.Round;
@@ -206,7 +207,5 @@ fn relay_body(io: Io) anyerror!void {
 }
 
 test "relay prepares once, persists on propose, and forwards copies" {
-    var runner = try runtime.deterministic.Runner.init(test_gpa, .{ .seed = 0 });
-    defer runner.deinit();
-    try (try runner.start(relay_body, .{runner.io()}));
+    try soak.run_io(test_gpa, .{ .seed = 0 }, relay_body);
 }

@@ -1307,9 +1307,7 @@ pub fn PrunableStores(comptime StoredBlock: type) type {
 const testing = std.testing;
 
 test "start_standard_actor dispatches genesis and stops cleanly" {
-    var runner = try runtime.deterministic.Runner.init(testing.allocator, .{});
-    defer runner.deinit();
-    try try runner.start_context(struct {
+    try @import("../../mocks/soak.zig").run(testing.allocator, .{}, struct {
         fn body(ctx: Ctx) anyerror!void {
             const gpa = ctx.gpa();
             var rng = utils.rng.test_rng();

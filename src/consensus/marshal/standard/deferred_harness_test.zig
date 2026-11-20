@@ -17,6 +17,7 @@ const App = mocks.Application(B);
 const Validator = H.Validator(App);
 const Marshal = @FieldType(Validator, "mailbox");
 const Stream = @import("../ancestry.zig").AncestorStream(Marshal);
+const soak = @import("../mocks/soak.zig");
 const Mock = mocks.verifying.MockVerifyingApp(B, Ctx, harness.Ctx, Stream);
 const Wrapper = deferred_mod.Deferred(Ctx, harness.S, Mock, B, types.FixedEpocher);
 const Round = types.Round;
@@ -104,7 +105,5 @@ fn propose_then_certify_body(ctx: Ctx) anyerror!void {
 
 test "propose then certify persists the block across a restart" {
     // commonware `test_deferred_propose_then_certify_persists_block`.
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try try runner.start_context(propose_then_certify_body, .{});
+    try soak.run(gpa, .{}, propose_then_certify_body, .{});
 }

@@ -18,6 +18,7 @@ const common = @import("common.zig");
 const gpa = testing.allocator;
 const H = harness.StandardHarness;
 const App = @import("../../mocks/application.zig").Application(harness.B);
+const soak = @import("../../mocks/soak.zig");
 const Manager = cache_api.Manager(H.Variant, harness.S);
 const Ctx = runtime.deterministic.Context;
 const CacheRef = runtime.buffer.paged.CacheRef;
@@ -154,11 +155,9 @@ fn load_persisted_epochs_finds_blocks_body(ctx: Ctx) anyerror!void {
 }
 
 test "cache load persisted epochs finds blocks" {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{
+    try soak.run(gpa, .{
         .timeout_ns = 10 * std.time.ns_per_s,
-    });
-    defer runner.deinit();
-    try try runner.start_context(load_persisted_epochs_finds_blocks_body, .{});
+    }, load_persisted_epochs_finds_blocks_body, .{});
 }
 
 /// A floor finalization cached at epoch 64 before its anchor block arrives is the cache's first
@@ -191,9 +190,7 @@ fn far_epoch_write_body(ctx: Ctx) anyerror!void {
 }
 
 test "cache restart after far epoch write reopens only written epochs" {
-    var runner = try runtime.deterministic.Runner.init(gpa, timed);
-    defer runner.deinit();
-    try try runner.start_context(far_epoch_write_body, .{});
+    try soak.run(gpa, timed, far_epoch_write_body, .{});
 }
 
 fn fetch_issued(resolver: common.RecordingResolver) bool {
@@ -258,9 +255,7 @@ fn floor_restart_body(ctx: Ctx) anyerror!void {
 }
 
 test "standard start floor restart before anchor reopens only floor epoch" {
-    var runner = try runtime.deterministic.Runner.init(gpa, timed);
-    defer runner.deinit();
-    try try runner.start_context(floor_restart_body, .{});
+    try soak.run(gpa, timed, floor_restart_body, .{});
 }
 
 /// A restart skips the epochs in the metadata range that hold no data. A later write to one of
@@ -318,9 +313,7 @@ fn expect_notarization(manager: *Manager, round: Round) !void {
 }
 
 test "cache write to skipped epoch initializes on demand" {
-    var runner = try runtime.deterministic.Runner.init(gpa, timed);
-    defer runner.deinit();
-    try try runner.start_context(skipped_epoch_body, .{});
+    try soak.run(gpa, timed, skipped_epoch_body, .{});
 }
 
 /// Every partition of `epoch`'s archives (commonware `cache::ARCHIVES` through
@@ -432,9 +425,7 @@ test "cache restart reopens epoch left by interrupted destroy" {
         .{ .kind = "value", .emptied = false },
     };
     for (survivors) |survivor| {
-        var runner = try runtime.deterministic.Runner.init(gpa, timed);
-        defer runner.deinit();
-        try try runner.start_context(interrupted_destroy_body, .{survivor});
+        try soak.run(gpa, timed, interrupted_destroy_body, .{survivor});
     }
 }
 
@@ -565,9 +556,7 @@ fn start_sync_notarizations_body(ctx: Ctx) anyerror!void {
 }
 
 test "cache start sync notarizations covers prior write" {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{
+    try soak.run(gpa, .{
         .timeout_ns = 10 * std.time.ns_per_s,
-    });
-    defer runner.deinit();
-    try try runner.start_context(start_sync_notarizations_body, .{});
+    }, start_sync_notarizations_body, .{});
 }

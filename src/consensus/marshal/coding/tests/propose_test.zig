@@ -13,6 +13,7 @@ const shared = @import("../../mocks/harness.zig");
 const harness = @import("../harness.zig");
 const marshaled = @import("../marshaled.zig");
 const common = @import("common.zig");
+const soak = @import("../../mocks/soak.zig");
 
 const gpa = testing.allocator;
 const Ctx = common.Ctx;
@@ -41,9 +42,7 @@ fn run_seeded(seed: u64, comptime body: fn (Ctx) anyerror!void) !void {
         .seed = seed,
         .timeout_ns = 60 * std.time.ns_per_s,
     };
-    var runner = try runtime.deterministic.Runner.init(gpa, config);
-    defer runner.deinit();
-    try try runner.start_context(body, .{});
+    try soak.run(gpa, config, body, .{});
 }
 
 /// Whether the metrics exposition holds `needle`.

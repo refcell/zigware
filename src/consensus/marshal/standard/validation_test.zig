@@ -116,6 +116,7 @@ test "a block not one height above its parent fails" {
 const runtime = @import("runtime");
 const utils = @import("utils");
 const simplex_types = @import("../../simplex/types.zig");
+const soak = @import("../mocks/soak.zig");
 const oneshot = utils.channel.oneshot;
 const Io = std.Io;
 const PublicKey = cryptography.ed25519.PublicKey;
@@ -250,9 +251,7 @@ fn parent_checks(io: Io) !void {
 }
 
 test "the parent wait validates linkage and stops when either side goes away" {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{ .seed = 0 });
-    defer runner.deinit();
-    try (try runner.start(parent_checks, .{runner.io()}));
+    try soak.run_io(gpa, .{ .seed = 0 }, parent_checks);
 }
 
 const actor = @import("actor");
@@ -330,7 +329,5 @@ fn app_verify_cases(ctx: Ctx) !void {
 }
 
 test "application verification runs over the block and its parent" {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{ .seed = 0 });
-    defer runner.deinit();
-    try try runner.start_context(app_verify_cases, .{});
+    try soak.run(gpa, .{ .seed = 0 }, app_verify_cases, .{});
 }

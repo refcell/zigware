@@ -19,6 +19,7 @@ const engine_module = @import("engine.zig");
 const test_block = @import("../test_block.zig");
 pub const types = @import("../types.zig");
 const consensus_types = @import("../../../types.zig");
+const soak = @import("../../mocks/soak.zig");
 
 pub const metrics = runtime.telemetry.metrics;
 pub const oneshot = utils.channel.oneshot;
@@ -137,9 +138,7 @@ pub fn sleep_ms(io: Io, ms: u64) !void {
 }
 
 pub fn run_deterministic(comptime function: fn (Io) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{ .seed = 0 });
-    defer runner.deinit();
-    try (try runner.start(function, .{runner.io()}));
+    try soak.run_io(gpa, .{ .seed = 0 }, function);
 }
 
 /// commonware's `network_config`: frames sized by the coding buffer's bound.

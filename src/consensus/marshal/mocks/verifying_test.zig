@@ -12,6 +12,7 @@ const Sha256 = cryptography.Sha256;
 const B = block_mod.EmptyBlock(Sha256);
 const Ctx = runtime.deterministic.Context;
 const Digested = @import("broadcast").Digested(B);
+const soak = @import("soak.zig");
 const Ancestry = ancestry.Bounded(B);
 const Mock = verifying.MockVerifyingApp(B, Ctx, void, Ancestry);
 const gpa = testing.allocator;
@@ -27,9 +28,7 @@ fn ancestry_at(height: u64) !ancestry.Bounded(B) {
 }
 
 fn run(comptime body: fn (Ctx) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try try runner.start_context(body, .{});
+    try soak.run(gpa, .{}, body, .{});
 }
 
 fn rejects_odd(block: *const B) bool {

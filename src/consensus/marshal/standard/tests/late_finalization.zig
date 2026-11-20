@@ -15,6 +15,7 @@ const seed = @import("seed.zig");
 const gpa = testing.allocator;
 const H = harness.StandardHarness;
 const App = @import("../../mocks/application.zig").Application(harness.B);
+const soak = @import("../../mocks/soak.zig");
 const Ctx = runtime.deterministic.Context;
 const Height = types.Height;
 const Round = types.Round;
@@ -35,9 +36,7 @@ const PrunableActor = common.Actor(
 const timed: runtime.deterministic.Config = .{ .timeout_ns = 30 * std.time.ns_per_s };
 
 fn run(comptime body: fn (Ctx) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, timed);
-    defer runner.deinit();
-    try try runner.start_context(body, .{});
+    try soak.run(gpa, timed, body, .{});
 }
 
 /// Genesis, then blocks 1 through `out.len - 1`, block `h` stamped `100 * h`.

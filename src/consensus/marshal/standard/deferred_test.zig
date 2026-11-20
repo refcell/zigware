@@ -30,6 +30,7 @@ const B = mocks.Block(Sha256, ConsensusContext);
 const V = @import("variant.zig").Standard(B);
 const Marshal = @import("../core/mailbox.zig").Mailbox(S, V);
 const Stream = @import("../ancestry.zig").AncestorStream(Marshal);
+const soak = @import("../mocks/soak.zig");
 const Message = Marshal.M;
 const Epocher = types.FixedEpocher;
 const Round = types.Round;
@@ -200,9 +201,7 @@ fn with_wrapper(
 
 fn run(comptime body: fn (Ctx) anyerror!void) !void {
     const config: runtime.deterministic.Config = .{ .timeout_ns = 30 * std.time.ns_per_s };
-    var runner = try runtime.deterministic.Runner.init(gpa, config);
-    defer runner.deinit();
-    try try runner.start_context(body, .{});
+    try soak.run(gpa, config, body, .{});
 }
 
 fn participant(index: u64) S.PublicKey {

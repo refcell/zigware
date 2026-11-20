@@ -12,6 +12,7 @@ const H = harness.StandardHarness;
 const Ctx = runtime.deterministic.Context;
 
 const App = @import("application.zig").Application(harness.B);
+const soak = @import("soak.zig");
 const Validator = H.Validator(App);
 const blocks_total = 24;
 
@@ -83,7 +84,5 @@ fn finished(apps: []const App) bool {
 }
 
 test "every validator finalizes the chain over the simulated network" {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try try runner.start_context(finalize_body, .{});
+    try soak.run(gpa, .{}, finalize_body, .{});
 }

@@ -79,6 +79,7 @@ const M = marshaled_module.Marshaled(struct {
     pub const Epocher = consensus_types.FixedEpocher;
 });
 const Digested = @import("broadcast").Digested(InnerBlock);
+const soak = @import("../mocks/soak.zig");
 const V = M.V;
 
 test {
@@ -185,9 +186,7 @@ const Chain = struct {
 };
 
 fn run(comptime body: fn (Ctx) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try try runner.start_context(body, .{});
+    try soak.run(gpa, .{}, body, .{});
 }
 
 /// The verdict of the blocking `Automaton::verify`.

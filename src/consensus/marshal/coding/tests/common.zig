@@ -32,6 +32,7 @@ const harness = @import("../harness.zig");
 const coding_types = @import("../types.zig");
 const marshaled = @import("../marshaled.zig");
 const shards = @import("../shards/root.zig");
+const soak = @import("../../mocks/soak.zig");
 
 const oneshot = utils.channel.oneshot;
 const Height = types.Height;
@@ -85,9 +86,7 @@ pub fn MarshaledOf(comptime A: type) type {
 pub const timed: runtime.deterministic.Config = .{ .timeout_ns = 30 * std.time.ns_per_s };
 
 pub fn run(comptime body: fn (Ctx) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(std.testing.allocator, timed);
-    defer runner.deinit();
-    try try runner.start_context(body, .{});
+    try soak.run(std.testing.allocator, timed, body, .{});
 }
 
 pub fn round_at(epoch: u64, view: u64) Round {

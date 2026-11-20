@@ -54,6 +54,7 @@ const shared = @import("../mocks/harness.zig");
 const consensus_types = @import("../../types.zig");
 const simplex_types = @import("../../simplex/types.zig");
 const SmokeApp = @import("../mocks/application.zig").Application(harness.CodingB);
+const soak = @import("../mocks/soak.zig");
 const SmokeValidator = H.Validator(SmokeApp);
 const smoke_blocks = 12;
 
@@ -119,7 +120,5 @@ fn smoke_body(ctx: runtime.deterministic.Context) anyerror!void {
 }
 
 test "coding validators finalize a verified chain over the simulated network" {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try try runner.start_context(smoke_body, .{});
+    try soak.run(gpa, .{}, smoke_body, .{});
 }

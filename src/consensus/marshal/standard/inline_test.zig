@@ -26,6 +26,7 @@ const V = @import("variant.zig").Standard(B);
 const Marshal = @import("../core/mailbox.zig").Mailbox(S, V);
 const Stream = @import("../ancestry.zig").AncestorStream(Marshal);
 const ConsensusContext = @import("../../simplex/types.zig").Context(D, S.PublicKey);
+const soak = @import("../mocks/soak.zig");
 const App = mocks.verifying.MockVerifyingApp(B, Ctx, ConsensusContext, Stream);
 const Epocher = types.FixedEpocher;
 const Wrapper = inline_mod.Inline(Ctx, S, App, B, Epocher);
@@ -134,9 +135,7 @@ fn with_wrapper(
 
 fn run(comptime body: fn (Ctx) anyerror!void) !void {
     const config: runtime.deterministic.Config = .{ .timeout_ns = 30 * std.time.ns_per_s };
-    var runner = try runtime.deterministic.Runner.init(gpa, config);
-    defer runner.deinit();
-    try try runner.start_context(body, .{});
+    try soak.run(gpa, config, body, .{});
 }
 
 var parent_block: B = undefined;

@@ -29,6 +29,7 @@ const Round = types.Round;
 const B = harness.B;
 const Finalization = harness.Finalization;
 const Processed = @import("../../core/floor.zig").Processed;
+const soak = @import("../../mocks/soak.zig");
 
 fn run(comptime body: fn (Ctx) anyerror!void) !void {
     try run_timed(body, 30);
@@ -37,9 +38,7 @@ fn run(comptime body: fn (Ctx) anyerror!void) !void {
 /// commonware's `Runner::timed(seconds)`.
 fn run_timed(comptime body: fn (Ctx) anyerror!void, seconds: u64) !void {
     const config: runtime.deterministic.Config = .{ .timeout_ns = seconds * std.time.ns_per_s };
-    var runner = try runtime.deterministic.Runner.init(gpa, config);
-    defer runner.deinit();
-    try try runner.start_context(body, .{});
+    try soak.run(gpa, config, body, .{});
 }
 
 /// Whether `mailbox` holds a finalization at `height` (releasing the copy it returns).
