@@ -1,0 +1,13 @@
+diff --git i/examples/log/src/gui.rs w/examples/log/src/gui.rs
+index f63b796df..8bd29c2ed 100644
+--- i/examples/log/src/gui.rs
++++ w/examples/log/src/gui.rs
+@@ -77,7 +77,7 @@ impl std::io::Write for Writer {
+             .parse::<chrono::DateTime<chrono::Utc>>()
+             .unwrap()
+             .with_timezone(&chrono::Local)
+-            .format("%Y-%m-%dT%H:%M:%S");
++            .format("%Y-%m-%dT%H:%M:%S%.6f");
+         let (progress, mut formatted_msg) = if target.contains("commonware_log::application") {
+             (true, format!("[{datetime_local}] => {msg} ("))
+         } else {

@@ -1,0 +1,28 @@
+diff --git i/examples/log/gui.zig w/examples/log/gui.zig
+index c1f138b1..221d43cc 100644
+--- i/examples/log/gui.zig
++++ w/examples/log/gui.zig
+@@ -71,9 +71,12 @@ pub const State = struct {
+             const event = events[state.events_seen];
+             const recorded_ns = event.time_ns orelse utc_seconds * std.time.ns_per_s;
+             const seconds = @divFloor(recorded_ns, std.time.ns_per_s);
+-            const stamp = zone.local_iso_stamp(seconds);
++            const seconds_stamp = zone.local_iso_stamp(seconds);
++            var stamp_buffer: [seconds_stamp.len + 7]u8 = undefined;
++            const micros: u64 = @intCast(@divFloor(@mod(recorded_ns, std.time.ns_per_s), 1_000));
++            const stamp = std.fmt.bufPrint(&stamp_buffer, "{s}.{d:0>6}", .{ &seconds_stamp, micros }) catch unreachable;
+             const is_progress = std.mem.indexOf(u8, event.target, application.target) != null;
+-            const text = try format_line(state.gpa, &stamp, event);
++            const text = try format_line(state.gpa, stamp, event);
+             errdefer state.gpa.free(text);
+             if (is_progress) {
+                 try state.progress.append(state.gpa, .{ .text = text, .fg = progress_color(text) });
+@@ -129,7 +132,7 @@ pub const State = struct {
+ /// One line as gui.rs's `Writer` formats `event`, stamped `stamp` (local time).
+ pub fn format_line(
+     gpa: Allocator,
+-    stamp: *const clock.IsoStamp,
++    stamp: []const u8,
+     event: logger.RecordedEvent,
+ ) Allocator.Error![]u8 {
+     if (std.mem.indexOf(u8, event.target, application.target) != null) {

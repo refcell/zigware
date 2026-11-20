@@ -23,10 +23,13 @@ Scenarios:
   UIs). After WARMUP_S it counts, over WINDOW_S, the views each validator shows finalized per
   second and the views nullified per view finalized (medians over the four validators). This
   compares the examples as shipped, with their timeouts and their 10 messages per second per
-  peer and channel. Propose-to-finalize latency is not measured: the examples print timestamps
-  to the second and serve no metrics, so simplex's `finalization_latency` histogram cannot be
-  read from outside, and on loopback nearly every view finalizes within the second it was
-  proposed.
+  peer and channel. With LOG_LATENCY=1 it also reports propose-to-finalize latency, p50 and
+  p99 in milliseconds over every view proposed in the window: the time between the leader's
+  `proposed` line and its `finalized` line for the same payload. The examples print stamps to
+  the second, so this mode builds both from local patches that print microseconds
+  (etc/scripts/consensus-compare/*.patch, applied to throwaway clones under
+  ~/.cache/zigware/p2p-latency; never commit them to commonware-ref or upstream) and runs those
+  binaries for `log` instead of the ones given. Both stamp a line with its event's time.
 - `dkg_catchup_100`, `dkg_catchup_1000`: one implementation's `dkg` example (`setup` with 6
   peers and committees of 4, the epoch-0 `bootstrap` of players 0-3, then validators 0-4, as
   examples/dkg/README.md runs them). Once every validator has finalized N heights, validator 5
@@ -61,6 +64,13 @@ BASE_PORT = int(os.environ.get("BASE_PORT", "23600"))
 ACTIVITY = re.compile(r'\] => (finalized|nullified) \((?:payload="[0-9a-f]{64}" )?view="(\d+)"')
 BINARIES = {"log": {"commonware": "commonware-log", "zigware": "log"},
             "dkg": {"commonware": "commonware-dkg", "zigware": "dkg"}}
+# A leader's `proposed` line and any `finalized` line, with their stamps (microseconds with the
+# LOG_LATENCY patches).
+PROPOSED = re.compile(r'\[([0-9T:.-]+)\] => proposed \(msg="[0-9a-f]*" payload="([0-9a-f]{64})"')
+FINALIZED_AT = re.compile(r'\[([0-9T:.-]+)\] => finalized \(payload="([0-9a-f]{64})"')
+LOG_LATENCY = os.environ.get("LOG_LATENCY") == "1"
+PATCHES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "consensus-compare")
+LATENCY_ROOT = os.path.expanduser("~/.cache/zigware/p2p-latency")
 # The dkg example's reporter line, the same on both sides (escape codes stripped first).
 FINALIZED = re.compile(r"finalized block epoch=\d+ height=(\d+) digest=[0-9a-f]{64}")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -92,6 +102,8 @@ def run_log(side, binary_dir, port):
             tmux(socket, "new-window", "-t", "log", "-n", f"node{seed}", line)
     finalized = {seed: set() for seed in seeds}
     nullified = {seed: set() for seed in seeds}
+    proposed = {seed: {} for seed in seeds}  # payload -> stamp, on the leader's screen
+    finalized_at = {seed: {} for seed in seeds}  # payload -> stamp
     start = time.time()
     marks = None
     try:
@@ -101,6 +113,9 @@ def run_log(side, binary_dir, port):
                 screen = tmux(socket, "capture-pane", "-p", "-t", f"log:node{seed}", check=False)
                 for kind, view in ACTIVITY.findall(screen):
                     (finalized if kind == "finalized" else nullified)[seed].add(int(view))
+                for stamps, pattern in ((proposed, PROPOSED), (finalized_at, FINALIZED_AT)):
+                    for stamp, payload in pattern.findall(screen):
+                        stamps[seed].setdefault(payload, stamp)
             if marks is None and time.time() - start >= WARMUP_S:
                 marks = (time.time(), {s: (len(finalized[s]), len(nullified[s])) for s in seeds})
     finally:
@@ -112,8 +127,65 @@ def run_log(side, binary_dir, port):
         raise RuntimeError(f"{side}: a validator finalized nothing in the window ({counted})")
     rate = [counted[s] / elapsed for s in seeds]
     null = [(len(nullified[s]) - marks[1][s][1]) / counted[s] for s in seeds]
-    return {"finalized_views_per_s": statistics.median(rate),
-            "nullified_per_finalized": statistics.median(null)}
+    result = {"finalized_views_per_s": statistics.median(rate),
+              "nullified_per_finalized": statistics.median(null)}
+    if LOG_LATENCY:
+        window = datetime.datetime.fromtimestamp(marks[0])
+        result.update(latency_percentiles(side, proposed, finalized_at, window))
+    return result
+
+
+def parse_stamp(stamp):
+    """A local `%Y-%m-%dT%H:%M:%S.ffffff` stamp, as the patched examples print."""
+    if "." not in stamp:
+        raise RuntimeError(f"stamp {stamp!r} has no fraction; LOG_LATENCY needs the patches")
+    return datetime.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%S.%f")
+
+
+def latency_percentiles(side, proposed, finalized_at, window):
+    """p50 and p99 milliseconds from each leader's proposal to its own finalization of the same
+    payload, over proposals made from `window` on."""
+    latencies = []
+    for seed, proposals in proposed.items():
+        for payload, stamp in proposals.items():
+            at = parse_stamp(stamp)
+            done = finalized_at[seed].get(payload)
+            if at < window or done is None:
+                continue
+            latencies.append((parse_stamp(done) - at).total_seconds() * 1000)
+    if len(latencies) < 10:
+        raise RuntimeError(f"{side}: only {len(latencies)} proposals finalized in the window")
+    latencies.sort()
+    pick = lambda q: latencies[min(len(latencies) - 1, int(q * len(latencies)))]
+    return {"propose_to_finalize_p50_ms": pick(0.50), "propose_to_finalize_p99_ms": pick(0.99)}
+
+
+def build_latency_binaries(commonware_ref, zigware_repo):
+    """Builds each side's `log` from a throwaway clone with its microsecond-stamp patch applied,
+    and returns {side: binary_dir}. The patches are never committed anywhere."""
+    os.makedirs(LATENCY_ROOT, exist_ok=True)
+    targets = {}
+    for side, repo in (("commonware", commonware_ref), ("zigware", zigware_repo)):
+        clone = os.path.join(LATENCY_ROOT, side)
+        # Reuse the clone (and its build cache), reset to the repository's HEAD.
+        if not os.path.isdir(clone):
+            subprocess.run(["git", "clone", "-q", "--local", repo, clone], check=True)
+        subprocess.run(["git", "-C", clone, "fetch", "-q", repo, "HEAD"], check=True)
+        subprocess.run(["git", "-C", clone, "reset", "-q", "--hard", "FETCH_HEAD"], check=True)
+        patch = os.path.join(PATCHES, f"{side}-log-us.patch")
+        subprocess.run(["git", "-C", clone, "apply", patch], check=True)
+        if side == "commonware":
+            target = os.path.join(LATENCY_ROOT, "commonware-target")
+            env = dict(os.environ, RUSTFLAGS="-C target-cpu=native", CARGO_TARGET_DIR=target)
+            subprocess.run(["cargo", "build", "--release", "--offline", "-p", "commonware-log"],
+                           cwd=clone, env=env, check=True)
+            targets[side] = os.path.join(target, "release")
+        else:
+            prefix = os.path.join(LATENCY_ROOT, "zigware-out")
+            subprocess.run(["zig", "build", "install", "-Doptimize=ReleaseFast", "--prefix",
+                            prefix], cwd=clone, check=True)
+            targets[side] = os.path.join(prefix, "bin")
+    return targets
 
 
 def top_height(path):
@@ -211,7 +283,8 @@ def run_dkg_catchup(side, binary_dir, port, heights, state_sync=True):
 
 # scenario -> (run, {metric: lower_is_better})
 SCENARIOS = {
-    "log": (run_log, {"finalized_views_per_s": False, "nullified_per_finalized": True}),
+    "log": (run_log, {"finalized_views_per_s": False, "nullified_per_finalized": True,
+                      "propose_to_finalize_p50_ms": True, "propose_to_finalize_p99_ms": True}),
     "dkg_catchup_100": (functools.partial(run_dkg_catchup, heights=100), {"catchup_s": True}),
     "dkg_catchup_1000": (functools.partial(run_dkg_catchup, heights=1000), {"catchup_s": True}),
     "dkg_replay_100": (functools.partial(run_dkg_catchup, heights=100, state_sync=False),
@@ -291,6 +364,12 @@ def main():
     dirs = {"commonware": os.path.abspath(sys.argv[1]), "zigware": os.path.abspath(sys.argv[2])}
     rounds = int(sys.argv[3]) if len(sys.argv) > 3 else 4
     names = sys.argv[4:] or list(SCENARIOS)
+    log_dirs = dirs
+    if LOG_LATENCY and "log" in names:
+        commonware_ref = os.environ.get("COMMONWARE_REF",
+                                        os.path.expanduser("~/.cache/zigware/commonware-ref"))
+        zigware_repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        log_dirs = build_latency_binaries(commonware_ref, zigware_repo)
     values = {}  # (scenario, metric) -> {side: [values per round]}
     run_index = 0
     for round_index in range(rounds):
@@ -302,14 +381,15 @@ def main():
                 # Every run gets fresh ports, so none waits on the last run's sockets.
                 run_index += 1
                 port = free_port_block(BASE_PORT + 10 * run_index)
-                for metric, value in run(side, dirs[side], port).items():
+                binary_dir = (log_dirs if name == "log" else dirs)[side]
+                for metric, value in run(side, binary_dir, port).items():
                     values.setdefault((name, metric), {"commonware": [], "zigware": []})
                     values[(name, metric)][side].append(value)
                     print(f"{round_index + 1}\t{side}\t{name}\t{metric}\t{value:.4g}",
                           file=sys.stderr, flush=True)
             lock.close()
-    print("| scenario | metric | commonware | zigware | ratio | verdict |")
-    print("|---|---|---|---|---|---|")
+    print("| scenario | metric | better | commonware | zigware | ratio | verdict |")
+    print("|---|---|---|---|---|---|---|")
     counts = {}
     for (name, metric), sides in values.items():
         lower_better = SCENARIOS[name][1][metric]
@@ -317,7 +397,9 @@ def main():
         ratios = [ratio(c, z, lower_better) for c, z in pairs]
         result = verdict(ratios)
         counts[result] = counts.get(result, 0) + 1
-        print(f"| `{name}` | `{metric}` | {statistics.median(sides['commonware']):.3g} | "
+        better = "lower" if lower_better else "higher"
+        print(f"| `{name}` | `{metric}` | {better} | "
+              f"{statistics.median(sides['commonware']):.3g} | "
               f"{statistics.median(sides['zigware']):.3g} | {statistics.median(ratios):.2f}× "
               f"| {result} |")
     print(f"\nRatios are zigware over commonware for lower-is-better metrics and commonware over "
