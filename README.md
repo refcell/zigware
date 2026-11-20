@@ -181,6 +181,29 @@ path. The BLS rows wait on a quiet re-run.
 - **Production runtime.** Production I/O runs on `std.Io.Threaded`; on Linux, blob and
   socket I/O can move onto an io_uring ring (`Config.io_uring`).
 
+## Upstream bugs
+
+Porting commonware and running it side by side with zigware has turned up one real bug so
+far. In the flood example, the sender loop never yields when a send is refused, so it spins on
+its tokio worker, the network tasks it woke never run, and peers receive nothing; one
+`reschedule` fixes it, and it is filed as
+[commonware#5809](https://github.com/commonwarexyz/monorepo/issues/5809). Two smaller,
+unfiled items sit alongside it: flood binds every peer to `0.0.0.0`, so several peers cannot
+share one machine, and bulletproofs' IPA verifier can panic instead of rejecting a claim
+longer than its setup. [docs/UPSTREAM_BUGS.md](docs/UPSTREAM_BUGS.md) has the evidence and
+repro steps.
+
+## Optimizations commonware could adopt
+
+A few of zigware's speedups over commonware built for the native CPU come from changes that
+would carry over. ed25519 verification splits its scalar with Lehmer's algorithm instead of a
+bit-at-a-time Euclid, BLS12-381 runs its field arithmetic eight elements at a time on AVX-512
+IFMA lanes and clears the cofactor once per batch of messages, short SHA-256 batches hash in
+interleaved SHA-NI pairs, and short BLAKE3 messages take a single root compression. In
+storage, much of the gap looks like blob I/O issued inline rather than on a blocking thread
+pool. [docs/UPSTREAM_OPTIMIZATIONS.md](docs/UPSTREAM_OPTIMIZATIONS.md) has the bench rows,
+verdicts, and commits, and separates these from wins whose cause is not yet known.
+
 ## Installation
 
 ```sh
