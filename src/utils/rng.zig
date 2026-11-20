@@ -40,7 +40,7 @@ pub fn mix64(input: u64) u64 {
 }
 
 /// `rand_core`'s PCG32 step used by `SeedableRng::seed_from_u64`.
-fn pcg32(state: *u64) [4]u8 {
+pub fn pcg32(state: *u64) [4]u8 {
     const multiplier: u64 = 0x5851_F42D_4C95_7F2D;
     const increment: u64 = 0xA176_54E4_6FBE_17F3;
     state.* = state.* *% multiplier +% increment;

@@ -8,19 +8,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
-
-/// `rand_core`'s PCG32 step used by `SeedableRng::seed_from_u64`.
-fn pcg32(state: *u64) [4]u8 {
-    const multiplier: u64 = 0x5851_F42D_4C95_7F2D;
-    const increment: u64 = 0xA176_54E4_6FBE_17F3;
-    state.* = state.* *% multiplier +% increment;
-    const current = state.*;
-    const xorshifted: u32 = @truncate(((current >> 18) ^ current) >> 27);
-    const rotation: u32 = @truncate(current >> 59);
-    var out: [4]u8 = undefined;
-    std.mem.writeInt(u32, &out, std.math.rotr(u32, xorshifted, rotation), .little);
-    return out;
-}
+const pcg32 = @import("utils").rng.pcg32;
 
 /// ChaCha20 keystream as a random number generator, buffered four blocks at a time.
 pub const ChaCha20Rng = struct {
