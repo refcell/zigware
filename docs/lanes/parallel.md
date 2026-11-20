@@ -661,3 +661,52 @@ tests pass. The rows still over 1.3× are the 32 B blake3 contains rows. std's `
 126 ns on 32 bytes, against 36 ns for `Sha256`: setup and finalize, not the compression.
 Those rows wait on the crypto lane's one-chunk root in `blake3_tree.zig`, which `Blake3.hash`
 will route ≤1 KiB messages through. Every other row in the group is ≤1.25×.
+
+## Expensive assert conditions (2026-11-20)
+
+`std.debug.assert(cond)` evaluates `cond` in ReleaseFast, and LLVM drops it only when it can
+prove the call pure. The sweep looked at the 4,775 asserts in non-test code under `src/`, and
+took the 241 whose condition calls something that can cost more than O(1) (`contains`, `eql`,
+hashes, sortedness and equality scans, curve checks, `encode_size`, and the like). Most of
+these are O(1) in fact: hash-map lookups, cached digests (`Digested.digest`, qmdb `root`), or
+`order` on integers.
+
+Measurement. Wall-clock A/B could not resolve effects under about 50% on this desktop (load
+60 to 100; the same `close_check` binary ran 5.6 to 20 ms). Instead, user-space instruction
+counts (`perf_event_open` with `inherit`, from a small script) of `bench-<pkg> --test` (one
+iteration on smoke inputs) repeat to about 0.1%. A variant with 59 suspect asserts disabled
+(`assert(true or ...)`), then three variants each disabling one group, gave:
+
+| group | base | asserts disabled | share |
+|---|---|---|---|
+| bench-storage process (merkle `is_valid_size`, 5 sites) | 296.6M | 259.3M | 12.5% |
+| bench-utils process (roaring `contains` after insert, 4 sites) | 6.39M | 5.29M | 17.2% |
+| freezer rows (records CRC recompute, `insert_sorted` scan) | +1.8M | | about 0.4% |
+| other storage (ordinal, cache, segmented, qmdb diff sort checks, metadata, index) | | | 0 |
+| bls12381 field, curve and map checks (34 sites), 8 bench groups | | | 0.06 to 0.42% |
+| bloomfilter, clearing (`close` `is_canonical`), buffer_paged, runtime memory `eql` | | | 0 |
+
+The storage and utils differences sit in each bench process's setup, which runs every bench's
+fixtures before the name filter (no storage bench calls `Runner.matches`), so they are the
+costs of the append and insert paths those fixtures drive. The parallel, allocator and bench
+lanes have no expensive assert: every condition there is O(1) except `Arena.init`'s
+`free_count`, which runs once per arena after an O(slices) setup loop. 9f4eeba4's new Heap
+asserts are O(1) too.
+
+Reported to their owners, with an O(1) replacement each:
+
+- storage-merkle: `merkle/mem.zig:136` and `merkle/batch.zig:384` check `is_valid_size` (a
+  loop over the tree's height for MMR, up to 8 steps for MMB) after every leaf append. The
+  exact O(1) postcondition is `size() == F.location_to_position(location + 1)`.
+  `mmr/mod.zig:80`, `mmb/mod.zig:66` and `persisted/full.zig:432` re-check results that are
+  valid by construction.
+- utils: `bitmap/roaring/container.zig:125`, `run.zig:183`, `bitmap.zig:121` and
+  `roaring.zig:155` binary-search the container again after each insert. The insert already
+  knows the position it wrote.
+- storage-archive: `freezer/records.zig:153` recomputes the CRC it just stored, and
+  `insert_sorted` in freezer, ordinal and cache rescans the whole list after an O(n) insert.
+- codec (not bench-covered): `types/map.zig:99,133,217,248` scan for sortedness in `init`,
+  which is otherwise O(1).
+- Not bench-covered and generic in the block type: marshal `coding/types.zig:214,387,472` and
+  `standard/variant.zig:143` compare `digest()`, which recomputes when an application block
+  hashes on demand (commonware's blocks cache it in `Digested`).
