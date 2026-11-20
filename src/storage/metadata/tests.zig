@@ -147,6 +147,44 @@ test "put returns previous value" {
     try store.destroy();
 }
 
+/// Syncs and sync writes `storage` saw since `before`, then resets `before`.
+fn expect_durability(storage: *const Storage, before: *[2]u64, syncs: u64, range_syncs: u64) !void {
+    try testing.expectEqual(syncs, storage.syncs - before[0]);
+    try testing.expectEqual(range_syncs, storage.range_syncs - before[1]);
+    before.* = .{ storage.syncs, storage.range_syncs };
+}
+
+test "each sync makes the store durable with commonware's barriers" {
+    // commonware's `test_io_options_and_durability` durability accounting: a non-pipelined
+    // sync that writes the whole store at once is one sync write, a pipelined one a plain
+    // write and a started sync, and a shrinking rewrite a write, a resize, and a barrier.
+    var storage = Storage.init(gpa);
+    defer storage.deinit();
+    var store = try open(&storage);
+    defer store.deinit();
+    try put(&store, 1, &(@as([8]u8, @splat(1))));
+    try store.sync();
+    try store.sync();
+    var before: [2]u64 = .{ storage.syncs, storage.range_syncs };
+    try put(&store, 1, &(@as([8]u8, @splat(2))));
+    try store.sync(); // Overwrite.
+    try expect_durability(&storage, &before, 0, 1);
+    try put(&store, 1, &(@as([8]u8, @splat(3))));
+    try (try store.start_sync()).wait_release(); // Pipelined overwrite.
+    try expect_durability(&storage, &before, 1, 0);
+    try put(&store, 2, &(@as([16]u8, @splat(4))));
+    try (try store.start_sync()).wait_release(); // Pipelined growing rewrite.
+    try expect_durability(&storage, &before, 1, 0);
+    try store.sync(); // Growing rewrite of the other copy.
+    try expect_durability(&storage, &before, 0, 1);
+    if (store.remove(2)) |previous| gpa.free(previous);
+    try (try store.start_sync()).wait_release(); // Pipelined shrinking rewrite.
+    try expect_durability(&storage, &before, 1, 0);
+    try store.sync(); // Shrinking rewrite of the other copy.
+    try expect_durability(&storage, &before, 1, 0);
+    try expect_value(&store, 1, &(@as([8]u8, @splat(3))));
+}
+
 test "every write and open read carries the uncached hint" {
     // commonware's `test_io_options_and_durability`, minus its sync-handle accounting.
     var storage = Storage.init(gpa);

@@ -48,6 +48,7 @@ const blob_page_size: usize = runtime_storage.blob_page_size;
 /// Every metadata write carries commonware's `DONT_CACHE` hint: the store keeps its own copy
 /// of both blobs in memory.
 const uncached: runtime_storage.WriteOptions = .{ .dont_cache = true };
+const uncached_sync: runtime_storage.WriteOptions = .{ .sync = true, .dont_cache = true };
 
 /// Configuration for `Metadata`.
 pub fn Config(comptime V: type) type {
@@ -593,8 +594,11 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
 
             // A store no larger than one blob page is written whole: its changed values,
             // version, and checksum share that page, so one write replaces several.
-            if (data.len <= blob_page_size) {
-                try target.blob.write_at(0, data, uncached);
+            // A whole write carries every changed byte, so a non-pipelined sync requests
+            // durability with it (one sync write, as commonware) instead of a later barrier.
+            const full_write = data.len <= blob_page_size;
+            if (full_write) {
+                try target.blob.write_at(0, data, if (pipelined) uncached else uncached_sync);
             } else {
                 for (target.modified.keys()) |key_bytes| {
                     const info = target.lengths.get(key_bytes).?;
@@ -604,7 +608,10 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
                 try target.blob.write_at(0, data[0..version_size], uncached);
                 try target.blob.write_at(checksum_index, data[checksum_index..], uncached);
             }
-            const started = try self.persist(target.blob, pipelined);
+            const started = if (full_write and !pipelined)
+                Completion.ok
+            else
+                try self.persist(target.blob, pipelined);
             target.modified.clearRetainingCapacity();
             target.version = version;
             self.sync_overwrites.metric().inc();
@@ -654,9 +661,13 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
             writer.write_int(u32, Crc32.checksum(writer.written()));
             assert(writer.end == data_len);
 
-            try target.blob.write_at(0, data, uncached);
-            if (data_len < old_len) try target.blob.resize(data_len);
-            const started = try self.persist(target.blob, pipelined);
+            // Shrinking rewrites must persist the resize, so they need a full barrier; any
+            // other non-pipelined rewrite is one sync write (range-scoped durability).
+            const shrinking = data_len < old_len;
+            const fused = !pipelined and !shrinking;
+            try target.blob.write_at(0, data, if (fused) uncached_sync else uncached);
+            if (shrinking) try target.blob.resize(data_len);
+            const started = if (fused) Completion.ok else try self.persist(target.blob, pipelined);
             target.version = version;
             self.sync_rewrites.metric().inc();
             return self.record_pending(started);
