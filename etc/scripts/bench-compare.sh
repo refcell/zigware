@@ -120,6 +120,38 @@ msg_len=32"
   "secp256r1|cryptography|secp256r1::signature_verification/variant=standard ns_len=9 msg_len=32"
   "secp256r1|cryptography|secp256r1::signature_verification/variant=recoverable ns_len=9 \
 msg_len=32"
+  # actor's mailbox, every case.
+  "mailbox|actor|mailbox::mailbox::enqueue_ready/capacity=1024"
+  "mailbox|actor|mailbox::mailbox::try_recv_ready/capacity=1024"
+  "mailbox|actor|mailbox::mailbox::try_recv_overflow/capacity=1024 overflow=1024"
+  "mailbox|actor|mailbox::mailbox::round_trip_ready/capacity=1024"
+  "mailbox|actor|mailbox::mailbox::recv_waiting/capacity=1"
+  "mailbox|actor|mailbox::mailbox::overflow_drop/capacity=1"
+  "mailbox|actor|mailbox::mailbox::overflow_spill/capacity=1"
+  "mailbox|actor|mailbox::mailbox::overflow_replace/capacity=1024 position=newest"
+  "mailbox|actor|mailbox::mailbox::overflow_replace/capacity=1024 position=oldest"
+  "mailbox|actor|mailbox::mailbox::concurrent_enqueue/producers=4 capacity=65536"
+  # bulletproofs ipa, every case; conc=8 runs on an adaptive Policy on both sides.
+  "bulletproofs|cryptography|bulletproofs::ipa::prove/n=8 conc=1"
+  "bulletproofs|cryptography|bulletproofs::ipa::prove/n=8 conc=8"
+  "bulletproofs|cryptography|bulletproofs::ipa::prove/n=16 conc=1"
+  "bulletproofs|cryptography|bulletproofs::ipa::prove/n=16 conc=8"
+  "bulletproofs|cryptography|bulletproofs::ipa::prove/n=32 conc=1"
+  "bulletproofs|cryptography|bulletproofs::ipa::prove/n=32 conc=8"
+  "bulletproofs|cryptography|bulletproofs::ipa::prove/n=64 conc=1"
+  "bulletproofs|cryptography|bulletproofs::ipa::prove/n=64 conc=8"
+  "bulletproofs|cryptography|bulletproofs::ipa::prove/n=128 conc=1"
+  "bulletproofs|cryptography|bulletproofs::ipa::prove/n=128 conc=8"
+  "bulletproofs|cryptography|bulletproofs::ipa::verify/n=8 conc=1"
+  "bulletproofs|cryptography|bulletproofs::ipa::verify/n=8 conc=8"
+  "bulletproofs|cryptography|bulletproofs::ipa::verify/n=16 conc=1"
+  "bulletproofs|cryptography|bulletproofs::ipa::verify/n=16 conc=8"
+  "bulletproofs|cryptography|bulletproofs::ipa::verify/n=32 conc=1"
+  "bulletproofs|cryptography|bulletproofs::ipa::verify/n=32 conc=8"
+  "bulletproofs|cryptography|bulletproofs::ipa::verify/n=64 conc=1"
+  "bulletproofs|cryptography|bulletproofs::ipa::verify/n=64 conc=8"
+  "bulletproofs|cryptography|bulletproofs::ipa::verify/n=128 conc=1"
+  "bulletproofs|cryptography|bulletproofs::ipa::verify/n=128 conc=8"
 )
 
 cw_env=()
@@ -129,11 +161,12 @@ fi
 bench_set=${BENCH_SET:-}
 cargo_args=(
   -p commonware-codec -p commonware-cryptography -p commonware-storage -p commonware-runtime
+  -p commonware-actor
   --features commonware-storage/test-traits
   --bench codec --bench sha256 --bench ed25519 --bench bls12381
   --bench journal --bench qmdb --bench merkle --bench bmt --bench rmap --bench buffer_paged
   --bench chacha20_poly1305 --bench sake
-  --bench secp256r1
+  --bench secp256r1 --bench mailbox --bench bulletproofs
 )
 if [[ -n "$bench_set" ]]; then
   # Every commonware crate with bench targets (all), or the one named after the package:
