@@ -104,10 +104,11 @@ fn bench_hash_to_curve(runner: *bench.Runner) !void {
             const name = bench.Benchmark.init("bls12381::hash_to_curve")
                 .with_param("n", n).with_param("conc", conc);
             if (try skip(runner, name)) continue;
+            var policy = parallel.Policy.init(runner.io);
             var workload: HashToCurve = .{
                 .messages = messages,
                 .out = out,
-                .strategy = common.strategy(threads, conc),
+                .strategy = common.strategy(threads, &policy, conc),
             };
             try runner.run(name, &workload);
         }

@@ -155,6 +155,7 @@ fn bench_same_message(runner: *bench.Runner, precomputed: bool) !void {
                 if (precomputed) dealt.sharing.precompute_partial_publics();
                 const partials = try dealt.sign_all(gpa, invalid);
                 defer gpa.free(partials);
+                var policy = parallel.Policy.init(runner.io);
                 var workload: SameMessage = .{
                     .gpa = gpa,
                     .rng = dealt.rng,
@@ -162,7 +163,7 @@ fn bench_same_message(runner: *bench.Runner, precomputed: bool) !void {
                     .partials = partials,
                     .invalid = invalid,
                     .precomputed = precomputed,
-                    .strategy = common.strategy(threads, conc),
+                    .strategy = common.strategy(threads, &policy, conc),
                 };
                 try runner.run(name, &workload);
             };
@@ -224,13 +225,14 @@ fn bench_same_signer(runner: *bench.Runner) !void {
                         .partial = threshold.sign_message(MinSig, signer, namespace, bytes),
                     };
                 }
+                var policy = parallel.Policy.init(runner.io);
                 var workload: SameSigner = .{
                     .gpa = gpa,
                     .rng = dealt.rng,
                     .sharing = dealt.sharing,
                     .index = signer.index,
                     .entries = entries,
-                    .strategy = common.strategy(threads, conc),
+                    .strategy = common.strategy(threads, &policy, conc),
                 };
                 try runner.run(name, &workload);
             };

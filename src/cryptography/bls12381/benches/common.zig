@@ -66,8 +66,14 @@ pub fn pool(runner: *bench.Runner) !*parallel.ThreadPool {
 }
 
 /// The strategy for `concurrency`: a Rayon planning one thread runs every job inline, as
-/// `Sequential` does.
-pub fn strategy(threads: *parallel.ThreadPool, concurrency: usize) parallel.Rayon {
+/// `Sequential` does. It is adaptive through `policy`, as commonware's benches build theirs with
+/// `Rayon::new`; give each case its own policy, as each commonware case builds its own pool.
+pub fn strategy(
+    threads: *parallel.ThreadPool,
+    policy: *parallel.Policy,
+    concurrency: usize,
+) parallel.Rayon {
     assert(concurrency >= 1 and concurrency <= concurrencies[concurrencies.len - 1]);
-    return parallel.Rayon.init(threads).with_parallelism(concurrency);
+    assert(policy.len() == 0);
+    return parallel.Rayon.init(threads).with_policy(policy).with_parallelism(concurrency);
 }

@@ -123,11 +123,12 @@ fn bench_aggregate_same_signer(runner: *bench.Runner) !void {
         for (namespaced, messages) |*item, *message| {
             item.* = .{ .namespace = namespace, .message = message };
         }
+        var policy = parallel.Policy.init(runner.io);
         var workload: AggregateSameSigner = .{
             .public = signed.public,
             .messages = namespaced,
             .signature = aggregate.combine_signatures(MinSig, signed.signatures),
-            .strategy = common.strategy(threads, conc),
+            .strategy = common.strategy(threads, &policy, conc),
         };
         try runner.run(name, &workload);
     };
@@ -170,11 +171,12 @@ fn bench_batch_same_signer(runner: *bench.Runner) !void {
         for (entries, messages, signed.signatures) |*entry, *message, signature| {
             entry.* = .{ .namespace = namespace, .message = message, .signature = signature };
         }
+        var policy = parallel.Policy.init(runner.io);
         var workload: BatchSameSigner = .{
             .rng = .init(1),
             .public = signed.public,
             .entries = entries,
-            .strategy = common.strategy(threads, conc),
+            .strategy = common.strategy(threads, &policy, conc),
         };
         try runner.run(name, &workload);
     };
@@ -230,10 +232,11 @@ fn bench_scheme_same_message(runner: *bench.Runner) !void {
                 .signature = &item.signature,
             };
         }
+        var policy = parallel.Policy.init(runner.io);
         var workload: SchemeBatch = .{
             .rng = .init(1),
             .entries = entries,
-            .strategy = common.strategy(threads, conc),
+            .strategy = common.strategy(threads, &policy, conc),
         };
         try runner.run(name, &workload);
     };
@@ -266,10 +269,11 @@ fn bench_scheme_same_signer(runner: *bench.Runner) !void {
                 .signature = signature,
             };
         }
+        var policy = parallel.Policy.init(runner.io);
         var workload: SchemeBatch = .{
             .rng = .init(1),
             .entries = entries,
-            .strategy = common.strategy(threads, conc),
+            .strategy = common.strategy(threads, &policy, conc),
         };
         try runner.run(name, &workload);
     };
@@ -308,11 +312,12 @@ fn bench_msm_group(
     const scalars = try gpa.alloc(Scalar, n);
     defer gpa.free(scalars);
     for (scalars) |*scalar| scalar.* = Scalar.random(&rng);
+    var policy = parallel.Policy.init(runner.io);
     var workload: Msm(P) = .{
         .gpa = gpa,
         .points = points,
         .scalars = scalars,
-        .strategy = common.strategy(threads, conc),
+        .strategy = common.strategy(threads, &policy, conc),
     };
     try runner.run(name, &workload);
 }
@@ -353,11 +358,12 @@ fn bench_evaluate_point(runner: *bench.Runner) !void {
         var rng = utils.test_rng();
         var secret = try math.poly.Poly(Scalar).random(gpa, &rng, t - 1);
         defer secret.deinit(gpa);
+        var policy = parallel.Policy.init(runner.io);
         var workload: EvaluatePoint = .{
             .gpa = gpa,
             .polynomial = try math.poly.commit(gpa, G1, secret),
             .scalar = Scalar.random(&rng),
-            .strategy = common.strategy(threads, conc),
+            .strategy = common.strategy(threads, &policy, conc),
         };
         defer workload.polynomial.deinit(gpa);
         try runner.run(name, &workload);
