@@ -593,3 +593,8 @@ hold whole units of lanes" over coding's lane-aware `hash_batches`, and `sha512/
   with the scalar `sha512_blocks` path instead of an 8-lane kernel call of idle lanes: 96 B
   279 -> 232 ns. From two messages up the kernel stays far ahead (2 x 96 B: 270 against 430
   ns). A planted wrong message index fails the mixed-length hash_many test.
+- 2026-11-20: ed25519 sign and key derivation encode points through `field.encode`, whose
+  `invert` runs std's addition chain on `field.zig`'s squaring: encoding went from 2.53 to
+  2.0 us of a 9.4 us sign. Results are identical; the test checks `invert` against std on
+  the edge and random elements and `encode` against std on 64 base-point multiples. Planted
+  bugs in the inversion chain and the sign bit's coordinate fail it.

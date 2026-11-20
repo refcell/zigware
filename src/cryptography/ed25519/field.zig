@@ -1,13 +1,15 @@
-//! `pow2523` for point decompression, on std's radix-2^51 field elements, with a faster
-//! squaring than std's: std widens every limb to `u128` before it multiplies, so LLVM emits a
-//! 128x128-bit product per term. Here the small coefficients (2, 19, 38) fold into `u64` limbs
-//! first, so each term is one 64x64-bit widening multiply, and the carry runs in two parallel
-//! stages instead of one serial chain. The exponent chain is std's, so results are identical.
+//! `pow2523` for point decompression and `invert` for point encoding, on std's radix-2^51
+//! field elements, with a faster squaring than std's: std widens every limb to `u128` before
+//! it multiplies, so LLVM emits a 128x128-bit product per term. Here the small coefficients
+//! (2, 19, 38) fold into `u64` limbs first, so each term is one 64x64-bit widening multiply,
+//! and the carry runs in two parallel stages instead of one serial chain. The exponent chains
+//! are std's, so results are identical.
 
 const std = @import("std");
 const assert = std.debug.assert;
 
-const Fe = std.crypto.ecc.Edwards25519.Fe;
+const Point = std.crypto.ecc.Edwards25519;
+const Fe = Point.Fe;
 const mask_51: u64 = (1 << 51) - 1;
 /// Every limb `square` takes and returns is below this.
 const limb_bound: u64 = 1 << 52;
@@ -74,9 +76,36 @@ pub fn pow2523(a: Fe) Fe {
     return result;
 }
 
+/// `a^(p-2)`, the inverse of `a` (0 for 0), as std's `Fe.invert` (the same addition chain),
+/// in constant time.
+pub fn invert(a: Fe) Fe {
+    for (a.limbs) |limb| assert(limb < limb_bound);
+    var t0 = square_n(a, 1);
+    var t1 = square_n(t0, 2).mul(a);
+    t0 = t0.mul(t1);
+    t1 = t1.mul(square_n(t0, 1));
+    t1 = t1.mul(square_n(t1, 5));
+    var t2 = square_n(t1, 10).mul(t1);
+    t2 = square_n(t2.mul(square_n(t2, 20)), 10);
+    t1 = t1.mul(t2);
+    t2 = square_n(t1, 50).mul(t1);
+    const result = square_n(square_n(t2.mul(square_n(t2, 100)), 50).mul(t1), 5).mul(t0);
+    for (result.limbs) |limb| assert(limb < limb_bound);
+    return result;
+}
+
+/// The 32-byte encoding of `point`, as std's `Edwards25519.toBytes`.
+pub fn encode(point: Point) [32]u8 {
+    assert(!point.z.isZero());
+    const z_inverse = invert(point.z);
+    var bytes = point.y.mul(z_inverse).toBytes();
+    bytes[31] ^= @as(u8, @intFromBool(point.x.mul(z_inverse).isNegative())) << 7;
+    return bytes;
+}
+
 const testing = std.testing;
 
-test "pow2523 matches std" {
+test "pow2523 and invert match std" {
     // Edge elements (0, 1, p - 1, every limb at its largest unreduced value), then random ones.
     const max_limb: Fe = .{ .limbs = @splat(limb_bound - 1) };
     const edges = [_]Fe{ Fe.zero, Fe.one, Fe.zero.sub(Fe.one), max_limb, Fe.edwards25519d };
@@ -88,9 +117,19 @@ test "pow2523 matches std" {
             break :element Fe.fromBytes(bytes);
         };
         try testing.expectEqualSlices(u8, &a.pow2523().toBytes(), &pow2523(a).toBytes());
+        try testing.expectEqualSlices(u8, &a.invert().toBytes(), &invert(a).toBytes());
         // Squaring alone too, on the unreduced limbs a squaring chain sees.
         const squared = square_n(a, 3);
         try testing.expectEqualSlices(u8, &a.sq().sq().sq().toBytes(), &squared.toBytes());
         for (squared.limbs) |limb| try testing.expect(limb < limb_bound);
+    }
+}
+
+test "encode matches std" {
+    // Multiples of the base point, so z is not one and x takes both signs.
+    var point = Point.basePoint;
+    for (0..64) |_| {
+        try testing.expectEqualSlices(u8, &point.toBytes(), &encode(point));
+        point = point.add(point.dbl());
     }
 }

@@ -135,7 +135,7 @@ pub const SigningKey = struct {
         // A clamped scalar is in [2^254, 2^255) and a multiple of 8, so it is not a multiple
         // of l (8 l > 2^255) and the product is never the identity (asserted below).
         const a = base_mul.mul_base(secret);
-        const a_bytes = a.toBytes();
+        const a_bytes = field.encode(a);
         const key: SigningKey = .{
             .seed = .{ .value = seed },
             .secret = .{ .value = secret },
@@ -157,7 +157,7 @@ pub const SigningKey = struct {
         // A zero nonce makes R the identity, whose encoding is still a valid signature.
         const r = base_mul.mul_base(nonce);
         var signature: [64]u8 = undefined;
-        signature[0..32].* = r.toBytes();
+        signature[0..32].* = field.encode(r);
         const k = challenge(signature[0..32], &self.verification_key.bytes, namespace, message);
         signature[32..64].* = scalar.mulAdd(k, self.secret.value, nonce);
         // Proof: mulAdd reduces mod l, so s is canonical.
