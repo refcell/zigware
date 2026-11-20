@@ -868,6 +868,102 @@ three alternating rounds at a load of 50 to 69:
   than the value. The branch was dropped. A dedicated Montgomery square (a 21-product wide
   square, then `reduce_wide`) was no faster than `mul` either (39 against 38 ns).
 
+## Coding: Reed-Solomon scheme and engines (2026-11-20, coding lane)
+
+commonware's `coding_scheme_times` (`reed_solomon::encode`, `reed_solomon::decode`) and
+cryptography's `reed_solomon` benches against zigware's `bench-coding` and
+`bench-cryptography`, with `bench-compare.sh`'s criterion settings. Three rounds alternate
+the two sides per bench group. Each ratio is the median over rounds of that round's
+zigware / commonware ratio, and the times are the medians of the per-round medians.
+commonware `a9ffc25f3` against zigware `c5b9d9f0` (ReleaseFast, AVX-512 GFNI engine). The
+1-minute load average was 42 to 97, so ratios within about 1.3× of 1 are noise here: single
+rows swung by 2× between rounds.
+
+The `engine_mul` rows were re-measured on `95742da3`, after `5c5d48cd` timed a workload with
+no `before_iter` as one batch. Before it, each iteration paid about 20 ns for two clock reads,
+so avx2 read 2.34× (60 ns against 47 ns) and avx512 34 ns against 13 ns. Those rows are now
+even. The other engine groups' avx512 rows were not in this run; zigware has had all five
+since `c5b9d9f0`.
+
+| group | rows | median ratio | fastest row | slowest row | rows over 1.3× |
+|---|---:|---:|---:|---:|---:|
+| `reed_solomon::encode` | 30 | 0.96× | 0.53× | 1.78× | 5 |
+| `reed_solomon::decode` | 130 | 1.26× | 0.44× | 2.88× | 61 |
+| `reed_solomon::encoder` | 23 | 0.74× | 0.35× | 0.91× | 0 |
+| `reed_solomon::decoder` | 46 | 0.75× | 0.50× | 1.19× | 0 |
+| `reed_solomon::high_rate_encoder` | 9 | 0.86× | 0.60× | 0.95× | 0 |
+| `reed_solomon::low_rate_encoder` | 9 | 0.87× | 0.53× | 1.14× | 0 |
+| `reed_solomon::high_rate_decoder` | 9 | 0.84× | 0.60× | 1.15× | 0 |
+| `reed_solomon::low_rate_decoder` | 9 | 0.62× | 0.37× | 0.85× | 0 |
+| `reed_solomon::engine_eval_poly` | 6 | 0.82× | 0.64× | 1.09× | 0 |
+| `reed_solomon::engine_fft` | 3 | 0.89× | 0.88× | 0.89× | 0 |
+| `reed_solomon::engine_ifft` | 3 | 0.88× | 0.80× | 0.89× | 0 |
+| `reed_solomon::engine_mul` | 4 | 1.02× | 0.94× | 1.11× | 0 |
+
+Engine rows:
+
+| bench | parameters | commonware | zigware | zigware / commonware |
+|---|---|---|---|---|
+| `reed_solomon::engine_eval_poly` | `engine=naive elems=65536` | 1.18 ms | 831 µs | 0.70× |
+| `reed_solomon::engine_eval_poly` | `engine=naive elems=8192 mode=truncated` | 812 µs | 513 µs | 0.64× |
+| `reed_solomon::engine_eval_poly` | `engine=scalar elems=65536` | 1.02 ms | 928 µs | 0.86× |
+| `reed_solomon::engine_eval_poly` | `engine=scalar elems=8192 mode=truncated` | 646 µs | 520 µs | 0.79× |
+| `reed_solomon::engine_eval_poly` | `engine=avx2 elems=65536` | 813 µs | 792 µs | 0.97× |
+| `reed_solomon::engine_eval_poly` | `engine=avx2 elems=8192 mode=truncated` | 469 µs | 516 µs | 1.09× |
+| `reed_solomon::engine_fft` | `engine=naive shards=128` | 488 µs | 453 µs | 0.88× |
+| `reed_solomon::engine_fft` | `engine=scalar shards=128` | 318 µs | 272 µs | 0.89× |
+| `reed_solomon::engine_fft` | `engine=avx2 shards=128` | 16.8 µs | 15 µs | 0.89× |
+| `reed_solomon::engine_ifft` | `engine=naive shards=128` | 488 µs | 430 µs | 0.88× |
+| `reed_solomon::engine_ifft` | `engine=scalar shards=128` | 327 µs | 262 µs | 0.80× |
+| `reed_solomon::engine_ifft` | `engine=avx2 shards=128` | 17.3 µs | 15.8 µs | 0.89× |
+| `reed_solomon::engine_mul` | `engine=naive shard_bytes=1024` | 1.29 µs | 1.03 µs | 1.05× |
+| `reed_solomon::engine_mul` | `engine=scalar shard_bytes=1024` | 599 ns | 593 ns | 0.99× |
+| `reed_solomon::engine_mul` | `engine=avx2 shard_bytes=1024` | 33 ns | 33 ns | 1.11× |
+| `reed_solomon::engine_mul` | `engine=avx512 shard_bytes=1024` | 13.3 ns | 12.7 ns | 0.94× |
+
+Decode is the only group with many rows over 1.3×, and it is worst with a thread pool:
+
+| decode `conc` | `shard_selection` | rows | median ratio | rows over 1.3× |
+|---|---|---:|---:|---:|
+| 1 | best | 15 | 1.33× | 8 |
+| 1 | exception | 15 | 1.16× | 4 |
+| 1 | interleaved | 18 | 1.09× | 7 |
+| 1 | worst | 15 | 1.05× | 3 |
+| 4 | best | 1 | 2.85× | 1 |
+| 4 | interleaved | 5 | 1.46× | 4 |
+| 4 | worst | 1 | 2.51× | 1 |
+| 8 | best | 15 | 1.72× | 12 |
+| 8 | exception | 15 | 1.31× | 8 |
+| 8 | interleaved | 15 | 1.26× | 6 |
+| 8 | worst | 15 | 1.30× | 7 |
+
+Rows over 2×:
+
+| bench | parameters | commonware | zigware | zigware / commonware |
+|---|---|---|---|---|
+| `reed_solomon::decode` | `msg_len=1048576 chunks=25 min_shards=9 conc=8 shard_selection=best` | 602 µs | 1.73 ms | 2.88× |
+| `reed_solomon::decode` | `msg_len=1048576 chunks=20 min_shards=7 conc=4 shard_selection=best` | 766 µs | 2.18 ms | 2.85× |
+| `reed_solomon::decode` | `msg_len=4194304 chunks=25 min_shards=9 conc=8 shard_selection=exception` | 4.23 ms | 8.03 ms | 2.67× |
+| `reed_solomon::decode` | `msg_len=1048576 chunks=20 min_shards=7 conc=4 shard_selection=worst` | 1.11 ms | 2.69 ms | 2.51× |
+| `reed_solomon::decode` | `msg_len=1048576 chunks=100 min_shards=34 conc=8 shard_selection=best` | 883 µs | 2.06 ms | 2.43× |
+| `reed_solomon::decode` | `msg_len=4194304 chunks=100 min_shards=34 conc=8 shard_selection=worst` | 6.14 ms | 11 ms | 2.39× |
+| `reed_solomon::decode` | `msg_len=1048576 chunks=20 min_shards=7 conc=4 shard_selection=interleaved` | 1.28 ms | 3.01 ms | 2.35× |
+| `reed_solomon::decode` | `msg_len=1048576 chunks=25 min_shards=9 conc=8 shard_selection=exception` | 845 µs | 1.82 ms | 2.23× |
+| `reed_solomon::decode` | `msg_len=1048576 chunks=250 min_shards=84 conc=1 shard_selection=best` | 800 µs | 2.06 ms | 2.23× |
+| `reed_solomon::decode` | `msg_len=4194304 chunks=25 min_shards=9 conc=8 shard_selection=best` | 2.55 ms | 5.78 ms | 2.21× |
+| `reed_solomon::decode` | `msg_len=4194304 chunks=25 min_shards=9 conc=8 shard_selection=interleaved` | 5.45 ms | 8.26 ms | 2.14× |
+| `reed_solomon::decode` | `msg_len=1048576 chunks=25 min_shards=9 conc=8 shard_selection=worst` | 909 µs | 1.71 ms | 2.12× |
+| `reed_solomon::decode` | `msg_len=1048576 chunks=250 min_shards=84 conc=8 shard_selection=best` | 772 µs | 1.71 ms | 2.10× |
+| `reed_solomon::decode` | `msg_len=4194304 chunks=10 min_shards=4 conc=8 shard_selection=worst` | 2.52 ms | 5.82 ms | 2.08× |
+| `reed_solomon::decode` | `msg_len=4194304 chunks=50 min_shards=17 conc=8 shard_selection=best` | 4.38 ms | 6.58 ms | 2.02× |
+
+
+Unprofiled. A spot check of `decode/msg_len=4194304 chunks=100 min_shards=34
+shard_selection=best` at load 63 had zigware ahead at both `conc=1` (5.88 ms against 6.99 ms)
+and `conc=8` (4.87 ms against 5.35 ms), where this run gives 1.40× and 1.65×. So part of the
+decode gap is load. A second three-round run on `95742da3` (benches on `allocator.Heap`)
+will show which rows are really slow before they are profiled.
+
 ## Appendix: bench coverage
 
 Every Criterion bench in commonware a9ffc25f3 (`benches/` dirs with `criterion_main!`), listed
@@ -877,12 +973,11 @@ keeps the largest inputs of some benches to full mode). Each package's benches r
 `zig build bench` (filter with `-Dbench-filter=`). Counts are bench cases (one Criterion name
 each); a group is the name before the first `/`.
 
-**2224 of 2262** commonware cases have a zigware bench of the same name. The 38 without one:
+**2229 of 2262** commonware cases have a zigware bench of the same name. The 33 without one:
 
 - 18 `impl=roaring-rs` rows of the roaring bitmap benches: they measure an external Rust crate.
 - 15 `iobuf::iobuf::decode_fixed` cases: the `bytes` and `bytes_ref` modes measure the `bytes`
   crate, and `vec` is the same decode as `vec_slice` here (decided when the bench was ported).
-- 5 `engine=avx512` rows of the Reed-Solomon engine benches: zigware has no AVX-512 engine.
 
 Ported by this audit: utils' `bitmap`, `cache`, `rational`, and `sequence` benches (168
 cases), storage's `ordinal` (13) and `rmap` (5), curve25519's batch verify at
@@ -965,10 +1060,10 @@ and runtime's I/O backend benches (`runtime::network::echo`, `runtime::storage`)
 | cryptography | `reed_solomon` | `reed_solomon::low_rate_encoder` | 9 | 9 |  |
 | cryptography | `reed_solomon` | `reed_solomon::high_rate_decoder` | 9 | 9 |  |
 | cryptography | `reed_solomon` | `reed_solomon::low_rate_decoder` | 9 | 9 |  |
-| cryptography | `reed_solomon` | `reed_solomon::engine_eval_poly` | 8 | 6 | `engine=avx512` missing: zigware has no AVX-512 engine |
-| cryptography | `reed_solomon` | `reed_solomon::engine_mul` | 4 | 3 | `engine=avx512` missing: zigware has no AVX-512 engine |
-| cryptography | `reed_solomon` | `reed_solomon::engine_fft` | 4 | 3 | `engine=avx512` missing: zigware has no AVX-512 engine |
-| cryptography | `reed_solomon` | `reed_solomon::engine_ifft` | 4 | 3 | `engine=avx512` missing: zigware has no AVX-512 engine |
+| cryptography | `reed_solomon` | `reed_solomon::engine_eval_poly` | 8 | 8 |  |
+| cryptography | `reed_solomon` | `reed_solomon::engine_mul` | 4 | 4 |  |
+| cryptography | `reed_solomon` | `reed_solomon::engine_fft` | 4 | 4 |  |
+| cryptography | `reed_solomon` | `reed_solomon::engine_ifft` | 4 | 4 |  |
 | cryptography | `sake` | `sake::sake` | 1 | 1 |  |
 | cryptography | `secp256r1` | `secp256r1::signature_generation` | 2 | 2 |  |
 | cryptography | `secp256r1` | `secp256r1::signature_verification` | 2 | 2 |  |
