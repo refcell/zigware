@@ -44,6 +44,7 @@ pub fn Immutable(comptime F: type, comptime K: type, comptime E: type, comptime 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("conformance_test.zig");
+    _ = @import("storage_conformance_test.zig");
     _ = @import("db_test.zig");
     _ = @import("recovery_test.zig");
     _ = @import("start_sync_test.zig");

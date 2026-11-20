@@ -69,6 +69,15 @@ fn immutable_workload(comptime Db: type, db: *Db, seed: u64) !void {
     try apply_sets(Db, db, keys[0 .. n / 2], values[0 .. n / 2]);
 }
 
+/// commonware's `immutable_root!` workload for a keyed `Db`, else its `keyless_root!`.
+pub fn workload(comptime Db: type, db: *Db, seed: u64) !void {
+    if (Db.keyed) return immutable_workload(Db, db, seed);
+    const n = seed % 30 + 5;
+    try apply_appends(Db, db, seed, n);
+    try apply_appends(Db, db, seed +% n, n);
+    try apply_appends(Db, db, ~seed, n / 2);
+}
+
 fn CompactConformance(comptime Db: type) type {
     return struct {
         pub fn commit(gpa: Allocator, seed: u64) ![]u8 {
@@ -76,15 +85,7 @@ fn CompactConformance(comptime Db: type) type {
             defer harness.deinit();
             var db = try harness.open(Db, null);
             errdefer db.deinit();
-            if (Db.keyed) {
-                try immutable_workload(Db, &db, seed);
-            } else {
-                // commonware's `keyless_root!` workload.
-                const n = seed % 30 + 5;
-                try apply_appends(Db, &db, seed, n);
-                try apply_appends(Db, &db, seed +% n, n);
-                try apply_appends(Db, &db, ~seed, n / 2);
-            }
+            try workload(Db, &db, seed);
             const root = db.root();
             try db.destroy();
             return gpa.dupe(u8, &root.bytes);
