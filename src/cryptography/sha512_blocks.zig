@@ -77,6 +77,14 @@ pub fn digest_message(message: []const u8, out: *[64]u8) void {
     for (state, 0..) |word, i| std.mem.writeInt(u64, out[i * 8 ..][0..8], word, .big);
 }
 
+/// `x`, opaque to the optimizer, so the additions around it keep their order. Emits nothing.
+inline fn pinned(x: u64) u64 {
+    return asm (""
+        : [out] "=r" (-> u64),
+        : [in] "0" (x),
+    );
+}
+
 inline fn rotr(x: V, comptime n: u6) V {
     return std.math.rotr(V, x, n);
 }
@@ -137,17 +145,34 @@ inline fn rounds(
             const f = (a + 5) % 8;
             const g = (a + 6) % 8;
             const h = (a + 7) % 8;
-            const early = (v[h] +% wk[round + i][lane]) +% (v[g] ^ (v[e] & (v[f] ^ v[g])));
             const sigma1 = std.math.rotr(u64, v[e], 14) ^ std.math.rotr(u64, v[e], 18) ^
                 std.math.rotr(u64, v[e], 41);
             const sigma0 = std.math.rotr(u64, v[a], 28) ^ std.math.rotr(u64, v[a], 34) ^
                 std.math.rotr(u64, v[a], 39);
-            const a_xor_b = v[a] ^ v[b];
-            const majority = v[b] ^ (a_xor_b & b_xor_c);
-            b_xor_c = a_xor_b;
-            const t1 = early +% sigma1;
-            v[d] = (v[d] +% early) +% sigma1;
-            v[h] = t1 +% (sigma0 +% majority);
+            const choose = v[g] ^ (v[e] & (v[f] ^ v[g]));
+            if (body == 80) {
+                const early = (v[h] +% wk[round + i][lane]) +% choose;
+                const a_xor_b = v[a] ^ v[b];
+                const majority = v[b] ^ (a_xor_b & b_xor_c);
+                b_xor_c = a_xor_b;
+                const t1 = early +% sigma1;
+                v[d] = (v[d] +% early) +% sigma1;
+                v[h] = t1 +% (sigma0 +% majority);
+            } else {
+                // In the loop LLVM chained `Ch`, `h`, `W + K`, `Σ1`, and `d` one after another
+                // on `e`. The pinned sums keep `e`'s chain at `Σ1` plus two additions, and
+                // majority's terms `a & (b ^ c)` and `b & c`, which never share a set bit, add
+                // separately, so `a`'s chain is `Σ0` plus one addition (16 KiB: 13.8 us ->
+                // 12.8 us). The unrolled lone block keeps the form LLVM schedules best there.
+                const hw = v[h] +% wk[round + i][lane];
+                const dhw = pinned(v[d] +% hw);
+                const b_and_c = v[b] & v[(a + 2) % 8];
+                const a_and = v[a] & b_xor_c;
+                b_xor_c = v[a] ^ v[b];
+                const t1 = pinned(hw +% choose) +% sigma1;
+                v[d] = pinned(dhw +% choose) +% sigma1;
+                v[h] = pinned(pinned(t1 +% b_and_c) +% a_and) +% sigma0;
+            }
         }
     }
     assert(round == 80);
