@@ -102,9 +102,11 @@ const testing = std.testing;
 const runtime = @import("runtime");
 
 fn run(comptime body: fn (Io) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(testing.allocator, .{});
-    defer runner.deinit();
-    try (try runner.start(body, .{runner.io()}));
+    try runtime.deterministic.soak(testing.allocator, .{}, {}, struct {
+        fn run_round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start(body, .{runner.io()}));
+        }
+    }.run_round);
 }
 
 fn expect_ready(gate: Gate, epoch: Epoch) !void {

@@ -326,9 +326,11 @@ const Background = struct {
 /// Runs `body` on a deterministic runtime that fails after 10 simulated seconds.
 fn run(comptime body: fn (Io) anyerror!void) !void {
     const timeout_ns = 10 * std.time.ns_per_s;
-    var runner = try runtime.deterministic.Runner.init(gpa, .{ .timeout_ns = timeout_ns });
-    defer runner.deinit();
-    try try runner.start(body, .{runner.io()});
+    try runtime.deterministic.soak(gpa, .{ .timeout_ns = timeout_ns }, {}, struct {
+        fn run_round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start(body, .{runner.io()});
+        }
+    }.run_round);
 }
 
 /// The encoding of `database`'s own response to `request`.

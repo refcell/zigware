@@ -29,11 +29,13 @@ const P = struct {
 
 /// Runs `body` on a deterministic runtime that fails after 10 simulated seconds.
 fn run(comptime body: fn (Ctx) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(testing.allocator, .{
+    try runtime.deterministic.soak(testing.allocator, .{
         .timeout_ns = 10 * std.time.ns_per_s,
-    });
-    defer runner.deinit();
-    try try runner.start_context(body, .{});
+    }, {}, struct {
+        fn run_round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start_context(body, .{});
+        }
+    }.run_round);
 }
 
 fn processed_is(mailbox: Mailbox, expected: Processed) !bool {

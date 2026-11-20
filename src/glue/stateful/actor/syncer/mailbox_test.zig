@@ -29,9 +29,11 @@ fn anchor(height: u64, view: u64) Anchor {
 /// retarget that never returns fails instead of hanging.
 fn run(comptime body: fn (Io) anyerror!void) !void {
     const timeout_ns = 5 * std.time.ns_per_s;
-    var runner = try runtime.deterministic.Runner.init(gpa, .{ .timeout_ns = timeout_ns });
-    defer runner.deinit();
-    try try runner.start(body, .{runner.io()});
+    try runtime.deterministic.soak(gpa, .{ .timeout_ns = timeout_ns }, {}, struct {
+        fn run_round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start(body, .{runner.io()});
+        }
+    }.run_round);
 }
 
 const Harness = struct {

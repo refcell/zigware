@@ -303,11 +303,9 @@ fn apply(sim: *Sim, ctx: Ctx, faults: Faults, at_ms: u64, crashed_down: *bool) !
     }
 }
 
-fn run_seed(seed: u64) ![8]u8 {
-    var runner = try runtime.deterministic.Runner.init(testing.allocator, .{
-        .seed = seed,
-        .timeout_ns = 300 * std.time.ns_per_s,
-    });
+/// Runs `body` on a runner from `config` and returns its audit state.
+fn replay(config: runtime.deterministic.Config) ![8]u8 {
+    var runner = try runtime.deterministic.Runner.init(testing.allocator, config);
     defer runner.deinit();
     try try runner.start_context(body, .{});
     return runner.auditor.state();
@@ -315,8 +313,18 @@ fn run_seed(seed: u64) ![8]u8 {
 
 test "stateful probe dst: a joiner discovers the tip despite drops, a partition, and a crash" {
     for (0..seeds) |seed| {
-        const first = try run_seed(seed);
-        const replay = try run_seed(seed);
-        try testing.expectEqualSlices(u8, &first, &replay);
+        const config: runtime.deterministic.Config = .{
+            .seed = seed,
+            .timeout_ns = 300 * std.time.ns_per_s,
+        };
+        // Each soak round replays its own seed and expects the same audit state.
+        try runtime.deterministic.soak(testing.allocator, config, {}, struct {
+            fn run_round(_: void, runner: *runtime.deterministic.Runner) !void {
+                try try runner.start_context(body, .{});
+                const first = runner.auditor.state();
+                const again = try replay(runner.config);
+                try testing.expectEqualSlices(u8, &first, &again);
+            }
+        }.run_round);
     }
 }

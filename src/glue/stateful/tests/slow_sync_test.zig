@@ -160,9 +160,11 @@ fn report_paced(
 // commonware `stable_leader_finalizations_outpace_slow_qmdb_sync`: with storage slower than the
 // block pace, finalizations stay durable within a few sync intervals and their syncs coalesce.
 test "stateful tests: stable-leader finalizations outpace a slow qmdb sync" {
-    var runner = try runtime.deterministic.Runner.init(testing.allocator, .{
+    try runtime.deterministic.soak(testing.allocator, .{
         .timeout_ns = 20 * std.time.ns_per_s,
-    });
-    defer runner.deinit();
-    try try runner.start_context(stable_leader, .{});
+    }, {}, struct {
+        fn run_round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start_context(stable_leader, .{});
+        }
+    }.run_round);
 }

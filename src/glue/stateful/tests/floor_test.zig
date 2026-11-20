@@ -221,6 +221,11 @@ fn check_boot(
 
 fn live_floor(floor_height: u64) !void {
     assert(floor_height >= 2 and floor_height <= 4);
+    const config: runtime.deterministic.Config = .{ .timeout_ns = 120 * std.time.ns_per_s };
+    try runtime.deterministic.soak(gpa, config, floor_height, live_floor_round);
+}
+
+fn live_floor_round(floor_height: u64, runner: *runtime.deterministic.Runner) !void {
     var rng = utils.rng.test_rng();
     var state: State = .{
         .floor_height = floor_height,
@@ -233,10 +238,6 @@ fn live_floor(floor_height: u64) !void {
         ),
     };
     defer state.validators.deinit(gpa);
-    var runner = try runtime.deterministic.Runner.init(gpa, .{
-        .timeout_ns = 120 * std.time.ns_per_s,
-    });
-    defer runner.deinit();
     // The first two cuts leave F unapplied. The third applies F, and the fourth opens its
     // committed target from durable storage.
     for (0..4) |boot| {

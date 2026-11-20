@@ -24,11 +24,13 @@ const TestMessage = TestMailbox.M;
 const Digested = broadcast.Digested(mocks.TestBlock);
 
 fn run(comptime body: fn (Io) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{
+    try runtime.deterministic.soak(gpa, .{
         .timeout_ns = 10 * std.time.ns_per_s,
-    });
-    defer runner.deinit();
-    try (try runner.start(body, .{runner.io()}));
+    }, {}, struct {
+        fn run_round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start(body, .{runner.io()}));
+        }
+    }.run_round);
 }
 
 /// An ancestry yielding the genesis block led by seed zero's key, and its digest.

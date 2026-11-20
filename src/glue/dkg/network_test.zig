@@ -377,11 +377,13 @@ fn lookup_secondary_dials_primary(io: Io, transport: *Transport, scope: Scope) !
 }
 
 test "network: lookup secondary dials primary and receives response" {
-    var runner = try runtime.deterministic.Runner.init(testing.allocator, .{
+    try runtime.deterministic.soak(testing.allocator, .{
         .seed = 0,
         .timeout_ns = 10 * std.time.ns_per_s,
-    });
-    defer runner.deinit();
-    const args = .{ runner.io(), runner.network(), runner.metrics() };
-    try (try runner.start(lookup_secondary_dials_primary, args));
+    }, {}, struct {
+        fn run_round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            const args = .{ runner.io(), runner.network(), runner.metrics() };
+            try (try runner.start(lookup_secondary_dials_primary, args));
+        }
+    }.run_round);
 }

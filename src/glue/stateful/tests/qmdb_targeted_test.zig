@@ -268,11 +268,13 @@ fn certify_all(io: Io, wrapper: *Wrapper, blocks: []const Block, order: []const 
 }
 
 pub fn run(comptime body: fn (Ctx) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(testing.allocator, .{
+    try runtime.deterministic.soak(testing.allocator, .{
         .timeout_ns = 10 * std.time.ns_per_s,
-    });
-    defer runner.deinit();
-    try try runner.start_context(body, .{});
+    }, {}, struct {
+        fn run_round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start_context(body, .{});
+        }
+    }.run_round);
 }
 
 fn out_of_order_certifications(ctx: Ctx) !void {

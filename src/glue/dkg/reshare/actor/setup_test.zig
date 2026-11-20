@@ -193,41 +193,47 @@ fn register_task(
 // the registrar resolves, so a gate waiting on it never opens before the consensus provider
 // serves its scheme.
 test "setup: the fence marks after registration resolves" {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{
+    try runtime.deterministic.soak(gpa, .{
         .timeout_ns = 10 * std.time.ns_per_s,
-    });
-    defer runner.deinit();
-    try (try runner.start(struct {
-        fn body(io: Io) anyerror!void {
-            var output = try dealt(0);
-            defer free_dealt(&output);
-            const sharing = try output.output.public.clone(gpa);
-            const info = types.SchemeInfo(V, P).init(
-                PrivateKey.from_seed(9).public_key(),
-                try output.output.players.clone(gpa),
-                sharing,
-                null,
-            );
-            try testing.expect(info == .verifier);
-            var entered = try oneshot.channel(void, gpa, io);
-            defer entered.receiver.deinit();
-            var held = try oneshot.channel(void, gpa, io);
-            var registrar: HeldRegistrar = .{ .entered = entered.sender, .held = held.receiver };
-            var fence = Fence.init(io);
-            defer fence.close();
-            const gate = fence.gate();
-            var registration = try io.concurrent(register_task, .{ &registrar, io, &fence, info });
+    }, {}, struct {
+        fn run_round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start(struct {
+                fn body(io: Io) anyerror!void {
+                    var output = try dealt(0);
+                    defer free_dealt(&output);
+                    const sharing = try output.output.public.clone(gpa);
+                    const info = types.SchemeInfo(V, P).init(
+                        PrivateKey.from_seed(9).public_key(),
+                        try output.output.players.clone(gpa),
+                        sharing,
+                        null,
+                    );
+                    try testing.expect(info == .verifier);
+                    var entered = try oneshot.channel(void, gpa, io);
+                    defer entered.receiver.deinit();
+                    var held = try oneshot.channel(void, gpa, io);
+                    var registrar: HeldRegistrar = .{
+                        .entered = entered.sender,
+                        .held = held.receiver,
+                    };
+                    var fence = Fence.init(io);
+                    defer fence.close();
+                    const gate = fence.gate();
+                    const args = .{ &registrar, io, &fence, info };
+                    var registration = try io.concurrent(register_task, args);
 
-            // Registration is suspended inside the registrar, so the gate is still closed.
-            try entered.receiver.recv();
-            try testing.expect(gate.poll(.new(1)) == null);
+                    // Registration is suspended inside the registrar, so the gate is still closed.
+                    try entered.receiver.recv();
+                    try testing.expect(gate.poll(.new(1)) == null);
 
-            // Once released, registration resolves and the gate opens.
-            try held.sender.send({});
-            try registration.await(io);
-            try gate.wait(.new(1));
+                    // Once released, registration resolves and the gate opens.
+                    try held.sender.send({});
+                    try registration.await(io);
+                    try gate.wait(.new(1));
+                }
+            }.body, .{runner.io()}));
         }
-    }.body, .{runner.io()}));
+    }.run_round);
 }
 
 // commonware `recovered_dealer_after_dealing_requires_ack_quorum`.

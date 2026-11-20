@@ -319,11 +319,13 @@ fn epoch_transition_body(ctx: runtime.deterministic.Context) anyerror!void {
 }
 
 test "orchestrator actor: the final block is acknowledged after the next epoch starts" {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{
+    try runtime.deterministic.soak(gpa, .{
         .timeout_ns = 60 * std.time.ns_per_s,
-    });
-    defer runner.deinit();
-    try try runner.start_context(epoch_transition_body, .{});
+    }, {}, struct {
+        fn run_round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start_context(epoch_transition_body, .{});
+        }
+    }.run_round);
 }
 
 /// Polls every 10 ms of simulated time, up to `ms`, until `hints` holds `len` entries.
@@ -391,11 +393,13 @@ fn catch_up_body(ctx: runtime.deterministic.Context) anyerror!void {
 }
 
 test "orchestrator actor: a later-epoch vote hints the boundary finalization" {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{
+    try runtime.deterministic.soak(gpa, .{
         .timeout_ns = 60 * std.time.ns_per_s,
-    });
-    defer runner.deinit();
-    try try runner.start_context(catch_up_body, .{});
+    }, {}, struct {
+        fn run_round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start_context(catch_up_body, .{});
+        }
+    }.run_round);
 }
 
 /// Epoch zero's chain for `key`: genesis carrying epoch zero's info (stored in marshal), the
@@ -414,11 +418,13 @@ fn epoch_zero(h: *Harness, store_final: bool) !struct { Digested, Digested } {
 }
 
 fn start_runner(comptime body: fn (runtime.deterministic.Context) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{
+    try runtime.deterministic.soak(gpa, .{
         .timeout_ns = 60 * std.time.ns_per_s,
-    });
-    defer runner.deinit();
-    try try runner.start_context(body, .{});
+    }, {}, struct {
+        fn run_round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start_context(body, .{});
+        }
+    }.run_round);
 }
 
 // commonware `missing_boundary_block_stops_cleanly`: marshal cannot supply the final block

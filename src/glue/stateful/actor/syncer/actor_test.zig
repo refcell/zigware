@@ -259,7 +259,9 @@ fn stranded(io: Io) !void {
 
 test "stateful syncer: a stranded tip update resolves to the artifact" {
     const timeout_ns = 10 * std.time.ns_per_s;
-    var runner = try runtime.deterministic.Runner.init(gpa, .{ .timeout_ns = timeout_ns });
-    defer runner.deinit();
-    try try runner.start(stranded, .{runner.io()});
+    try runtime.deterministic.soak(gpa, .{ .timeout_ns = timeout_ns }, {}, struct {
+        fn run_round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start(stranded, .{runner.io()});
+        }
+    }.run_round);
 }

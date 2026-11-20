@@ -145,9 +145,11 @@ fn singleton_body(ctx: Ctx) anyerror!void {
 }
 
 test "bootstrap engine completes a singleton ceremony" {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{
+    try runtime.deterministic.soak(gpa, .{
         .timeout_ns = 120 * std.time.ns_per_s,
-    });
-    defer runner.deinit();
-    try try runner.start_context(singleton_body, .{});
+    }, {}, struct {
+        fn run_round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start_context(singleton_body, .{});
+        }
+    }.run_round);
 }

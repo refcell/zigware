@@ -214,16 +214,28 @@ fn activation_failure_body(ctx: Ctx, state: *State) anyerror!void {
     try run.close();
 }
 
-fn runner() !runtime.deterministic.Runner {
-    return runtime.deterministic.Runner.init(gpa, .{ .timeout_ns = 600 * std.time.ns_per_s });
+const long_run: runtime.deterministic.Config = .{ .timeout_ns = 600 * std.time.ns_per_s };
+
+/// Runs `body` on `-Dfuzz-soak` runners from `config`, each round with a fresh `State`.
+fn soak(
+    config: runtime.deterministic.Config,
+    comptime body: fn (*State, *runtime.deterministic.Runner) anyerror!void,
+) !void {
+    try runtime.deterministic.soak(gpa, config, {}, struct {
+        fn run_round(_: void, deterministic: *runtime.deterministic.Runner) anyerror!void {
+            var state: State = .{ .store = .init(gpa) };
+            defer state.deinit();
+            try body(&state, deterministic);
+        }
+    }.run_round);
 }
 
 test "dkg e2e activation failure completes empty" {
-    var state: State = .{ .store = .init(gpa) };
-    defer state.deinit();
-    var deterministic = try runner();
-    defer deterministic.deinit();
-    try try deterministic.start_context(activation_failure_body, .{&state});
+    try soak(long_run, struct {
+        fn body(state: *State, deterministic: *runtime.deterministic.Runner) !void {
+            try try deterministic.start_context(activation_failure_body, .{state});
+        }
+    }.body);
 }
 
 /// Completes the ceremony with manager `M`, idles for `idle_s`, and shuts down uncleanly,
@@ -269,38 +281,38 @@ fn restart_body(comptime M: type) fn (Ctx, *State) anyerror!void {
 // A participant without a share restarted after processing the final block reports the
 // finalized artifact and re-activates the peer set.
 test "dkg e2e restart without share" {
-    var state: State = .{ .store = .init(gpa) };
-    defer state.deinit();
-    var deterministic = try runner();
-    defer deterministic.deinit();
-    try try deterministic.start_context(complete_body(KeyOnly), .{ &state, 5 });
-    try testing.expect(state.has_info);
-    // Model a participant that completed without a share.
-    state.store.deinit();
-    state.store = .init(gpa);
-    try try deterministic.start_context(restart_body(KeyOnly), .{&state});
-    const restarted = state.restarted orelse return error.ExpectedInfo;
-    try testing.expect(restarted.eql(state.info.?));
-    try testing.expect(state.tracked);
+    try soak(long_run, struct {
+        fn body(state: *State, deterministic: *runtime.deterministic.Runner) !void {
+            try try deterministic.start_context(complete_body(KeyOnly), .{ state, 5 });
+            try testing.expect(state.has_info);
+            // Model a participant that completed without a share.
+            state.store.deinit();
+            state.store = .init(gpa);
+            try try deterministic.start_context(restart_body(KeyOnly), .{state});
+            const restarted = state.restarted orelse return error.ExpectedInfo;
+            try testing.expect(restarted.eql(state.info.?));
+            try testing.expect(state.tracked);
+        }
+    }.body);
 }
 
 // A restart after a failed ceremony reports the failure.
 test "dkg e2e restart after failure" {
-    var state: State = .{ .store = .init(gpa) };
-    defer state.deinit();
-    var deterministic = try runner();
-    defer deterministic.deinit();
-    // Activation fails, so the ceremony reports no artifact, and the chain stops below the
-    // final block while the actor idles.
-    try try deterministic.start_context(complete_body(Failing), .{ &state, 60 });
-    try testing.expect(!state.has_info);
-    // The first restart joins after the dealing window, so the ceremony fails and the chain
-    // finalizes a final block without an artifact. The second reports that outcome.
-    for (0..2) |_| {
-        try try deterministic.start_context(restart_body(KeyOnly), .{&state});
-        try testing.expect(state.restarted == null);
-        try testing.expect(state.tracked);
-    }
+    try soak(long_run, struct {
+        fn body(state: *State, deterministic: *runtime.deterministic.Runner) !void {
+            // Activation fails, so the ceremony reports no artifact, and the chain stops below the
+            // final block while the actor idles.
+            try try deterministic.start_context(complete_body(Failing), .{ state, 60 });
+            try testing.expect(!state.has_info);
+            // The first restart joins after the dealing window, so the ceremony fails and the chain
+            // finalizes a final block without an artifact. The second reports that outcome.
+            for (0..2) |_| {
+                try try deterministic.start_context(restart_body(KeyOnly), .{state});
+                try testing.expect(state.restarted == null);
+                try testing.expect(state.tracked);
+            }
+        }
+    }.body);
 }
 
 fn share_without_final_block_body(ctx: Ctx, state: *State) anyerror!void {
@@ -318,15 +330,15 @@ fn share_without_final_block_body(ctx: Ctx, state: *State) anyerror!void {
 // A persisted share without the stored final block means bootstrap storage does not match
 // the secret store (commonware's `should_panic`).
 test "dkg e2e share without final block fails" {
-    var state: State = .{ .store = .init(gpa) };
-    defer state.deinit();
-    var rng = utils.rng.TestRng.init(0);
-    const Group = cryptography.bls12381.primitives.group;
-    const share = Group.Share.init(.from_usize(0), Group.Private.random(&rng));
-    try state.store.put_share(Epoch.zero(), share);
-    var deterministic = try runner();
-    defer deterministic.deinit();
-    try try deterministic.start_context(share_without_final_block_body, .{&state});
+    try soak(long_run, struct {
+        fn body(state: *State, deterministic: *runtime.deterministic.Runner) !void {
+            var rng = utils.rng.TestRng.init(0);
+            const Group = cryptography.bls12381.primitives.group;
+            const share = Group.Share.init(.from_usize(0), Group.Private.random(&rng));
+            try state.store.put_share(Epoch.zero(), share);
+            try try deterministic.start_context(share_without_final_block_body, .{state});
+        }
+    }.body);
 }
 
 fn closed_receiver_body(ctx: Ctx, state: *State) anyerror!void {
@@ -355,13 +367,13 @@ fn running_tasks(ctx: Ctx, label: []const u8) !u64 {
 // channel again closes the receiver the engine took, and the engine stops cleanly without a
 // completion, canceling its child actors.
 test "dkg e2e closed network receiver stops engine" {
-    var state: State = .{ .store = .init(gpa) };
-    defer state.deinit();
-    var deterministic = try runtime.deterministic.Runner.init(gpa, .{
+    try soak(.{
         .timeout_ns = 5 * std.time.ns_per_s,
-    });
-    defer deterministic.deinit();
-    try try deterministic.start_context(closed_receiver_body, .{&state});
+    }, struct {
+        fn body(state: *State, deterministic: *runtime.deterministic.Runner) !void {
+            try try deterministic.start_context(closed_receiver_body, .{state});
+        }
+    }.body);
 }
 
 /// Boots with a stalling secret store and shuts down uncleanly once the share is saved:
@@ -386,13 +398,13 @@ fn stalled_completion_body(ctx: Ctx, state: *State) anyerror!void {
 // block as processed, reports the finalized artifact without running the ceremony again
 // (which could not activate its peer set), and keeps running.
 test "dkg e2e restart after completion" {
-    var state: State = .{ .store = .init(gpa) };
-    defer state.deinit();
-    var deterministic = try runner();
-    defer deterministic.deinit();
-    try try deterministic.start_context(stalled_completion_body, .{&state});
-    try try deterministic.start_context(restart_body(Failing), .{&state});
-    try testing.expect(state.restarted != null);
+    try soak(long_run, struct {
+        fn body(state: *State, deterministic: *runtime.deterministic.Runner) !void {
+            try try deterministic.start_context(stalled_completion_body, .{state});
+            try try deterministic.start_context(restart_body(Failing), .{state});
+            try testing.expect(state.restarted != null);
+        }
+    }.body);
 }
 
 // commonware `dkg_e2e_restart_completion_state_is_fresh`: a replacement incarnation keeps

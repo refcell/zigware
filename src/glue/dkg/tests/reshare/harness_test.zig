@@ -85,11 +85,12 @@ fn empty_peer_sets_body(
 // commonware `manager_starts_node_with_empty_peer_sets`, on both networks.
 test "reshare harness: a node's manager starts with empty peer sets" {
     for ([_]lookup.Network{ .discovery, .lookup }) |transport| {
-        var runner = try runtime.deterministic.Runner.init(gpa, .{
-            .timeout_ns = 10 * std.time.ns_per_s,
-        });
-        defer runner.deinit();
-        try try runner.start_context(empty_peer_sets_body, .{transport});
+        const config: runtime.deterministic.Config = .{ .timeout_ns = 10 * std.time.ns_per_s };
+        try runtime.deterministic.soak(gpa, config, transport, struct {
+            fn run_round(net: lookup.Network, runner: *runtime.deterministic.Runner) !void {
+                try try runner.start_context(empty_peer_sets_body, .{net});
+            }
+        }.run_round);
     }
 }
 

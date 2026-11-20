@@ -456,8 +456,12 @@ fn handle_body(
     };
 }
 
+const store_config: runtime.deterministic.Config = .{ .timeout_ns = 60 * std.time.ns_per_s };
+
+/// One runner on `store_config`'s seed: `interruptions` only counts a dealing's journal
+/// mutations, which no seed changes.
 fn new_runner() !runtime.deterministic.Runner {
-    return runtime.deterministic.Runner.init(gpa, .{ .timeout_ns = 60 * std.time.ns_per_s });
+    return runtime.deterministic.Runner.init(gpa, store_config);
 }
 
 /// Every place a dealing can stop: in the secret store, or before each journal mutation of an
@@ -491,36 +495,54 @@ test "store: an interrupted dealing is restored whole or not at all (issue 5721)
     var buffer: [16]Interruption = undefined;
     const stops = try interruptions(&buffer, first);
     for (stops) |first_stop| for (stops) |second_stop| {
-        // The dealer sends one dealing and, after the player restarts, a different one.
-        var runner = try new_runner();
-        defer runner.deinit();
-        var secrets: MemorySecretStore = .init(gpa);
-        defer secrets.deinit();
-        var initial = try handle_dealing(&runner, &secrets, first, first_stop);
-        initial.deinit();
-        var later = try handle_dealing(&runner, &secrets, second, second_stop);
-        defer later.deinit();
-
-        // The restarted player has the second dealing exactly when it acknowledged it.
-        // Otherwise it has none and acknowledges the next one it is sent.
-        var next = try handle_dealing(&runner, &secrets, third, null);
-        defer next.deinit();
-        const ack = next.ack orelse return error.UninterruptedDealingUnhandled;
-        const acknowledged = if (later.ack != null) second else third;
-        if (later.ack) |second_ack| {
-            try next.expect_restored(second);
-            try testing.expect(ack.eql(second_ack));
-        } else {
-            try next.expect_restored(null);
-        }
-
-        // After another restart, the acknowledged dealing is restored whole and handling a
-        // dealing again returns the same acknowledgement.
-        var replayed = try handle_dealing(&runner, &secrets, third, null);
-        defer replayed.deinit();
-        try replayed.expect_restored(acknowledged);
-        try testing.expect(replayed.ack.?.eql(ack));
+        const case: TwoStops = .{
+            .first = first,
+            .second = second,
+            .third = third,
+            .first_stop = first_stop,
+            .second_stop = second_stop,
+        };
+        try runtime.deterministic.soak(gpa, store_config, case, restored_after_two_stops);
     };
+}
+
+const TwoStops = struct {
+    first: *const TestDealing,
+    second: *const TestDealing,
+    third: *const TestDealing,
+    first_stop: Interruption,
+    second_stop: Interruption,
+};
+
+fn restored_after_two_stops(case: TwoStops, runner: *runtime.deterministic.Runner) !void {
+    const first, const second, const third = .{ case.first, case.second, case.third };
+    // The dealer sends one dealing and, after the player restarts, a different one.
+    var secrets: MemorySecretStore = .init(gpa);
+    defer secrets.deinit();
+    var initial = try handle_dealing(runner, &secrets, first, case.first_stop);
+    initial.deinit();
+    var later = try handle_dealing(runner, &secrets, second, case.second_stop);
+    defer later.deinit();
+
+    // The restarted player has the second dealing exactly when it acknowledged it.
+    // Otherwise it has none and acknowledges the next one it is sent.
+    var next = try handle_dealing(runner, &secrets, third, null);
+    defer next.deinit();
+    const ack = next.ack orelse return error.UninterruptedDealingUnhandled;
+    const acknowledged = if (later.ack != null) second else third;
+    if (later.ack) |second_ack| {
+        try next.expect_restored(second);
+        try testing.expect(ack.eql(second_ack));
+    } else {
+        try next.expect_restored(null);
+    }
+
+    // After another restart, the acknowledged dealing is restored whole and handling a
+    // dealing again returns the same acknowledgement.
+    var replayed = try handle_dealing(runner, &secrets, third, null);
+    defer replayed.deinit();
+    try replayed.expect_restored(acknowledged);
+    try testing.expect(replayed.ack.?.eql(ack));
 }
 
 // commonware `interrupted_dealing_is_recorded_when_resent`.
@@ -529,25 +551,30 @@ test "store: an interrupted dealing is recorded when it is sent again" {
     defer sent.deinit();
     // The first attempt leaves only the private half (or, in commonware, only the public one).
     for ([_]Interruption{ .secret_store, .{ .journal = 0 } }) |stop| {
-        var runner = try new_runner();
-        defer runner.deinit();
-        var secrets: MemorySecretStore = .init(gpa);
-        defer secrets.deinit();
-        var interrupted = try handle_dealing(&runner, &secrets, &sent, stop);
-        defer interrupted.deinit();
-        try testing.expect(interrupted.ack == null);
-
-        // The restarted player has no dealing and acknowledges the one sent again.
-        var resent = try handle_dealing(&runner, &secrets, &sent, null);
-        defer resent.deinit();
-        try resent.expect_restored(null);
-        const ack = resent.ack orelse return error.UninterruptedDealingUnhandled;
-
-        // After another restart, the dealing is restored whole and handling it again returns
-        // the same acknowledgement.
-        var replayed = try handle_dealing(&runner, &secrets, &sent, null);
-        defer replayed.deinit();
-        try replayed.expect_restored(&sent);
-        try testing.expect(replayed.ack.?.eql(ack));
+        const case: Resent = .{ .sent = &sent, .stop = stop };
+        try runtime.deterministic.soak(gpa, store_config, case, recorded_when_resent);
     }
+}
+
+const Resent = struct { sent: *const TestDealing, stop: Interruption };
+
+fn recorded_when_resent(case: Resent, runner: *runtime.deterministic.Runner) !void {
+    var secrets: MemorySecretStore = .init(gpa);
+    defer secrets.deinit();
+    var interrupted = try handle_dealing(runner, &secrets, case.sent, case.stop);
+    defer interrupted.deinit();
+    try testing.expect(interrupted.ack == null);
+
+    // The restarted player has no dealing and acknowledges the one sent again.
+    var resent = try handle_dealing(runner, &secrets, case.sent, null);
+    defer resent.deinit();
+    try resent.expect_restored(null);
+    const ack = resent.ack orelse return error.UninterruptedDealingUnhandled;
+
+    // After another restart, the dealing is restored whole and handling it again returns
+    // the same acknowledgement.
+    var replayed = try handle_dealing(runner, &secrets, case.sent, null);
+    defer replayed.deinit();
+    try replayed.expect_restored(case.sent);
+    try testing.expect(replayed.ack.?.eql(ack));
 }

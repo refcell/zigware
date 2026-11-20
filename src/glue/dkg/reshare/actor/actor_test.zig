@@ -154,11 +154,13 @@ fn expect_acknowledged(waiters: []Exact.Waiter) !void {
 }
 
 pub fn run(comptime body: fn (Io) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{
+    try runtime.deterministic.soak(gpa, .{
         .timeout_ns = 10 * std.time.ns_per_s,
-    });
-    defer runner.deinit();
-    try (try runner.start(body, .{runner.io()}));
+    }, {}, struct {
+        fn run_round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start(body, .{runner.io()}));
+        }
+    }.run_round);
 }
 
 // commonware `follower_boundary_redelivery_is_acknowledged` (the follow and setup half; the

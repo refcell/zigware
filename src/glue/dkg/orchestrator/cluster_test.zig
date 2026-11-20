@@ -653,11 +653,13 @@ fn slow_only() !void {
 }
 
 fn run_body(comptime body: fn (Ctx) anyerror!void, timeout_s: u64) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{
+    try runtime.deterministic.soak(gpa, .{
         .timeout_ns = timeout_s * std.time.ns_per_s,
-    });
-    defer runner.deinit();
-    try try runner.start_context(body, .{});
+    }, {}, struct {
+        fn run_round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start_context(body, .{});
+        }
+    }.run_round);
 }
 
 // commonware `cluster_serves_genesis_through_marshal`.

@@ -241,23 +241,25 @@ fn scan_stalled(round: *const fd.Info(V, P), stream: *StalledAncestry) !?Logs {
 // commonware `pending_logs_cancels_stalled_ancestry_when_runtime_stops`: here canceling the
 // scan's task ends it.
 test "inclusion: canceling a scan ends a stalled ancestry read" {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{
+    try runtime.deterministic.soak(gpa, .{
         .timeout_ns = 10 * std.time.ns_per_s,
-    });
-    defer runner.deinit();
-    try (try runner.start(struct {
-        fn body(io: Io) anyerror!void {
-            var round = try info();
-            defer round.deinit(gpa);
-            var pair = try oneshot.channel(void, gpa, io);
-            defer pair.sender.deinit();
-            var stream: StalledAncestry = .{ .receiver = pair.receiver };
-            defer stream.receiver.deinit();
-            var task = try io.concurrent(scan_stalled, .{ &round, &stream });
-            try io.sleep(.fromMilliseconds(10), .awake);
-            try testing.expectError(error.Canceled, task.cancel(io));
+    }, {}, struct {
+        fn run_round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start(struct {
+                fn body(io: Io) anyerror!void {
+                    var round = try info();
+                    defer round.deinit(gpa);
+                    var pair = try oneshot.channel(void, gpa, io);
+                    defer pair.sender.deinit();
+                    var stream: StalledAncestry = .{ .receiver = pair.receiver };
+                    defer stream.receiver.deinit();
+                    var task = try io.concurrent(scan_stalled, .{ &round, &stream });
+                    try io.sleep(.fromMilliseconds(10), .awake);
+                    try testing.expectError(error.Canceled, task.cancel(io));
+                }
+            }.body, .{runner.io()}));
         }
-    }.body, .{runner.io()}));
+    }.run_round);
 }
 
 fn verified(logs: Logs) !inclusion.VerifiedLogs(V, P) {
