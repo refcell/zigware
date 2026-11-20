@@ -477,3 +477,10 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `value_too_big` (a 4 GiB allocation). contiguous fixed.rs/variable.rs's five belong to
   storage-merkle's handed-over test files.
 - 2026-11-19: ported sealed.rs's partial-page rewrite replay race on a split-write blob mock.
+- 2026-11-20: paused (optimization stop). Landed e96c83ca (one zstd encoder per batch),
+  a9cfb330 ([N]u8 compressed in place), f78b7454 (`PREPARED_SPARE_LIMIT`), 20d5e341 (dfast
+  search state in locals, new libzstd `sparse` sequence fixture), c6b94823 (BENCHMARKS note).
+  Stopped at: the post-c7935b0c re-bench was cut in round 8 of compressed prepare_append;
+  fixed_append, segmented append_buffered, append_sync and metadata before/after (05e1ed83)
+  were never re-measured, so their BENCHMARKS rows stay provisional. Random 1 MiB
+  compressed rows (1.35×, 1.69× before f78b7454 and 20d5e341) are unmeasured since.
