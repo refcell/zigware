@@ -853,3 +853,12 @@ then ported it in core/cache.zig: archive writes encode a borrowed `V.stored_vie
   weighs 1, the same as a penalized one (commonware `Score::weight`), so each retry finds the
   live peer with probability about 1/3. restart.zig's budget goes from commonware's 30 s to
   120 s, and that seed (111669149738) is a fixed test.
+- 2026-11-20: Paused at Andreas's stop on optimization work. The 8-round pinned
+  `dkg_catchup`/`dkg_replay` rows in etc/scripts/consensus-compare.py have no verdicts yet.
+  An overnight replay run at load ~100 gave 4 of 4 "not yet faster" (catchup 1.23x/0.94x,
+  replay_ms_per_block 0.78x/1.16x for 100/1000 heights), with per-round swings up to 15x on
+  both sides, so treat it as noise. The low-load rerun was stopped in round 7 of catch-up.
+  Its catchup_s values sat on the harness's 0.2 s poll; 157009be now times catch-up from
+  the joiner's own log line. To resume: rerun both rows, 8 rounds, BENCH_WHOLE=1, and chase
+  any row that isn't faster. Open elsewhere: a rare zigware `dkg bootstrap`
+  `BootstrapDkgFailed` at startup, sent to examples with its logs.
