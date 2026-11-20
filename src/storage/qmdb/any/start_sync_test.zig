@@ -70,10 +70,13 @@ fn pruning(ctx: Context, db: *Db, location: u64, done: *bool) anyerror!void {
     done.* = true;
 }
 
+/// Runs `body` on a deterministic runner, once per `-Dfuzz-soak` seed.
 fn run(comptime body: fn (Context) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(body, .{}));
+    try runtime.deterministic.soak(gpa, .{}, {}, struct {
+        fn round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start_context(body, .{}));
+        }
+    }.round);
 }
 
 /// A started sync must not block reads and applies while it is in flight.
