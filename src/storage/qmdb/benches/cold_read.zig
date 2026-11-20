@@ -155,23 +155,7 @@ const usage_text =
 ;
 
 pub fn main(init: std.process.Init) !u8 {
-    const io = init.io;
-    const argv = try init.minimal.args.toSlice(init.arena.allocator());
-    const args = try harness.strip_bench_flag(init.arena.allocator(), argv[@min(argv.len, 1)..]);
-    var out_buffer: [4096]u8 = undefined;
-    var out = Io.File.stdout().writer(io, &out_buffer);
-    var err_buffer: [4096]u8 = undefined;
-    var err = Io.File.stderr().writer(io, &err_buffer);
-    defer out.interface.flush() catch {};
-    defer err.interface.flush() catch {};
-    run(init.gpa, io, args, &out.interface, &err.interface) catch |e| switch (e) {
-        error.Usage => {
-            try err.interface.writeAll(usage_text);
-            return 2;
-        },
-        else => return e,
-    };
-    return 0;
+    return harness.main(init, usage_text, run);
 }
 
 /// Runs the harness on `args` (without the program name).

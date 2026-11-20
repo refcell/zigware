@@ -49,6 +49,33 @@ pub fn parse(comptime T: type, text: []const u8) ?T {
 }
 
 /// Drops the trailing `--bench` cargo appends (kept for command lines copied from commonware).
+/// A harness program's `main`: runs `run` on the arguments after the program name (and
+/// any `--bench` flag) with buffered stdout and stderr; `error.Usage` prints `usage_text`
+/// and exits 2.
+pub fn main(
+    init: std.process.Init,
+    comptime usage_text: []const u8,
+    comptime run: anytype,
+) !u8 {
+    const io = init.io;
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
+    const args = try strip_bench_flag(init.arena.allocator(), argv[@min(argv.len, 1)..]);
+    var out_buffer: [4096]u8 = undefined;
+    var out = Io.File.stdout().writer(io, &out_buffer);
+    var err_buffer: [4096]u8 = undefined;
+    var err = Io.File.stderr().writer(io, &err_buffer);
+    defer out.interface.flush() catch {};
+    defer err.interface.flush() catch {};
+    run(init.gpa, io, args, &out.interface, &err.interface) catch |e| switch (e) {
+        error.Usage => {
+            try err.interface.writeAll(usage_text);
+            return 2;
+        },
+        else => return e,
+    };
+    return 0;
+}
+
 pub fn strip_bench_flag(gpa: Allocator, args: []const []const u8) ![]const []const u8 {
     var kept: std.ArrayList([]const u8) = .empty;
     errdefer kept.deinit(gpa);
