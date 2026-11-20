@@ -26,9 +26,16 @@ Scenarios:
   to the second and serve no metrics, so simplex's `finalization_latency` histogram cannot be
   read from outside, and on loopback nearly every view finalizes within the second it was
   proposed.
+- `dkg_catchup_100`, `dkg_catchup_1000`: one implementation's `dkg` example (`setup` with 6
+  peers and committees of 4, the epoch-0 `bootstrap` of players 0-3, then validators 0-4, as
+  examples/dkg/README.md runs them). Once every validator has finalized N heights, validator 5
+  starts with `--state-sync` (the README's late joiner: dkg probe, QMDB state sync, marshal
+  backfill), and `catchup_s` is the time from its start until it logs a finalized block at the
+  tip the others had reached when it started.
 """
 
 import fcntl
+import functools
 import os
 import re
 import shutil
@@ -44,7 +51,12 @@ BASE_PORT = int(os.environ.get("BASE_PORT", "23600"))
 
 # An Activity line: `[time] => finalized (payload=".." view="N" ..)` or `nullified (view="N"`.
 ACTIVITY = re.compile(r'\] => (finalized|nullified) \((?:payload="[0-9a-f]{64}" )?view="(\d+)"')
-BINARIES = {"log": {"commonware": "commonware-log", "zigware": "log"}}
+BINARIES = {"log": {"commonware": "commonware-log", "zigware": "log"},
+            "dkg": {"commonware": "commonware-dkg", "zigware": "dkg"}}
+# The dkg example's reporter line, the same on both sides (escape codes stripped first).
+FINALIZED = re.compile(r"finalized block epoch=\d+ height=(\d+) digest=[0-9a-f]{64}")
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+CATCHUP_TIMEOUT_S = float(os.environ.get("CATCHUP_TIMEOUT_S", "1800"))
 
 
 def tmux(socket, *args, check=True):
@@ -96,9 +108,90 @@ def run_log(side, binary_dir, port):
             "nullified_per_finalized": statistics.median(null)}
 
 
+def top_height(path):
+    """The highest height `path`'s validator logged as finalized, or -1."""
+    with open(path, errors="replace") as handle:
+        found = FINALIZED.findall(ANSI.sub("", handle.read()))
+    return max((int(height) for height in found), default=-1)
+
+
+class DkgNodes:
+    """One side's dkg processes, each logging to `<name>.log` under `root`."""
+
+    def __init__(self, binary, root):
+        self.binary, self.root, self.procs = binary, root, {}
+
+    def spawn(self, name, index, *args):
+        log = open(self.log(name), "w")
+        node = os.path.join(self.root, "data", f"validator-{index}")
+        self.procs[name] = subprocess.Popen([self.binary, *args, "--node-dir", node],
+                                            stdout=log, stderr=subprocess.STDOUT)
+
+    def log(self, name):
+        return os.path.join(self.root, f"{name}.log")
+
+    def check(self, side):
+        for name, proc in self.procs.items():
+            if proc.poll() is not None:
+                raise RuntimeError(f"{side}: {name} exited ({proc.returncode}); see {self.root}")
+
+    def stop(self, names=None):
+        for name in list(names or self.procs):
+            proc = self.procs.pop(name)
+            proc.terminate()
+            try:
+                proc.wait(5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+    def wait(self, side, what, done, deadline):
+        while not done():
+            if time.time() > deadline:
+                raise RuntimeError(f"{side}: timed out waiting for {what}; see {self.root}")
+            self.check(side)
+            time.sleep(0.2)
+
+
+def run_dkg_catchup(side, binary_dir, port, heights):
+    """Seconds a `--state-sync` late joiner takes to finalize the tip that validators 0-4 of
+    `side` reached once each had finalized `heights` heights."""
+    root = tempfile.mkdtemp(prefix="zigware-consensus-compare-dkg-")
+    nodes = DkgNodes(os.path.join(binary_dir, BINARIES["dkg"][side]), root)
+    deadline = time.time() + CATCHUP_TIMEOUT_S
+    try:
+        subprocess.run([nodes.binary, "setup", "--node-dir", os.path.join(root, "data"),
+                        "--peers", "6", "--committee-size", "4", "--base-port", str(port)],
+                       check=True, capture_output=True)
+        players = [f"boot{index}" for index in range(4)]
+        for index, name in enumerate(players):
+            nodes.spawn(name, index, "bootstrap")
+        nodes.wait(side, "bootstrap", lambda: all(
+            "bootstrap complete" in ANSI.sub("", open(nodes.log(n), errors="replace").read())
+            for n in players), deadline)
+        nodes.stop(players)
+        validators = [f"val{index}" for index in range(5)]
+        for index, name in enumerate(validators):
+            nodes.spawn(name, index, "validator")
+        nodes.wait(side, f"{heights} heights", lambda: min(
+            top_height(nodes.log(n)) for n in validators) >= heights, deadline)
+        tip = max(top_height(nodes.log(n)) for n in validators)
+        start = time.time()
+        nodes.spawn("joiner", 5, "validator", "--state-sync")
+        nodes.wait(side, f"the joiner to reach height {tip}",
+                   lambda: top_height(nodes.log("joiner")) >= tip, deadline)
+        catchup = time.time() - start
+    finally:
+        nodes.stop()
+    shutil.rmtree(root, ignore_errors=True)
+    return {"catchup_s": catchup}
+
+
 # scenario -> (run, {metric: lower_is_better})
 SCENARIOS = {
     "log": (run_log, {"finalized_views_per_s": False, "nullified_per_finalized": True}),
+    "dkg_catchup_100": (functools.partial(run_dkg_catchup, heights=100), {"catchup_s": True}),
+    "dkg_catchup_1000": (functools.partial(run_dkg_catchup, heights=1000), {"catchup_s": True}),
 }
 
 
