@@ -278,9 +278,9 @@ const batch_size = 128;
 /// that cannot be batched (equal x, or the waiting list full).
 fn BatchAffine(comptime C: type) type {
     const F = @TypeOf(@as(C.Affine, undefined).x);
-    const buckets_cap = 1 << (window_bits_max(C) - 1);
     return struct {
         const Self = @This();
+        const buckets_cap = 1 << (window_bits_max(C) - 1);
         affine: [buckets_cap]C.Affine = undefined,
         side: [buckets_cap]C = undefined,
         pending_slot: [buckets_cap]bool = undefined,
@@ -391,15 +391,15 @@ fn BatchAffine(comptime C: type) type {
             self.count = 0;
         }
 
-        /// sum_j (j + 1) buckets[j]: the running sum takes each affine bucket by a mixed
+        /// sum_j (j + 1) buckets[first + j]: the running sum takes each affine bucket by a mixed
         /// addition and its side bucket only when that is not the identity.
-        fn total(self: *const Self, bucket_count: usize) C {
-            assert(self.count == 0);
-            assert(bucket_count > 0 and bucket_count <= buckets_cap);
+        fn total(self: *const Self, first: usize, bucket_count: usize) C {
+            assert(self.count == 0 and self.waiting_count == 0);
+            assert(bucket_count > 0 and first + bucket_count <= buckets_cap);
             var running = C.identity;
             var sum = C.identity;
-            var index = bucket_count;
-            while (index > 0) {
+            var index = first + bucket_count;
+            while (index > first) {
                 index -= 1;
                 running = running.add_affine(self.affine[index]);
                 running = running.add(self.side[index]);
@@ -410,6 +410,9 @@ fn BatchAffine(comptime C: type) type {
     };
 }
 
+/// Batch-affine Pippenger: as many windows as the buckets hold share one pass over the
+/// points, so their additions share batches (fewer inversions, fewer bucket conflicts).
+/// Groups run from the highest window; each window's sum joins the result by Horner's rule.
 fn msm_batch_affine(
     comptime C: type,
     points: []const C.Affine,
@@ -420,23 +423,34 @@ fn msm_batch_affine(
     assert(points.len == scalars.len and points.len >= batch_affine_points_min);
     assert(bits >= window_bits_min and bits <= window_bits_max(C));
     const bucket_count = @as(usize, 1) << @intCast(bits - 1);
+    const group: u32 = @intCast(BatchAffine(C).buckets_cap / bucket_count);
+    assert(group >= 1);
     var state: BatchAffine(C) = .{};
     var result = C.identity;
-    var window = nbits / bits + 1;
-    while (window > 0) {
-        window -= 1;
-        if (!result.is_identity()) {
-            for (0..bits) |_| result = result.double();
-        }
-        state.reset(bucket_count);
+    var end: u32 = nbits / bits + 1;
+    while (end > 0) {
+        const start = end -| group;
+        state.reset(bucket_count * (end - start));
         for (points, scalars) |point, scalar| {
             if (point.infinity) continue;
-            const digit = digit_at(scalar, window, bits);
-            if (digit > 0) state.add(@intCast(digit - 1), point);
-            if (digit < 0) state.add(@intCast(-digit - 1), point.neg());
+            const negated = point.neg();
+            for (start..end) |window| {
+                const digit = digit_at(scalar, @intCast(window), bits);
+                const base = (window - start) * bucket_count;
+                if (digit > 0) state.add(base + @as(usize, @intCast(digit - 1)), point);
+                if (digit < 0) state.add(base + @as(usize, @intCast(-digit - 1)), negated);
+            }
         }
         state.flush();
-        result = result.add(state.total(bucket_count));
+        var window = end;
+        while (window > start) {
+            window -= 1;
+            if (!result.is_identity()) {
+                for (0..bits) |_| result = result.double();
+            }
+            result = result.add(state.total((window - start) * bucket_count, bucket_count));
+        }
+        end = start;
     }
     return result;
 }
@@ -474,7 +488,7 @@ pub fn msm_precomputed(
         }
     }
     state.flush();
-    return state.total(bucket_count);
+    return state.total(0, bucket_count);
 }
 
 /// Fills `out[w] = [2^(w * bits)] point` for every precomputed window.
@@ -697,7 +711,7 @@ fn CurveKernel(comptime C: type) type {
                 if (digit < 0) batch.add(@intCast(-digit - 1), point.neg());
             }
             batch.flush();
-            return batch.total(bucket_count);
+            return batch.total(0, bucket_count);
         }
 
         pub fn add(_: Self, a: C, b: C) C {
