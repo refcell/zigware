@@ -41,6 +41,27 @@ const max_height = 64;
 /// Internal nodes awaiting hashing, by height, ascending within each height.
 const Levels = [max_height]std.ArrayList(u64);
 
+/// Overwritten nodes by position. Merkleize looks up every child below the parent's size
+/// here, so positions hash with one folded multiply instead of Wyhash (commonware's map
+/// hashes them with SipHash).
+fn Overwrites(comptime Digest: type) type {
+    const load = std.hash_map.default_max_load_percentage;
+    return std.HashMapUnmanaged(u64, Digest, PositionContext, load);
+}
+
+const PositionContext = struct {
+    pub fn hash(_: PositionContext, position: u64) u64 {
+        // foldhash's integer step: the fold XORs the product's high half into its low half,
+        // so the slot bits and the top fingerprint bits both depend on every position bit.
+        const product = @as(u128, position ^ 0x243f_6a88_85a3_08d3) * 0x5851_f42d_4c95_7f2d;
+        return @as(u64, @truncate(product)) ^ @as(u64, @truncate(product >> 64));
+    }
+
+    pub fn eql(_: PositionContext, a: u64, b: u64) bool {
+        return a == b;
+    }
+};
+
 fn levels_deinit(gpa: Allocator, levels: *Levels) void {
     for (levels) |*level| level.deinit(gpa);
 }
@@ -57,7 +78,7 @@ pub fn Data(comptime Digest: type) type {
         /// Nodes appended after `parent_size`.
         appended: std.ArrayList(Digest),
         /// Overwritten nodes by position, all below `parent_size`.
-        overwrites: std.AutoHashMapUnmanaged(u64, Digest),
+        overwrites: Overwrites(Digest),
         parent_peaks: merkle.BoundedList(Digest, max_peaks),
         tip_peaks: merkle.BoundedList(Digest, max_peaks),
 
@@ -296,7 +317,7 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
         parent: *Parent,
         appended: std.ArrayList(Digest) = .empty,
         /// Overwritten nodes below the parent's size. Before merkleize, only leaves.
-        overwrites: std.AutoHashMapUnmanaged(u64, Digest) = .empty,
+        overwrites: Overwrites(Digest) = .empty,
         unhashed: Levels = @splat(.empty),
         /// The first leaf `add_many` added; only leaves from here on can have ancestors this
         /// batch hashed already.
