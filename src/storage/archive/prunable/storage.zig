@@ -384,6 +384,50 @@ pub fn Archive(comptime T: type, comptime K: type, comptime V: type) type {
             return try self.read_value(start, entry, value_gpa);
         }
 
+        /// `get_with` for every identifier at once: `values[i]` is the value of
+        /// `identifiers[i]`, or null. Indices and keys are resolved one after another, then up
+        /// to `workers` values are read at once as tasks on `io`, as commonware's callers
+        /// overlap reads by awaiting many `get`s (`Glob.get_many`, whose requirements apply:
+        /// the archive's and `value_gpa`'s allocators must be thread-safe).
+        pub fn get_many(
+            self: *Self,
+            io: std.Io,
+            identifiers: []const Identifier,
+            value_gpa: Allocator,
+            values: []?V,
+            workers: u32,
+        ) Error!void {
+            assert(!self.failed);
+            assert(identifiers.len == values.len);
+            const locations = try self.gpa.alloc(?oversized_mod.ValueLocation, identifiers.len);
+            defer self.gpa.free(locations);
+            for (identifiers, locations) |identifier, *location| {
+                self.gets.metric().inc();
+                location.* = try self.locate(identifier);
+            }
+            try self.oversized.get_values_many(io, locations, value_gpa, values, workers);
+        }
+
+        /// Where the value of `identifier` is stored, or null if it is not.
+        fn locate(self: *Self, identifier: Identifier) Error!?oversized_mod.ValueLocation {
+            const start, const entry = switch (identifier) {
+                .index => |index| found: {
+                    const position = self.first_position(index) orelse return null;
+                    const start = self.section(index);
+                    const entry = try self.oversized.get(start, position);
+                    assert(entry.index == index);
+                    break :found .{ start, entry };
+                },
+                .key => |key| found: {
+                    const found = try self.find(key) orelse return null;
+                    break :found .{ found.start, found.entry };
+                },
+            };
+            assert(self.section(entry.index) == start);
+            assert(entry.value_size > 0);
+            return .{ .section = start, .offset = entry.value_offset, .size = entry.value_size };
+        }
+
         fn read_value(self: *Self, start: u64, entry: Record, value_gpa: Allocator) Error!V {
             assert(self.section(entry.index) == start);
             assert(entry.value_size > 0);

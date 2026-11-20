@@ -56,6 +56,9 @@ const manager_mod = @import("manager.zig");
 /// Where an index entry's value lives in the glob.
 pub const Location = struct { offset: u64, size: u32 };
 
+/// Where a value is stored: its section, offset, and size in the value glob.
+pub const ValueLocation = glob_mod.Location;
+
 /// Index entries must be fixed-size codec types with
 /// `value_location(self) Location` and `with_location(self, offset, size) Self`
 /// (commonware's `Record`).
@@ -411,6 +414,20 @@ pub fn Oversized(comptime I: type, comptime V: type) type {
             value_gpa: Allocator,
         ) Error!V {
             return self.values.get_with(section, offset, size_bytes, value_gpa);
+        }
+
+        /// Reads the value at each present `locations[i]` into `values[i]`, up to `workers` at
+        /// once as tasks on `io` (`Glob.get_many`, whose requirements apply).
+        pub fn get_values_many(
+            self: *Self,
+            io: std.Io,
+            locations: []const ?ValueLocation,
+            value_gpa: Allocator,
+            values: []?V,
+            workers: u32,
+        ) Error!void {
+            assert(locations.len == values.len);
+            return self.values.get_many(io, locations, value_gpa, values, workers);
         }
 
         /// Sync `sections` (ascending) of both journals, then publish the proven lengths of

@@ -29,6 +29,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 const codec = @import("codec");
 const runtime = @import("runtime");
 const Completion = runtime.storage.Completion;
@@ -66,6 +67,18 @@ pub const Entry = struct {
     size: u32,
 };
 
+/// Where an entry is stored, as an index entry records it.
+pub const Location = struct {
+    section: u64,
+    /// Byte offset of the entry in its section.
+    offset: u64,
+    /// Total stored bytes (data plus CRC32).
+    size: u32,
+};
+
+/// The most tasks one `Glob.get_many` runs at once.
+pub const get_many_workers_max: u32 = 64;
+
 /// Section-based blob storage for values.
 ///
 /// Mutating methods leave the glob failed after a storage error (commonware consumes it);
@@ -78,6 +91,7 @@ pub fn Glob(comptime V: type) type {
         pub const Manager = manager_mod.Manager(Factory);
         pub const Error = Manager.Error;
         pub const Cfg = Config(V);
+        const Buffer = Manager.Buffer;
 
         manager: Manager,
         compression: ?u8,
@@ -164,9 +178,23 @@ pub fn Glob(comptime V: type) type {
             value_gpa: Allocator,
         ) Error!V {
             const buffer = try self.manager.get(section) orelse return error.SectionOutOfRange;
+            return self.read_entry(buffer, offset, size_bytes, &self.scratch, value_gpa);
+        }
+
+        /// Reads, verifies, and decodes the entry at `offset` of `buffer` through `scratch`.
+        /// Only reads the glob's configuration, so callers with their own `scratch` may run it
+        /// at once while nothing writes the glob.
+        fn read_entry(
+            self: *const Self,
+            buffer: *Buffer,
+            offset: u64,
+            size_bytes: u32,
+            scratch: *std.ArrayList(u8),
+            value_gpa: Allocator,
+        ) Error!V {
             const gpa = self.manager.gpa;
-            self.scratch.clearRetainingCapacity();
-            const buf = try self.scratch.addManyAsSlice(gpa, size_bytes);
+            scratch.clearRetainingCapacity();
+            const buf = try scratch.addManyAsSlice(gpa, size_bytes);
             try buffer.read_at(offset, buf);
             if (buf.len < checksum_size) return error.BlobInsufficientLength;
             const data_len = buf.len - checksum_size;
@@ -182,6 +210,93 @@ pub fn Glob(comptime V: type) type {
             return codec.decode_cfg(V, value_gpa, decompressed, self.codec_config) catch |err|
                 return @errorCast(err);
         }
+
+        /// Reads the entry at each present `locations[i]` into `values[i]` (null where the
+        /// location is null), running up to `workers` reads at once as tasks on `io`, as
+        /// commonware's callers overlap reads by awaiting many `get`s together. Nothing may
+        /// write the glob meanwhile, and the journal's allocator and `value_gpa` must be
+        /// thread-safe when `io` runs tasks on threads. On error no value is left decoded.
+        pub fn get_many(
+            self: *Self,
+            io: Io,
+            locations: []const ?Location,
+            value_gpa: Allocator,
+            values: []?V,
+            workers: u32,
+        ) Error!void {
+            assert(locations.len == values.len);
+            assert(workers >= 1 and workers <= get_many_workers_max);
+            var batch: Batch = .{ .glob = self, .locations = locations, .values = values };
+            batch.value_gpa = value_gpa;
+            for (locations, values) |location, *value| {
+                value.* = null;
+                // Resolve every section first: a missing one fails before any task starts.
+                const at = location orelse continue;
+                _ = try self.manager.get(at.section) orelse return error.SectionOutOfRange;
+            }
+            const count: usize = @min(workers, locations.len);
+            var group: Io.Group = .init;
+            for (batch.failures[0..count], 0..) |*failure, worker| {
+                failure.* = null;
+                group.async(io, Batch.run, .{ &batch, worker });
+            }
+            group.await(io) catch |err| {
+                group.cancel(io);
+                batch.free_values();
+                return err;
+            };
+            for (batch.failures[0..count]) |failure| {
+                const err = failure orelse continue;
+                batch.free_values();
+                return err;
+            }
+            for (locations, values) |location, value| assert((location == null) == (value == null));
+        }
+
+        /// The shared state of one `get_many`: workers claim locations in order through
+        /// `next`, and each records only its own failure.
+        const Batch = struct {
+            glob: *Self,
+            locations: []const ?Location,
+            values: []?V,
+            value_gpa: Allocator = undefined,
+            next: std.atomic.Value(usize) = .init(0),
+            stop: std.atomic.Value(bool) = .init(false),
+            failures: [get_many_workers_max]?Error = undefined,
+
+            fn run(batch: *Batch, worker: usize) void {
+                const glob = batch.glob;
+                const gpa = glob.manager.gpa;
+                var scratch: std.ArrayList(u8) = .empty;
+                defer scratch.deinit(gpa);
+                // Bounded: every pass claims a new index, and indices end at `locations.len`.
+                while (!batch.stop.load(.monotonic)) {
+                    const index = batch.next.fetchAdd(1, .monotonic);
+                    if (index >= batch.locations.len) break;
+                    const at = batch.locations[index] orelse continue;
+                    // Resolved by `get_many` before any task started; nothing writes meanwhile.
+                    const buffer = (glob.manager.get(at.section) catch unreachable).?;
+                    batch.values[index] = glob.read_entry(
+                        buffer,
+                        at.offset,
+                        at.size,
+                        &scratch,
+                        batch.value_gpa,
+                    ) catch |err| {
+                        batch.failures[worker] = err;
+                        batch.stop.store(true, .monotonic);
+                        return;
+                    };
+                }
+            }
+
+            fn free_values(batch: *Batch) void {
+                for (batch.values) |*value| {
+                    if (value.*) |decoded| codec.free(V, batch.value_gpa, decoded);
+                    value.* = null;
+                }
+            }
+        };
 
         /// Whether the entry at `(offset, size)` of `section` has a valid trailing checksum.
         fn verify(self: *Self, section: u64, offset: u64, size_bytes: u32) Error!bool {

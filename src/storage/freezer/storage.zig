@@ -415,15 +415,51 @@ pub fn Freezer(comptime K: type, comptime V: type) type {
         /// `get`, decoding the value's memory from `value_gpa` (such as a buffer the caller
         /// reuses across reads).
         pub fn get_with(self: *Self, identifier: Identifier, value_gpa: Allocator) Error!?V {
-            const section, const offset, const size = switch (identifier) {
-                .cursor => |cursor| .{ cursor.section(), cursor.offset(), cursor.size() },
-                .key => |key| found: {
+            const at = try self.locate(identifier) orelse return null;
+            return try self.oversized.get_value_with(at.section, at.offset, at.size, value_gpa);
+        }
+
+        /// `get_with` for every identifier at once: `values[i]` is the value of
+        /// `identifiers[i]` (null for an unknown key). Keys are looked up one after another,
+        /// then up to `workers` values are read at once as tasks on `io`, as commonware's
+        /// callers overlap reads by awaiting many `get`s (`Glob.get_many`, whose requirements
+        /// apply: the freezer's and `value_gpa`'s allocators must be thread-safe).
+        pub fn get_many(
+            self: *Self,
+            io: std.Io,
+            identifiers: []const Identifier,
+            value_gpa: Allocator,
+            values: []?V,
+            workers: u32,
+        ) Error!void {
+            assert(identifiers.len == values.len);
+            const locations = try self.gpa.alloc(?oversized_mod.ValueLocation, identifiers.len);
+            defer self.gpa.free(locations);
+            for (identifiers, locations) |identifier, *location| {
+                location.* = try self.locate(identifier);
+            }
+            try self.oversized.get_values_many(io, locations, value_gpa, values, workers);
+        }
+
+        /// Where the value of `identifier` is stored, or null for an unknown key.
+        fn locate(self: *Self, identifier: Identifier) Error!?oversized_mod.ValueLocation {
+            switch (identifier) {
+                .cursor => |cursor| return .{
+                    .section = cursor.section(),
+                    .offset = cursor.offset(),
+                    .size = cursor.size(),
+                },
+                .key => |key| {
                     self.gets.metric().inc();
                     const section, const record = try self.find_key(key.*) orelse return null;
-                    break :found .{ section, record.value_offset, record.value_size };
+                    assert(record.value_size > 0);
+                    return .{
+                        .section = section,
+                        .offset = record.value_offset,
+                        .size = record.value_size,
+                    };
                 },
-            };
-            return try self.oversized.get_value_with(section, offset, size, value_gpa);
+            }
         }
 
         /// Whether a value exists for `key` (walks the chain without reading values).

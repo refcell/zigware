@@ -330,3 +330,62 @@ test "glob: recovery verify" {
     glob = recovery.finish();
     try glob.destroy();
 }
+
+test "glob: get_many matches get in order, with gaps, on threads" {
+    var memory = runtime.storage.memory.Storage.init(gpa);
+    defer memory.deinit();
+    var cfg = test_cfg(Bytes);
+    cfg.write_buffer = 4096;
+    var recovery = try glob_mod.Recovery(Bytes).init(gpa, memory.storage(), cfg);
+    var glob = recovery.finish();
+    defer glob.deinit();
+    var rng = utils.rng.test_rng();
+    var data: [120][1500]u8 = undefined;
+    var locations: [data.len]?glob_mod.Location = undefined;
+    for (&data, &locations, 0..) |*value, *location, i| {
+        rng.fill_bytes(value);
+        // Lengths differ per value, so a read placed at another index fails the comparison.
+        const len = 1 + rng.next_u32() % value.len;
+        const section: u64 = i % 3;
+        const entry = try glob.append(section, value[0..len]);
+        location.* = .{ .section = section, .offset = entry.offset, .size = entry.size };
+        if (rng.next_u32() % 5 == 0) location.* = null;
+    }
+    try glob.sync(&.{ 0, 1, 2 });
+    for ([_]u32{ 1, 3, 16 }) |workers| {
+        var values: [data.len]?Bytes = undefined;
+        try glob.get_many(testing.io, &locations, gpa, &values, workers);
+        defer for (values) |value| if (value) |bytes| gpa.free(bytes);
+        for (locations, values) |location, value| {
+            const at = location orelse {
+                try testing.expectEqual(null, value);
+                continue;
+            };
+            const expected = try glob.get(at.section, at.offset, at.size);
+            defer gpa.free(expected);
+            try testing.expectEqualSlices(u8, expected, value.?);
+        }
+    }
+}
+
+test "glob: get_many fails on a corrupt entry and leaves nothing decoded" {
+    var memory = runtime.storage.memory.Storage.init(gpa);
+    defer memory.deinit();
+    var recovery = try glob_mod.Recovery(Bytes).init(gpa, memory.storage(), test_cfg(Bytes));
+    var glob = recovery.finish();
+    defer glob.deinit();
+    var locations: [40]?glob_mod.Location = undefined;
+    for (&locations, 0..) |*location, i| {
+        const value: [64]u8 = @splat(@intCast(i));
+        const entry = try glob.append(0, &value);
+        location.* = .{ .section = 0, .offset = entry.offset, .size = entry.size };
+    }
+    locations[29].?.size -= 1; // The trailer no longer matches.
+    var values: [locations.len]?Bytes = undefined;
+    const result = glob.get_many(testing.io, &locations, gpa, &values, 4);
+    try testing.expectError(error.ChecksumMismatch, result);
+    for (values) |value| try testing.expectEqual(null, value);
+    locations[0].?.section = 7;
+    const missing = glob.get_many(testing.io, &locations, gpa, &values, 4);
+    try testing.expectError(error.SectionOutOfRange, missing);
+}

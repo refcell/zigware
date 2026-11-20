@@ -538,3 +538,37 @@ test "immutable get_with decodes into the caller's buffer" {
     try check_get_with(null);
     try check_get_with(3);
 }
+
+fn check_get_many(compression: ?u8) !void {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    var archive = try harness.open(Key, i32, harness.shared_config(compression));
+    defer archive.deinit();
+    const Identifier = @TypeOf(archive).Identifier;
+    var keys: [24]Key = undefined;
+    for (&keys, 0..) |*key, i| {
+        key.* = test_key(&.{ 'k', @intCast('a' + i) });
+        // Every third index stays empty; its key is never stored.
+        if (i % 3 != 2) try archive.put(i, key.*, @intCast(1000 + i * 7));
+    }
+    try archive.sync();
+    var identifiers: [2 * keys.len]Identifier = undefined;
+    for (&keys, 0..) |*key, i| {
+        identifiers[2 * i] = .{ .key = key };
+        identifiers[2 * i + 1] = .{ .index = (5 * i + 3) % keys.len };
+    }
+    var values: [identifiers.len]?i32 = undefined;
+    // Group tasks run inline on this `Io`, so the mock storage's counters see no threads.
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try archive.get_many(io, &identifiers, gpa, &values, 3);
+    for (identifiers, values) |identifier, value| {
+        try testing.expectEqual(try archive.get(identifier), value);
+    }
+    try testing.expectEqual(1000 + 7, values[2].?);
+    try testing.expectEqual(null, values[4]);
+}
+
+test "immutable get_many matches get for keys, indices, and missing items" {
+    try check_get_many(null);
+    try check_get_many(3);
+}

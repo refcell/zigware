@@ -230,6 +230,56 @@ pub fn Archive(comptime K: type, comptime V: type) type {
             };
         }
 
+        /// `get_with` for every identifier at once: `values[i]` is the value of
+        /// `identifiers[i]`, or null. Indices and keys are resolved one after another, then up
+        /// to `workers` values are read at once as tasks on `io` (`Freezer.get_many`, whose
+        /// requirements apply).
+        pub fn get_many(
+            self: *Self,
+            io: std.Io,
+            identifiers: []const Identifier,
+            value_gpa: Allocator,
+            values: []?V,
+            workers: u32,
+        ) Error!void {
+            assert(!self.failed);
+            assert(identifiers.len == values.len);
+            const FreezerIdentifier = Freezer.Identifier;
+            const resolved = try self.gpa.alloc(?FreezerIdentifier, identifiers.len);
+            defer self.gpa.free(resolved);
+            var present: usize = 0;
+            for (identifiers, resolved) |identifier, *target| {
+                self.gets.metric().inc();
+                target.* = switch (identifier) {
+                    .index => |index| if (try self.ordinal.get(index)) |cursor|
+                        .{ .cursor = cursor }
+                    else
+                        null,
+                    .key => |key| .{ .key = key },
+                };
+                if (target.* != null) present += 1;
+            }
+            const lookups = try self.gpa.alloc(FreezerIdentifier, present);
+            defer self.gpa.free(lookups);
+            const found = try self.gpa.alloc(?V, present);
+            defer self.gpa.free(found);
+            var next: usize = 0;
+            for (resolved) |target| {
+                lookups[next] = target orelse continue;
+                next += 1;
+            }
+            assert(next == present);
+            try self.freezer.get_many(io, lookups, value_gpa, found, workers);
+            next = 0;
+            for (resolved, values) |target, *value| {
+                value.* = null;
+                if (target == null) continue;
+                value.* = found[next];
+                next += 1;
+            }
+            assert(next == present);
+        }
+
         /// Whether `index` is stored, or `key` is.
         pub fn has(self: *Self, identifier: Identifier) Error!bool {
             assert(!self.failed);

@@ -3,8 +3,10 @@
 //! by key and by index on a populated archive), and `restart` (reopening a populated archive),
 //! for the prunable and immutable variants, with and without compression.
 //!
-//! Zigware's archives are not shared between tasks, so commonware's `mode=concurrent` reads
-//! (`try_join_all`) keep their name but read one after another.
+//! Commonware's `mode=concurrent` awaits all reads together (`try_join_all`), so their blob
+//! reads overlap on its blocking pool; zigware's runs them through `get_many`, which looks up
+//! every location, then reads values on `get_workers` tasks. Values decode into one reused
+//! arena, `concurrent_batch` reads at a time, instead of holding every read's value at once.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -34,6 +36,10 @@ const REPLAY_BUFFER: usize = 1024 * 1024;
 const PAGE_CACHE_SIZE: usize = 8_192;
 /// Size of values in bytes (64 KiB, representative of block data).
 const VALUE_SIZE: usize = 65536;
+/// Tasks reading values at once in `mode=concurrent`.
+const get_workers: u32 = 8;
+/// Reads per `get_many` in `mode=concurrent`: bounds the arena their values decode into.
+const concurrent_batch: usize = 1024;
 
 const Key = [64]u8;
 const Val = []const u8;
@@ -116,6 +122,24 @@ const Archive = struct {
             inline else => |*inner| try inner.get_with(identifier, value_gpa.allocator()),
         } orelse unreachable; // Every benchmark reads a stored item.
         return value.len;
+    }
+
+    /// Reads every identifier with `get_many`, returning the values' total length.
+    fn get_many(
+        self: *Archive,
+        io: std.Io,
+        identifiers: []const Identifier,
+        value_gpa: Allocator,
+        values: []?Val,
+    ) !usize {
+        switch (self.inner) {
+            inline else => |*inner| {
+                try inner.get_many(io, identifiers, value_gpa, values, get_workers);
+            },
+        }
+        var total: usize = 0;
+        for (values) |value| total += value.?.len; // Every benchmark reads a stored item.
+        return total;
     }
 
     fn sync(self: *Archive) !void {
@@ -261,10 +285,14 @@ const GetWorkload = struct {
     by_key: bool,
     reads: usize,
     selection: Selection,
+    concurrent: bool,
     target: Archive = undefined,
     opened: bool = false,
-    /// The buffer every read decodes its value into.
+    /// The buffer every read decodes its value into (every batch's values, if concurrent).
     value_buffer: []u8 = &.{},
+    /// One `get_many` batch's identifiers and values (concurrent only).
+    batch_identifiers: []Identifier = &.{},
+    batch_values: []?Val = &.{},
 
     pub fn setup(self: *GetWorkload) !void {
         assert(!self.opened);
@@ -272,8 +300,13 @@ const GetWorkload = struct {
         const keys = self.fill.keys.?;
         select_reads(keys, self.reads, self.selection.keys[0..self.reads], self.indices());
         const fill = self.fill;
-        self.value_buffer = try fill.gpa.alloc(u8, VALUE_SIZE);
+        const batch = if (self.concurrent) @min(self.reads, concurrent_batch) else 1;
+        self.value_buffer = try fill.gpa.alloc(u8, batch * VALUE_SIZE);
         errdefer fill.gpa.free(self.value_buffer);
+        self.batch_identifiers = try fill.gpa.alloc(Identifier, batch);
+        errdefer fill.gpa.free(self.batch_identifiers);
+        self.batch_values = try fill.gpa.alloc(?Val, batch);
+        errdefer fill.gpa.free(self.batch_values);
         try self.target.open(fill.gpa, fill.disk, fill.variant, fill.compression);
         self.opened = true;
     }
@@ -283,7 +316,8 @@ const GetWorkload = struct {
     }
 
     pub fn iter(self: *GetWorkload) !usize {
-        const buffer = self.value_buffer;
+        if (self.concurrent) return self.iter_concurrent();
+        const buffer = self.value_buffer[0..VALUE_SIZE];
         var total: usize = 0;
         if (self.by_key) {
             for (self.selection.keys[0..self.reads]) |*key| {
@@ -296,9 +330,34 @@ const GetWorkload = struct {
         return total;
     }
 
+    /// Reads in `get_many` batches, each decoding its values into the reused buffer.
+    fn iter_concurrent(self: *GetWorkload) !usize {
+        const io = self.fill.disk.io;
+        var total: usize = 0;
+        var done: usize = 0;
+        while (done < self.reads) {
+            const count = @min(self.reads - done, self.batch_values.len);
+            const identifiers = self.batch_identifiers[0..count];
+            for (identifiers, done..) |*identifier, read| {
+                identifier.* = if (self.by_key)
+                    .{ .key = &self.selection.keys[read] }
+                else
+                    .{ .index = self.selection.indices[read] };
+            }
+            var arena: std.heap.FixedBufferAllocator = .init(self.value_buffer);
+            const values = self.batch_values[0..count];
+            total += try self.target.get_many(io, identifiers, arena.threadSafeAllocator(), values);
+            done += count;
+        }
+        assert(total == self.reads * VALUE_SIZE);
+        return total;
+    }
+
     pub fn teardown(self: *GetWorkload) void {
         if (!self.opened) return;
         self.opened = false;
+        self.fill.gpa.free(self.batch_values);
+        self.fill.gpa.free(self.batch_identifiers);
         self.fill.gpa.free(self.value_buffer);
         self.target.close(false) catch |err| std.log.warn("archive get bench: {t}", .{err});
     }
@@ -364,6 +423,7 @@ fn bench_get_modes(
             for (n_reads) |reads| {
                 var workload: GetWorkload = .{
                     .fill = fill,
+                    .concurrent = std.mem.eql(u8, mode, "concurrent"),
                     .by_key = std.mem.eql(u8, pattern, "key"),
                     .reads = reads,
                     .selection = selection,
