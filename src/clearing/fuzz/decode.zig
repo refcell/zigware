@@ -134,8 +134,34 @@ fn check_generated(comptime T: type, seed: u64, reader: *bytes.Reader) !void {
     const encoded = try codec.encode(T, gpa, value);
     defer gpa.free(encoded);
     if (encoded.len == 0) return;
-    for (0..2) |_| encoded[reader.below(encoded.len)] ^= reader.int(u8);
+    for (0..2) |_| mutate(encoded, reader);
     try decode(T, encoded);
+}
+
+/// Flips a byte, zeroes a run, or copies a run over another offset. Zeroed and copied runs
+/// make zero amounts and repeated entries, which raw flips almost never reach (the semantic
+/// checks behind a decoder's framing).
+fn mutate(encoded: []u8, reader: *bytes.Reader) void {
+    assert(encoded.len > 0);
+    const at = reader.below(encoded.len);
+    const len = @min(reader.below(48) + 1, encoded.len - at);
+    assert(at + len <= encoded.len);
+    switch (reader.below(3)) {
+        0 => encoded[at] ^= reader.int(u8),
+        1 => @memset(encoded[at..][0..len], 0),
+        2 => {
+            const from = reader.below(encoded.len - len + 1);
+            const to = encoded[at..][0..len];
+            const source = encoded[from..][0..len];
+            // The runs may overlap: copy away from the overlap.
+            if (at <= from) std.mem.copyForwards(u8, to, source) else std.mem.copyBackwards(
+                u8,
+                to,
+                source,
+            );
+        },
+        else => unreachable,
+    }
 }
 
 /// One fuzz input: a choice among the wire types or raw bytes, a seed, and bytes.
@@ -151,7 +177,7 @@ pub fn run_one(input: []const u8) anyerror!void {
 }
 
 test "fuzz clearing decoders (seeded)" {
-    try bytes.seeded(256, 0x636c_6561_7264_6563, 128, run_one);
+    try bytes.seeded(256, 0x636c_6561_7264_6563, 512, run_one);
 }
 
 test "fuzz clearing decoders" {

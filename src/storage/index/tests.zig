@@ -782,6 +782,14 @@ const fuzz_operations_max = 128;
 const Model = struct {
     lists: std.AutoArrayHashMapUnmanaged(u16, std.ArrayList(u64)) = .empty,
     pruned: u64 = 0,
+    /// Whether `insert` puts a value first (the flat indexes, newest first) or last (the
+    /// partitioned ordered index's runs, insertion order, as commonware's).
+    newest_first: bool = true,
+
+    fn add(self: *const Model, values_list: *std.ArrayList(u64), value: u64) !void {
+        if (self.newest_first) return values_list.insert(gpa, 0, value);
+        try values_list.append(gpa, value);
+    }
 
     fn deinit(self: *Model) void {
         for (self.lists.values()) |*values_list| values_list.deinit(gpa);
@@ -878,14 +886,14 @@ fn fuzz_apply(index: anytype, op: u64, key: []const u8, value: u64, target: u64)
 fn fuzz_model_apply(model: *Model, op: u64, key: []const u8, value: u64, target: u64) !void {
     const values_list = try model.list_of(key);
     switch (op) {
-        0 => try values_list.insert(gpa, 0, value),
+        0 => try model.add(values_list, value),
         1 => model.filter(values_list, null),
         2 => model.filter(values_list, target),
         3 => {
             model.filter(values_list, target);
             if (value != target) try values_list.append(gpa, value);
         },
-        4 => for (0..value % 16) |i| try values_list.insert(gpa, 0, i),
+        4 => for (0..value % 16) |i| try model.add(values_list, i),
         5 => model.filter(values_list, null),
         6...9 => try fuzz_model_cursor_op(model, op - 6, key, value),
         else => unreachable,
@@ -905,13 +913,74 @@ fn fuzz_check(index: anytype, model: *const Model) !void {
     try expect_counters(index, keys, items, model.pruned);
 }
 
+/// The model's keys that hold values, in translated order.
+fn fuzz_model_keys(model: *const Model, out: *std.ArrayList(u16)) !void {
+    for (model.lists.keys(), model.lists.values()) |translated, list| {
+        if (list.items.len > 0) try out.append(gpa, translated);
+    }
+    std.mem.sort(u16, out.items, {}, std.sort.asc(u16));
+}
+
+/// `index`'s values for the model's `translated` key equal what `got` yields.
+fn fuzz_expect_key(index: anytype, translated: u16, got: anytype) !void {
+    var key: [2]u8 = undefined;
+    std.mem.writeInt(u16, &key, translated, .big);
+    const expected = try values(index, &key);
+    defer gpa.free(expected);
+    const G = @TypeOf(got);
+    const maybe: if (@typeInfo(G) == .optional) G else ?G = got;
+    try expect_next_values(maybe, expected);
+}
+
+/// An ordered index's first, last, previous, and next translated keys match the model's
+/// (commonware's `index_ordered_operations` checks), for every key the alphabet spans.
+fn fuzz_check_ends(index: anytype, model: *const Model) !void {
+    var held: std.ArrayList(u16) = .empty;
+    defer held.deinit(gpa);
+    try fuzz_model_keys(model, &held);
+    const sorted = held.items;
+    try testing.expectEqual(sorted.len == 0, index.first_translated_key() == null);
+    try testing.expectEqual(sorted.len == 0, index.last_translated_key() == null);
+    if (sorted.len == 0) return;
+    try fuzz_expect_key(index, sorted[0], index.first_translated_key());
+    try fuzz_expect_key(index, sorted[sorted.len - 1], index.last_translated_key());
+    // Two-byte queries over the fuzz alphabet {0, 1, 2}, plus one past it.
+    for (0..4) |high| for (0..4) |low| {
+        const query: u16 = @intCast(high << 8 | low);
+        var key: [2]u8 = undefined;
+        std.mem.writeInt(u16, &key, query, .big);
+        var next_index: usize = 0;
+        while (next_index < sorted.len and sorted[next_index] <= query) next_index += 1;
+        const next = index.next_translated_key(&key).?;
+        try testing.expectEqual(next_index == sorted.len, next.cycled);
+        try fuzz_expect_key(index, sorted[next_index % sorted.len], next.values);
+        var prev_count: usize = 0;
+        while (prev_count < sorted.len and sorted[prev_count] < query) prev_count += 1;
+        const prev = index.prev_translated_key(&key).?;
+        try testing.expectEqual(prev_count == 0, prev.cycled);
+        const prev_key = if (prev_count == 0) sorted[sorted.len - 1] else sorted[prev_count - 1];
+        try fuzz_expect_key(index, prev_key, prev.values);
+    };
+}
+
 fn fuzz_run(bytes: []const u8) anyerror!void {
     var model: Model = .{};
     defer model.deinit();
-    var hashed = unordered.Index(TwoCap, u64).init(gpa, .{});
+    var runs: Model = .{ .newest_first = false };
+    defer runs.deinit();
+    // Every index in `indices`: the partitioned ones translate each fuzz key as TwoCap does.
+    var hashed = new(indices[0]);
     defer hashed.deinit();
-    var tree = ordered.Index(TwoCap, u64).init(gpa, .{});
+    var tree = new(indices[1]);
     defer tree.deinit();
+    var hashed_partitioned = new(indices[2]);
+    defer hashed_partitioned.deinit();
+    var tree_partitioned = new(indices[3]);
+    defer tree_partitioned.deinit();
+    var tree_spilling = new(indices[4]);
+    defer tree_spilling.deinit();
+    const flat = .{ &hashed, &tree, &hashed_partitioned };
+    const partitioned_runs = .{ &tree_partitioned, &tree_spilling };
     var reader = fuzz_bytes.Reader.init(bytes);
     var operations: u32 = 0;
     while (!reader.done() and operations < fuzz_operations_max) : (operations += 1) {
@@ -920,35 +989,14 @@ fn fuzz_run(bytes: []const u8) anyerror!void {
         const key = fuzz_key(&reader, &key_buffer);
         const value = reader.below(8);
         const target = reader.below(8);
-        try fuzz_apply(&hashed, op, key, value, target);
-        try fuzz_apply(&tree, op, key, value, target);
+        inline for (flat ++ partitioned_runs) |index| try fuzz_apply(index, op, key, value, target);
         try fuzz_model_apply(&model, op, key, value, target);
-        try fuzz_check(&hashed, &model);
-        try fuzz_check(&tree, &model);
+        try fuzz_model_apply(&runs, op, key, value, target);
+        inline for (flat) |index| try fuzz_check(index, &model);
+        inline for (partitioned_runs) |index| try fuzz_check(index, &runs);
     }
-    // The tree's first and last keys bound every model key.
-    var first: ?u16 = null;
-    var last: ?u16 = null;
-    for (model.lists.keys(), model.lists.values()) |translated, list| {
-        if (list.items.len == 0) continue;
-        first = if (first) |f| @min(f, translated) else translated;
-        last = if (last) |l| @max(l, translated) else translated;
-    }
-    try testing.expectEqual(first == null, tree.first_translated_key() == null);
-    if (first) |f| {
-        var key: [2]u8 = undefined;
-        std.mem.writeInt(u16, &key, f, .big);
-        const expected = try values(&tree, &key);
-        defer gpa.free(expected);
-        try expect_next_values(tree.first_translated_key(), expected);
-    }
-    if (last) |l| {
-        var key: [2]u8 = undefined;
-        std.mem.writeInt(u16, &key, l, .big);
-        const expected = try values(&tree, &key);
-        defer gpa.free(expected);
-        try expect_next_values(tree.last_translated_key(), expected);
-    }
+    try fuzz_check_ends(&tree, &model);
+    inline for (partitioned_runs) |index| try fuzz_check_ends(index, &runs);
 }
 
 test "fuzz index operations (seeded)" {
