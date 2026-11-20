@@ -900,6 +900,7 @@ fn encode_items(
         &slot.compressor
     else
         &own;
+    if (compression != null) try reserve_compressed(V, gpa, nested, out);
     for (nested) |items| {
         try starts.ensureUnusedCapacity(gpa, items.len);
         for (items) |item| {
@@ -908,6 +909,24 @@ fn encode_items(
         }
     }
     assert(starts.items.len == 0 or starts.items[starts.items.len - 1] < out.items.len);
+}
+
+/// Reserve room for every compressed frame of `nested` when `V` has a fixed size, so the batch
+/// never grows: growing a 32 MiB batch of random 1 MiB items from empty copied about twice
+/// its size (commonware's `Vec` doubles; this list grows by half).
+fn reserve_compressed(
+    comptime V: type,
+    gpa: Allocator,
+    nested: []const []const V,
+    out: *std.ArrayList(u8),
+) Error!void {
+    const item_size = comptime codec.fixed_size(V);
+    const size = item_size orelse return;
+    var count: usize = 0;
+    for (nested) |items| count += items.len;
+    const bound = std.math.mul(usize, count, frame.compressed_frame_bound(size)) catch return;
+    try out.ensureUnusedCapacity(gpa, bound);
+    assert(out.unusedCapacitySlice().len >= bound);
 }
 
 /// A position-addressed journal of variable-size items.

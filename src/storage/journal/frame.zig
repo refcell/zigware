@@ -226,6 +226,16 @@ pub fn encode_frame_reusing(
     return frame.item_len;
 }
 
+/// The most bytes `encode_compressed_frame_into` reserves for an item that encodes to
+/// `encoded_len` bytes: the widest size prefix and the zstd bound.
+pub fn compressed_frame_bound(encoded_len: usize) usize {
+    const max_len = zstd.compress_bound(encoded_len);
+    const max_size_len = codec.varint.size(u32, std.math.cast(u32, max_len) orelse
+        std.math.maxInt(u32));
+    assert(max_size_len >= 1 and max_size_len <= 5);
+    return max_size_len + max_len;
+}
+
 /// Compressed case of `encode_frame_into`. `level` is accepted for compatibility; see
 /// `zstd.zig` for why it does not change the output.
 pub fn encode_compressed_frame_into(
@@ -247,8 +257,7 @@ pub fn encode_compressed_frame_into(
     // Reserve the widest prefix so the frame compresses straight into `buf`.
     const start = buf.items.len;
     const max_len = zstd.compress_bound(encoded.len);
-    const max_size_len = codec.varint.size(u32, std.math.cast(u32, max_len) orelse
-        std.math.maxInt(u32));
+    const max_size_len = compressed_frame_bound(encoded.len) - max_len;
     try buf.ensureUnusedCapacity(gpa, max_size_len + max_len);
     buf.items.len += max_size_len;
     const compressed = if (compressor) |c|
