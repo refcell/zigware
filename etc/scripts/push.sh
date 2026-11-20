@@ -23,7 +23,8 @@ main() {
   if [ "${1:-}" != "--no-test" ]; then
     git fetch -q origin main
     git rebase -q origin/main
-    zig build test
+    # A hung test fails with its name instead of blocking the push (macOS CI uses the same limit).
+    zig build test --test-timeout 10m
   fi
   just tidy >/dev/null
 
