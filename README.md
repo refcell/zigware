@@ -101,7 +101,7 @@ it, and every recorded difference from commonware.
 | [codec](src/codec) | Serialize structured data | ported |
 | [cryptography](src/cryptography) | Keys, signatures, hashes, BLS12-381 threshold crypto | ported |
 | [curve25519](src/cryptography/curve25519) | Curve25519 arithmetic, Ed25519 signing and batch verification, X25519 | ported |
-| [math](src/math) | Fields, polynomials, NTT | porting |
+| [math](src/math) | Fields, polynomials, NTT | ported |
 | [runtime](src/runtime) | Async tasks on a deterministic scheduler or std.Io (optional io_uring) | ported |
 | [storage](src/storage) | Journals, archives, MMRs, authenticated databases | porting |
 | [utils](src/utils) | Shared functionality across primitives | ported |

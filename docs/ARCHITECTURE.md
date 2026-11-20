@@ -8,7 +8,7 @@ the same name, the same public concepts, and the same dependency edges.
 | `<crate>/src/lib.rs` | `src/<crate>/root.zig` |
 | `<crate>/src/<module>` | `src/<crate>/<module>/` (or `<module>.zig`) |
 | `<crate>/fuzz/`, proptests | `std.testing.fuzz` tests and `invariants.minifuzz` targets next to the code, run seeded in `zig build test` |
-| `<crate>/src/**/conformance.rs` | the same conformance hashes, checked by `zig build test` (the heavy ones only with `-Dslow-tests`; math's 5 are not ported yet) |
+| `<crate>/src/**/conformance.rs` | the same conformance hashes, checked by `zig build test` (the heavy ones only with `-Dslow-tests`) |
 | `examples/<name>` | `examples/<name>/main.zig` (or `<binary>.zig` per binary), a `run-<name>` build step |
 | `macros`, `*/macros` | comptime code in the package that uses it (no separate package) |
 | `docs`, `mcp`, `sol`, `docker`, `pipeline` | not ported |
@@ -30,7 +30,7 @@ on lines above it.
 | codec | conformance, formatting | 9k |
 | utils | codec, formatting, conformance, invariants | 35k |
 | parallel | utils | 26k |
-| math | codec, invariants, parallel, utils, simd | 4.6k |
+| math | codec, invariants, parallel, utils, simd, conformance | 4.6k |
 | cryptography | codec, formatting, math, parallel, utils, invariants, simd, conformance | 67k |
 | curve25519 (`src/cryptography/curve25519`) | codec, cryptography, formatting, math, parallel, utils, conformance, invariants | 20k |
 | runtime | codec, cryptography, formatting, parallel, utils, conformance | 99k |
