@@ -208,6 +208,11 @@ fn hash_runs(
         var start: usize = 0;
         while (start < messages.len) : (start += Kernel.lanes) {
             const end = @min(start + Kernel.lanes, messages.len);
+            if (end - start == 1) {
+                // A lone message hashes faster alone than in a kernel call of idle lanes.
+                digests[start] = H.hash(&.{messages[start]});
+                continue;
+            }
             const out = Kernel.hash(messages[start..end]);
             for (digests[start..end], out[0 .. end - start]) |*digest, bytes| digest.bytes = bytes;
         }

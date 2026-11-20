@@ -589,3 +589,7 @@ hold whole units of lanes" over coding's lane-aware `hash_batches`, and `sha512/
   (0, 1, p - 1, every limb at 2^52 - 1) and 2,000 random ones against std on x86-64 and
   aarch64. Decompress went from 3.7 to 2.8 us. Planted bugs in a coefficient, either carry
   stage's wrap by 19, and the addition chain fail it.
+- 2026-11-20: `Sha512.hash_many` hashes a lone message (a batch of one, or a last chunk of one)
+  with the scalar `sha512_blocks` path instead of an 8-lane kernel call of idle lanes: 96 B
+  279 -> 232 ns. From two messages up the kernel stays far ahead (2 x 96 B: 270 against 430
+  ns). A planted wrong message index fails the mixed-length hash_many test.
