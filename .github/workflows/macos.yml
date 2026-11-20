@@ -15,8 +15,9 @@ jobs:
   test:
     # One job running every package hit the 60-minute limit on every run. On a 6-core Mac,
     # storage alone takes about 26 minutes, consensus 10, glue 6, cryptography 5, and the rest
-    # (test-light) a few, so they split into jobs. Storage's RSS grows with its run time, to
-    # 7 GB, the runner's whole memory, so it splits three ways (etc/scripts/storage-filters.sh).
+    # (test-light) a few, so they split into jobs. Storage splits three ways
+    # (etc/scripts/storage-filters.sh); its RSS once grew to 7 GB, std's debug-info arena on
+    # Darwin, until etc/darwin_test_runner.zig (92e764bb).
     # All run Debug; the Linux jobs cover ReleaseSafe.
     strategy:
       fail-fast: false
@@ -60,18 +61,5 @@ jobs:
               filters="$filters -Dtest-filter=$filter"
             done
           fi
-          if [ -n "$STORAGE" ]; then
-            # Temporary: names the region behind storage's RSS growth (VM_ALLOCATE means
-            # std's debug-info arena, MALLOC_MEDIUM means libmalloc).
-            (while sleep 120; do
-              for pid in $(pgrep -x test-storage || true); do
-                echo "== $(date +%T) pid $pid"
-                vmmap --summary "$pid" 2>&1 | grep -E 'VM_ALLOCATE|MALLOC|TOTAL|Physical' || true
-              done
-            done) > "$RUNNER_TEMP/vmmap.log" 2>&1 &
-          fi
           # A hung test fails with its name instead of running into the job's timeout.
           zig build ${{ matrix.steps }} $filters --test-timeout 10m --summary all
-      - name: vmmap samples
-        if: always() && matrix.storage != ''
-        run: cat "$RUNNER_TEMP/vmmap.log" || true
