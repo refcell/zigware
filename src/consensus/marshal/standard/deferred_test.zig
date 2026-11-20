@@ -500,6 +500,8 @@ fn releases_conflicting(io: Io, wrapper: *RecordingWrapper, fake: *Fake) !void {
 }
 
 fn conflicting_body(ctx: Ctx) anyerror!void {
+    // Each soak round starts a fresh log; the test owns it across rounds.
+    observed.items.clearRetainingCapacity();
     const root = try genesis();
     const parent_context = context_for(round_at(0, 1), 0, 0, root.digest());
     const parent = try block_in(parent_context, root.digest(), 1, 100);

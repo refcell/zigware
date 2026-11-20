@@ -769,6 +769,8 @@ fn expect_observed(expected: []const verifying.Verification(common.D)) !void {
 }
 
 fn releases_verification_body(ctx: Ctx) anyerror!void {
+    // Each soak round starts a fresh log; the test owns it across rounds.
+    observed.items.clearRetainingCapacity();
     var env: Env = undefined;
     try env.init(ctx);
     defer env.deinit();

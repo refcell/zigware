@@ -843,3 +843,13 @@ then ported it in core/cache.zig: archive writes encode a borrowed `V.stored_vie
   asserts the u32 bound where commonware `expect`s with a message. Not portable in the
   marshal tally goes from 4 to 1 (standard `resolver_delivery_waits_for_identity_job`, a
   missing feature) and in aggregation from 2 to 0.
+- 2026-11-20: marshal and aggregation's deterministic tests run through
+  `runtime.deterministic.soak` (472ed87b). A `-Dfuzz-soak=100` ReleaseSafe run found three
+  seeds. Two were test bugs: deferred's and coding's "certify releases conflicting
+  verification" kept their `observed` log across soak rounds, so the body now clears it. The
+  third was a timing tail that commonware shares. "standard restart repairs multiple trailing
+  missing finalized blocks" took 50.9 s (445 ms on seed 0): the first missing block's fetch
+  went to the two offline participants 24 times in a row before validator 1. An untried peer
+  weighs 1, the same as a penalized one (commonware `Score::weight`), so each retry finds the
+  live peer with probability about 1/3. restart.zig's budget goes from commonware's 30 s to
+  120 s, and that seed (111669149738) is a fixed test.

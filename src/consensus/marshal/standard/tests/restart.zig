@@ -20,8 +20,12 @@ const Ctx = runtime.deterministic.Context;
 const Height = types.Height;
 const Round = types.Round;
 
-/// commonware's `Runner::timed(30s)`.
-const timed: runtime.deterministic.Config = .{ .timeout_ns = 30 * std.time.ns_per_s };
+/// commonware's `Runner::timed(30s)` is too tight once soaked: only validator 1 of the other
+/// three participants runs, a fetch sent to an offline one waits out the 2 s `fetch_timeout`,
+/// and an untried peer weighs no more than a penalized one (commonware `Score::weight`), so each
+/// retry draws the one live peer with probability about 1/3. 30 s allows about 14 misses (1 in
+/// 300 fetches times out the test); 120 s allows about 59.
+const timed: runtime.deterministic.Config = .{ .timeout_ns = 120 * std.time.ns_per_s };
 
 fn round_at(view: u64) Round {
     return .new(.new(0), .new(view));
@@ -292,6 +296,16 @@ fn repairs_multiple_trailing_body(ctx: Ctx) anyerror!void {
 
 test "standard restart repairs multiple trailing missing finalized blocks" {
     try soak.run(gpa, timed, repairs_multiple_trailing_body, .{});
+}
+
+test "standard restart repairs trailing blocks after 24 fetches to offline peers" {
+    // A -Dfuzz-soak=100 seed: the first missing block's fetch drew the two offline participants
+    // 24 times in a row (48 s of timeouts) before reaching validator 1.
+    var config = timed;
+    config.seed = 111669149738;
+    var runner = try runtime.deterministic.Runner.init(gpa, config);
+    defer runner.deinit();
+    try try runner.start_context(repairs_multiple_trailing_body, .{});
 }
 
 /// The finalized tip is far ahead of the last stored block and only the tip has a
