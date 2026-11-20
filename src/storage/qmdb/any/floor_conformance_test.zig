@@ -79,7 +79,7 @@ const Plan = struct {
     writes: std.ArrayList(Write) = .empty,
     batches: std.ArrayList(Batch) = .empty,
 
-    fn deinit(self: *Plan) void {
+    pub fn deinit(self: *Plan) void {
         self.live.deinit(self.gpa);
         self.dead.deinit(self.gpa);
         self.writes.deinit(self.gpa);
@@ -193,7 +193,7 @@ const Plan = struct {
 };
 
 /// Commonware's `floor_batches(seed)`. The caller deinits the plan holding them.
-fn floor_batches(gpa: Allocator, seed: u64) !Plan {
+pub fn floor_batches(gpa: Allocator, seed: u64) !Plan {
     const n = seed % 48 + 40;
     var plan: Plan = .{ .gpa = gpa, .seed = seed, .prefix = @intCast(seed % 256) };
     errdefer plan.deinit();
