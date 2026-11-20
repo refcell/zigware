@@ -320,13 +320,15 @@ pub const Writer = struct {
         while (start < fill + bulk_len) {
             const chunk_len = @min(self.buffer.capacity, fill + bulk_len - start);
             const chunk = bytes[start..][0..chunk_len];
-            const written = self.append_full_pages(chunk, null, self.scratch);
+            // Each page's bytes go to the blob straight from `bytes`, beside its CRC record
+            // (commonware's `append_owned` chains them into one write without copying).
+            const staged = self.full_page_chunks(chunk, null);
             const logical_offset = boundary + (start - fill);
             assert(self.cache_ref.cache(self.id, chunk, logical_offset) == 0);
             const write_offset = self.current_page * physical;
             self.current_page += chunk.len / page_size_value;
-            const pages = self.scratch[0..written];
-            try self.sync_state.write_at(self.blob, write_offset, pages, false);
+            const chunks = self.chunks[0..staged];
+            try self.sync_state.write_chunks(self.blob, write_offset, chunks, false, .{});
             start += chunk.len;
         }
         self.buffer.replace(boundary + bulk_len, bytes[fill + bulk_len ..]);
@@ -414,9 +416,9 @@ pub const Writer = struct {
         return .{ .chunks = chunks + 1, .partial = active };
     }
 
-    /// Stage whole logical pages of `data` (in the buffer) as chunks: each page's bytes, then
-    /// its CRC record, kept at the front of `scratch`. The first page preserves `old` in its
-    /// original slot when present. Returns the chunks staged.
+    /// Stage whole logical pages of `data` (the buffer's, or a bulk append's) as chunks: each
+    /// page's bytes, then its CRC record, kept at the front of `scratch`. The first page
+    /// preserves `old` in its original slot when present. Returns the chunks staged.
     fn full_page_chunks(self: *Self, data: []const u8, old: ?ActiveChecksum) usize {
         const page_size_value = self.page_size();
         assert(data.len % page_size_value == 0 and data.len > 0);
@@ -433,25 +435,6 @@ pub const Writer = struct {
             self.chunks[2 * page + 1] = bytes;
         }
         return 2 * pages;
-    }
-
-    /// Write whole logical pages in on-disk format into `out`. The first page preserves
-    /// `old` in its original slot when present. Returns the bytes written.
-    fn append_full_pages(self: *Self, data: []const u8, old: ?ActiveChecksum, out: []u8) usize {
-        const page_size_value = self.page_size();
-        assert(data.len % page_size_value == 0 and data.len > 0);
-        const physical = self.physical_page_size();
-        var page: usize = 0;
-        while (page * page_size_value < data.len) : (page += 1) {
-            const logical = data[page * page_size_value ..][0..page_size_value];
-            const crc = Crc32.checksum(logical);
-            const previous = if (page == 0) old else null;
-            const record, _ = paged.build_crc_record(@intCast(page_size_value), crc, previous);
-            const target = out[page * physical ..][0..physical];
-            @memcpy(target[0..page_size_value], logical);
-            target[page_size_value..][0..checksum_size].* = record.to_bytes();
-        }
-        return page * physical;
     }
 
     /// Flush buffered bytes and make all pending mutations durable.
