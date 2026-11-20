@@ -368,9 +368,19 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
             const location = self.leaves();
             if (location >= F.max_leaves) return error.LocationOverflow;
             const end = F.location_to_position(location + 1);
-            try self.appended.ensureUnusedCapacity(gpa, @intCast(end - self.size()));
+            try self.reserve_appended(gpa, @intCast(end - self.size()));
             try self.append_leaf_digest(gpa, digest, location);
             assert(self.size() == end);
+        }
+
+        /// Room for `count` more appended nodes, doubling the capacity when it runs out, as
+        /// commonware's `Vec::push` does (`ArrayList` grows by half, copying more often).
+        fn reserve_appended(self: *Self, gpa: Allocator, count: usize) Allocator.Error!void {
+            const needed = self.appended.items.len + count;
+            if (needed <= self.appended.capacity) return;
+            const doubled = @max(needed, 2 * self.appended.capacity, 8);
+            try self.appended.ensureTotalCapacityPrecise(gpa, doubled);
+            assert(self.appended.capacity >= needed);
         }
 
         /// Appends a leaf and placeholders for the parents it creates (capacity reserved).
@@ -726,6 +736,15 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
 
         fn child_digests(self: *const Self, base: anytype, position: u64, height: u32) [2]Digest {
             const children = F.children(position, height);
+            assert(children.left < children.right and children.right < position);
+            // Children this batch appended (all of them, on a fresh append) are read directly.
+            const parent_size = self.parent.size();
+            if (children.left >= parent_size) {
+                const nodes = self.appended.items;
+                const left: usize = @intCast(children.left - parent_size);
+                const right: usize = @intCast(children.right - parent_size);
+                return .{ nodes[left], nodes[right] };
+            }
             // A missing child means an unapplied ancestor was released, or `base` was pruned
             // past an updated leaf (see the module docs).
             const left = self.get_node(base, children.left).?;
