@@ -73,6 +73,9 @@ pub const RecordedEvent = struct {
     /// Active spans, innermost first.
     spans: []const EventMetadata,
     metadata: EventMetadata,
+    /// Wall-clock nanoseconds since the Unix epoch when recorded (tracing's event timestamp),
+    /// or null when the collector has no `Config.clock`.
+    time_ns: ?i64 = null,
 
     pub fn expect_span_count(event: RecordedEvent, count: usize) Error!void {
         if (event.spans.len != count) return error.TraceAssertion;
@@ -170,6 +173,8 @@ pub const RecordedEvents = struct {
 pub const Config = struct {
     /// Most events kept; later events are counted in `dropped` (commonware keeps all).
     event_count_max: u32 = 1 << 16,
+    /// Stamps each event with `Io.Clock.real` when it is recorded; none leaves `time_ns` null.
+    clock: ?std.Io = null,
 };
 
 /// Collects events (commonware `TraceStorage` plus `CollectingLayer`). Recording allocates in
@@ -223,16 +228,23 @@ pub const Collector = struct {
 
     /// Keeps a copy of `event`, or counts it in `dropped`.
     pub fn record(collector: *Collector, event: *const traces.Event) void {
+        // Read before the lock, so waiting on another recorder does not delay the stamp.
+        const time_ns: ?i64 = if (collector.config.clock) |io|
+            @intCast(std.Io.Clock.real.now(io).nanoseconds)
+        else
+            null;
         collector.lock.lock();
         defer collector.lock.unlock();
         if (collector.events.items.len >= collector.config.event_count_max) {
             collector.dropped += 1;
             return;
         }
-        const recorded = collector.build(event) catch {
+        var recorded = collector.build(event) catch {
             collector.dropped += 1;
             return;
         };
+        assert(recorded.time_ns == null);
+        recorded.time_ns = time_ns;
         const gpa = collector.arena.allocator();
         collector.events.append(gpa, recorded) catch {
             collector.dropped += 1;

@@ -227,6 +227,26 @@ test "GUI lines match gui.rs's Writer over tracing's JSON" {
     try testing.expectEqual(@as(?ui.tui.Color, .yellow), gui.progress_color("x prepared"));
 }
 
+test "GUI lines carry the time each event was recorded, not the draw's" {
+    // gui.rs stamps a line with tracing's event timestamp. Here the draw comes long after
+    // (its time is the epoch), and the line must still show when the event was recorded.
+    const gpa = testing.allocator;
+    var collector: traces.Collector = .init(gpa, .{ .clock = testing.io });
+    defer collector.deinit();
+    const before_ns = Io.Clock.real.now(testing.io).nanoseconds;
+    collector.tracer(application.target).event(.info, "finalized", .{ .view = @as(u64, 1) });
+    const after_ns = Io.Clock.real.now(testing.io).nanoseconds;
+    const recorded_ns = collector.events.items[0].time_ns.?;
+    try testing.expect(before_ns <= recorded_ns and recorded_ns <= after_ns);
+    var state: gui.State = .init(gpa);
+    defer state.deinit();
+    const zone: ui.clock.Zone = .{ .rule = try ui.clock.parse_rule("UTC0") };
+    try state.collect(&collector, &zone, 0);
+    const stamp = ui.clock.iso_stamp(@intCast(@divFloor(recorded_ns, std.time.ns_per_s)));
+    const line = state.progress.items[0].text;
+    try testing.expect(std.mem.startsWith(u8, line[1..], &stamp));
+}
+
 test "ISO stamps format as chrono's %Y-%m-%dT%H:%M:%S" {
     try testing.expectEqualStrings("1970-01-01T00:00:00", &ui.clock.iso_stamp(0));
     try testing.expectEqualStrings("1969-12-31T23:59:59", &ui.clock.iso_stamp(-1));

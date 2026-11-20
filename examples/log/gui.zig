@@ -55,7 +55,8 @@ pub const State = struct {
         state.* = undefined;
     }
 
-    /// Formats the collector's new events, stamped `utc_seconds` in `zone`.
+    /// Formats the collector's new events in `zone`, each stamped when it was recorded (as
+    /// gui.rs reads tracing's event timestamp), or `utc_seconds` if it carries no time.
     pub fn collect(
         state: *State,
         collector: *traces.Collector,
@@ -66,9 +67,11 @@ pub const State = struct {
         defer collector.lock.unlock();
         const events = collector.events.items;
         assert(state.events_seen <= events.len);
-        const stamp = zone.local_iso_stamp(utc_seconds);
         while (state.events_seen < events.len) : (state.events_seen += 1) {
             const event = events[state.events_seen];
+            const recorded_ns = event.time_ns orelse utc_seconds * std.time.ns_per_s;
+            const seconds = @divFloor(recorded_ns, std.time.ns_per_s);
+            const stamp = zone.local_iso_stamp(seconds);
             const is_progress = std.mem.indexOf(u8, event.target, application.target) != null;
             const text = try format_line(state.gpa, &stamp, event);
             errdefer state.gpa.free(text);

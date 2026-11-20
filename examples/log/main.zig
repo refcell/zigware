@@ -141,7 +141,7 @@ pub fn main(init: std.process.Init) !u8 {
         .run => |arguments| arguments,
     };
     const configured = try setup(arena, arguments);
-    var collector: traces.Collector = .init(init.gpa, .{});
+    var collector: traces.Collector = .init(init.gpa, .{ .clock = io });
     defer collector.deinit();
     var zone = ui.clock.Zone.load(init.gpa, io, init.environ_map.get("TZ"));
     defer zone.deinit();
