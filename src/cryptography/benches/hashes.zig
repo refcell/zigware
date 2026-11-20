@@ -206,8 +206,9 @@ const DigestSort = struct {
         @memcpy(workload.scratch, workload.digests);
     }
 
+    /// `sort_unstable`, as commonware's bench calls it.
     pub fn iter(workload: *DigestSort) void {
-        std.sort.pdq(Digest, workload.scratch, {}, Digest.less_than);
+        utils.sort.unstable(Digest, workload.scratch, {}, Digest.less_than);
     }
 };
 
