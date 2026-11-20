@@ -9,10 +9,22 @@ const codec = @import("codec");
 const Array = @import("array.zig").Array;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
+const native_endian = @import("builtin").cpu.arch.endian();
 
 pub const WORDS: usize = 1024;
 pub const BITS: u32 = WORDS * 64;
 pub const ENCODED_BYTES: usize = WORDS * @sizeOf(u64);
+
+/// Within each 8-byte group of a 64-byte vector, the byte order that makes a native word
+/// big-endian.
+const big_endian_bytes: @Vector(64, i32) = order: {
+    var order: [64]i32 = undefined;
+    for (&order, 0..) |*lane, index| {
+        const within = index % 8;
+        lane.* = @intCast(if (native_endian == .big) index else index - within + (7 - within));
+    }
+    break :order order;
+};
 
 pub const Bitmap = struct {
     words: [WORDS]u64 = @splat(0),
@@ -233,8 +245,21 @@ pub const Bitmap = struct {
 
     // Codec.
 
-    pub fn write(self: Bitmap, writer: *codec.Writer) void {
-        for (self.words) |word| writer.write_int(u64, word);
+    /// Big-endian words, swapped straight into the writer's buffer 8 words per vector instead
+    /// of 1024 bounds-checked integer writes (commonware swaps into a stack buffer and writes
+    /// it in bulk). A scalar `writeInt` loop compiles to one `movbe` store per word.
+    pub fn write(self: *const Bitmap, writer: *codec.Writer) void {
+        const lane_bytes = 64;
+        const source = std.mem.asBytes(&self.words);
+        comptime assert(ENCODED_BYTES % lane_bytes == 0 and source.len == ENCODED_BYTES);
+        assert(writer.unused_capacity() >= ENCODED_BYTES);
+        const bytes = writer.buffer[writer.end..][0..ENCODED_BYTES];
+        var offset: usize = 0;
+        while (offset < ENCODED_BYTES) : (offset += lane_bytes) {
+            const raw: @Vector(lane_bytes, u8) = source[offset..][0..lane_bytes].*;
+            bytes[offset..][0..lane_bytes].* = @shuffle(u8, raw, undefined, big_endian_bytes);
+        }
+        writer.end += ENCODED_BYTES;
     }
 
     pub fn read(_: Allocator, reader: *codec.Reader, _: void) codec.Error!Bitmap {

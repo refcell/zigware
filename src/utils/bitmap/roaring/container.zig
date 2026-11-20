@@ -458,7 +458,11 @@ pub const Container = union(Kind) {
             },
             .bitmap => {
                 writer.write_int(u8, TYPE_BITMAP);
-                self.to_bitmap().write(writer);
+                // A bitmap container writes in place; `to_bitmap` would copy its 8 KiB.
+                switch (self) {
+                    .bitmap => |bitmap| bitmap.write(writer),
+                    .array, .run => self.to_bitmap().write(writer),
+                }
             },
             .run => {
                 writer.write_int(u8, TYPE_RUN);
