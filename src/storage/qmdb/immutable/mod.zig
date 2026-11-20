@@ -21,5 +21,6 @@ test {
     _ = @import("prune_test.zig");
     _ = @import("recovery_test.zig");
     _ = @import("start_sync_test.zig");
+    _ = @import("recovery_fuzz_test.zig");
     _ = @import("variable_test.zig");
 }
