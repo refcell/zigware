@@ -201,24 +201,25 @@ pub fn encode_frame_into(
     item: V,
     buf: *std.ArrayList(u8),
 ) Error!u32 {
-    return encode_frame_reusing(V, gpa, compression, null, item, buf);
+    return encode_frame_reusing(V, gpa, compression, null, &item, buf);
 }
 
 /// `encode_frame_into` compressing through `compressor` when it is set, so a batch of frames
-/// shares one encoder's buffers.
+/// shares one encoder's buffers. `item` is borrowed: a large item passed by value was copied
+/// at each call (twice per 1 MiB item, as much as storing it raw).
 pub fn encode_frame_reusing(
     comptime V: type,
     gpa: Allocator,
     compression: ?u8,
     compressor: ?*zstd.Compressor,
-    item: V,
+    item: *const V,
     buf: *std.ArrayList(u8),
 ) Error!u32 {
     assert(compressor == null or compression != null);
     if (compression) |level| {
         return encode_compressed_frame_into(V, gpa, level, compressor, item, buf);
     }
-    const frame = try UncompressedFrame(V).init(item);
+    const frame = try UncompressedFrame(V).init(item.*);
     const out = try buf.addManyAsSlice(gpa, frame.frame_len);
     var writer = codec.Writer.init(out);
     frame.write(&writer);
@@ -243,14 +244,14 @@ pub fn encode_compressed_frame_into(
     gpa: Allocator,
     level: u8,
     compressor: ?*zstd.Compressor,
-    item: V,
+    item: *const V,
     buf: *std.ArrayList(u8),
 ) Error!u32 {
     _ = level;
     // A byte array encodes as its own bytes, so it compresses in place: a 1 MiB item's
     // temporary copy cost twice its compression (fresh pages from the allocator each item).
     const raw = comptime is_byte_array(V);
-    const encoded = if (raw) std.mem.asBytes(&item) else try codec.encode(V, gpa, item);
+    const encoded = if (raw) std.mem.asBytes(item) else try codec.encode(V, gpa, item.*);
     defer if (!raw) gpa.free(encoded);
     assert(!raw or encoded.len == @sizeOf(V));
 

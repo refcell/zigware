@@ -903,7 +903,7 @@ fn encode_items(
     if (compression != null) try reserve_compressed(V, gpa, nested, out);
     for (nested) |items| {
         try starts.ensureUnusedCapacity(gpa, items.len);
-        for (items) |item| {
+        for (items) |*item| {
             starts.appendAssumeCapacity(out.items.len);
             _ = try frame.encode_frame_reusing(V, gpa, compression, reused, item, out);
         }
