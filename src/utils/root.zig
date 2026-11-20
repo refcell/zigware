@@ -81,6 +81,9 @@ pub const amount = @import("amount.zig");
 /// Fixed-size, constant-time byte-array equality (fast where `std.mem.eql` is not).
 pub const bytes_eql = @import("bytes_eql.zig").eql;
 
+/// Rust's `sort_unstable` (ipnsort), faster than `std.sort.pdq`.
+pub const sort = @import("sort.zig");
+
 pub const sync = @import("sync.zig");
 
 pub const futures = @import("futures.zig");
@@ -210,6 +213,7 @@ test {
     _ = @import("fuzz.zig");
     _ = @import("lib_test.zig");
     _ = @import("bytes_eql.zig");
+    _ = @import("sort.zig");
 }
 
 test "utils: union" {
