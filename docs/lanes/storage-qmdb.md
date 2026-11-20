@@ -484,3 +484,5 @@ which every database here is built on.
 - 2026-11-19: any apply probes the index 64 keys ahead (commonware's `PROBE_CHUNK`), both paths.
 - 2026-11-19: qmdb should_panic tests as death tests: 7 of 8 ported (1 not portable).
 - 2026-11-19: any index apply runs on the strategy beside the log append; apply_batch 1.07×.
+- 2026-11-20: StorageConformance for any, immutable, keyless (non-compact), Store, StoreFloor.
+- 2026-11-20: immutable index prefetch: apply_batch faster (0.67×); diff merge fast paths.
