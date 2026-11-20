@@ -34,11 +34,7 @@ const Rate = bandwidth.Rate;
 fn min_time(a: ?SystemTime, b: ?SystemTime) ?SystemTime {
     const x = a orelse return b;
     const y = b orelse return x;
-    return if (x.order(y) == .gt) y else x;
-}
-
-fn max_time(a: SystemTime, b: SystemTime) SystemTime {
-    return if (a.order(b) == .lt) b else a;
+    return x.min(y);
 }
 
 fn le(a: SystemTime, b: SystemTime) bool {
@@ -277,10 +273,10 @@ pub fn State(comptime P: type, comptime M: type) type {
             last_arrival_complete: ?SystemTime,
             latency: Duration,
         ) SystemTime {
-            var ready_at = max_time(stored orelse now, now);
+            var ready_at = (stored orelse now).max(now);
             if (last_arrival_complete) |arrival| {
                 if (arrival.checked_sub(latency)) |limit_time| {
-                    ready_at = max_time(ready_at, limit_time);
+                    ready_at = ready_at.max(limit_time);
                 }
             }
             assert(le(now, ready_at));
@@ -515,7 +511,7 @@ pub fn State(comptime P: type, comptime M: type) type {
                 const last_arrival = state.last_arrival_of(entry.key);
                 const queue = &entry.value;
                 const ready_at = refresh_front_ready_at(queue, now, last_arrival) orelse continue;
-                next_ready = min_time(next_ready, max_time(ready_at, now));
+                next_ready = min_time(next_ready, ready_at.max(now));
             }
             state.next_transmission_ready = next_ready;
         }

@@ -10,7 +10,7 @@ const Duration = utils.Duration;
 /// Merges `b` into `a`, keeping the earliest time.
 pub fn earliest(a: ?SystemTime, b: SystemTime) SystemTime {
     const current = a orelse return b;
-    return if (current.order(b) == .gt) b else current;
+    return current.min(b);
 }
 
 /// Whether a peer is dialable.

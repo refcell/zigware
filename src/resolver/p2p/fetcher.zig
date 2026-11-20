@@ -129,10 +129,6 @@ fn add_time(time: SystemTime, delta: Duration) SystemTime {
     return time.checked_add(delta) orelse @panic("time overflowed");
 }
 
-fn min_time(a: SystemTime, b: SystemTime) SystemTime {
-    return if (a.order(b) == .gt) b else a;
-}
-
 /// An ordered map over a sorted array, keyed by `codec.order` (Rust `HashMap` for the
 /// fetcher's per-key state, which is bounded by its in-flight keys).
 fn KeyMap(comptime K: type, comptime V: type) type {
@@ -528,7 +524,7 @@ pub fn Fetcher(comptime P: type, comptime Key: type) type {
                 // Each key waits for its own deadline. Keep scanning: fresh keys precede
                 // retries, so later keys may already be due.
                 if (entry.priority.deadline.order(scan_start) == .gt) {
-                    scan.next_deadline = min_time(scan.next_deadline, entry.priority.deadline);
+                    scan.next_deadline = scan.next_deadline.min(entry.priority.deadline);
                     continue;
                 }
                 sent = try self.try_key(sender, entry.item, &scan);
@@ -548,10 +544,10 @@ pub fn Fetcher(comptime P: type, comptime Key: type) type {
             }
             // Keep future keys reachable even when every due key is unavailable.
             if (scan.earliest_rate_limit) |rate_limit_time| {
-                scan.next_deadline = min_time(scan.next_deadline, rate_limit_time);
+                scan.next_deadline = scan.next_deadline.min(rate_limit_time);
             } else if (scan.found_eligible_peers) {
                 const retry_at = add_time(self.now(), self.retry_delay);
-                scan.next_deadline = min_time(scan.next_deadline, retry_at);
+                scan.next_deadline = scan.next_deadline.min(retry_at);
             }
             self.waiter = scan.next_deadline;
         }
@@ -573,7 +569,7 @@ pub fn Fetcher(comptime P: type, comptime Key: type) type {
                 const checked = switch (try sender.check(.{ .one = peer })) {
                     .limited => |not_until| {
                         const earliest = scan.earliest_rate_limit orelse not_until;
-                        scan.earliest_rate_limit = min_time(earliest, not_until);
+                        scan.earliest_rate_limit = earliest.min(not_until);
                         continue;
                     },
                     .checked => |checked| checked,

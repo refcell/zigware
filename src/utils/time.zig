@@ -214,6 +214,16 @@ pub const SystemTime = struct {
         return std.math.order(a.nanos_since_epoch, b.nanos_since_epoch);
     }
 
+    /// The earlier of `a` and `b` (Rust `Ord::min`: `a` on a tie).
+    pub fn min(a: SystemTime, b: SystemTime) SystemTime {
+        return if (a.order(b) == .gt) b else a;
+    }
+
+    /// The later of `a` and `b` (Rust `Ord::max`: `b` on a tie).
+    pub fn max(a: SystemTime, b: SystemTime) SystemTime {
+        return if (a.order(b) == .gt) a else b;
+    }
+
     /// `null` when the result would pass `limit()`.
     pub fn checked_add(time: SystemTime, delta: Duration) ?SystemTime {
         const delta_nanos = delta.as_nanos();
@@ -381,6 +391,16 @@ test "time: epoch and epoch_millis" {
     // Before the epoch, `epoch` panics like commonware.
     const before = SystemTime.UNIX_EPOCH.checked_sub(Duration.from_secs(1)).?;
     try testing.expectEqual(std.math.Order.lt, before.order(SystemTime.UNIX_EPOCH));
+}
+
+test "time: SystemTime min and max" {
+    const before: SystemTime = .{ .nanos_since_epoch = -5 };
+    const after: SystemTime = .{ .nanos_since_epoch = 7 };
+    try std.testing.expectEqual(before, before.min(after));
+    try std.testing.expectEqual(before, after.min(before));
+    try std.testing.expectEqual(after, before.max(after));
+    try std.testing.expectEqual(after, after.max(before));
+    try std.testing.expectEqual(after, after.max(after));
 }
 
 test "time: from_nanos_saturating" {
