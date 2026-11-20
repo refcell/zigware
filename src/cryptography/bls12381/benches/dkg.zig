@@ -178,7 +178,9 @@ fn bench_dkg(runner: *bench.Runner, reshare: bool) !void {
                 .with_param("n", n).with_param("t", N3f1.quorum(n)).with_param("conc", conc);
             if (try common.skip(runner, name)) continue;
             if (round == null) {
-                round = undefined;
+                // A non-null optional whose payload `init` fills: assigning plain `undefined`
+                // leaves the null flag undefined, and `.?` panicked on macOS.
+                round = @as(Round, undefined);
                 try round.?.init(gpa, &rng, reshare, n);
             }
             var policy = parallel.Policy.init(runner.io);
