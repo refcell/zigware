@@ -78,6 +78,9 @@ pub const Cached = thread_local.Cached;
 
 pub const amount = @import("amount.zig");
 
+/// Fixed-size, constant-time byte-array equality (fast where `std.mem.eql` is not).
+pub const bytes_eql = @import("bytes_eql.zig").eql;
+
 pub const sync = @import("sync.zig");
 
 pub const futures = @import("futures.zig");
@@ -206,6 +209,7 @@ test {
     _ = @import("ordered_test.zig");
     _ = @import("fuzz.zig");
     _ = @import("lib_test.zig");
+    _ = @import("bytes_eql.zig");
 }
 
 test "utils: union" {
