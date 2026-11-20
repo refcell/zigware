@@ -121,13 +121,13 @@ pub fn Lanes(comptime backend: Backend) type {
                     t[j] = madd_low(t[j], m, p_j);
                     t[j + 1] = madd_high(t[j + 1], m, p_j);
                 }
-                assert(@reduce(.Or, t[0] & mask()) == 0);
+                if (std.debug.runtime_safety) assert(@reduce(.Or, t[0] & mask()) == 0);
                 t[1] += t[0] >> @splat(52);
                 inline for (0..limbs) |k| t[k] = t[k + 1];
                 t[limbs] = @splat(0);
             }
             const result = carry(t[0..limbs].*);
-            assert(result.below(two_p_limbs));
+            if (std.debug.runtime_safety) assert(result.below(two_p_limbs));
             return result;
         }
 
@@ -144,7 +144,7 @@ pub fn Lanes(comptime backend: Backend) type {
                 out[k] = value & mask();
                 c = value >> @splat(52);
             }
-            assert(@reduce(.Or, c) == 0);
+            if (std.debug.runtime_safety) assert(@reduce(.Or, c) == 0);
             return .{ .rows = out };
         }
 
@@ -164,7 +164,6 @@ pub fn Lanes(comptime backend: Backend) type {
 
         /// Subtracts `bound` from every lane at or above it, given carried limbs.
         fn subtract_if_above(self: Self, comptime bound: [limbs]u64) Self {
-            const keep = self.below_mask(bound);
             var difference: [limbs]V = undefined;
             var borrow: V = @splat(0);
             inline for (0..limbs) |k| {
@@ -172,6 +171,8 @@ pub fn Lanes(comptime backend: Backend) type {
                 difference[k] = value & mask();
                 borrow = value >> @splat(63);
             }
+            // A final borrow means the lane was below `bound` (as `below_mask` finds).
+            const keep = borrow == @as(V, @splat(1));
             var out: Self = undefined;
             inline for (0..limbs) |k| {
                 out.rows[k] = @select(u64, keep, self.rows[k], difference[k]);
@@ -183,7 +184,7 @@ pub fn Lanes(comptime backend: Backend) type {
             var sum: [limbs]V = undefined;
             inline for (0..limbs) |k| sum[k] = a.rows[k] + b.rows[k];
             const result = carry(sum).subtract_if_above(two_p_limbs);
-            assert(result.below(two_p_limbs));
+            if (std.debug.runtime_safety) assert(result.below(two_p_limbs));
             return result;
         }
 
@@ -197,9 +198,9 @@ pub fn Lanes(comptime backend: Backend) type {
                 // An arithmetic shift carries a negative limb as a borrow.
                 c = @bitCast(@as(@Vector(lanes, i64), @bitCast(value)) >> @splat(52));
             }
-            assert(@reduce(.Or, c) == 0);
+            if (std.debug.runtime_safety) assert(@reduce(.Or, c) == 0);
             const result = (Self{ .rows = out }).subtract_if_above(two_p_limbs);
-            assert(result.below(two_p_limbs));
+            if (std.debug.runtime_safety) assert(result.below(two_p_limbs));
             return result;
         }
 

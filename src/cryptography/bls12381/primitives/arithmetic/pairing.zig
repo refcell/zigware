@@ -13,6 +13,8 @@ const fields = @import("fields.zig");
 const g1 = @import("g1.zig");
 const g2 = @import("g2.zig");
 const Prng = @import("prng.zig").Prng;
+const fp8 = @import("fp8.zig");
+const fp12_lanes = @import("fp12_lanes.zig");
 
 const Fp2 = fields.Fp2;
 const Fp12 = fields.Fp12;
@@ -218,8 +220,59 @@ fn frobenius_power(f: Fp12, comptime power: u32) Fp12 {
     return result;
 }
 
-/// f^((p^12 - 1) / r).
+/// f^((p^12 - 1) / r). On a target with AVX-512 IFMA the hard part runs on fp8's lanes
+/// (`final_exponentiation_lanes`); the result is the same.
 pub fn final_exponentiation(f: Fp12) Fp12 {
+    if (comptime fp8.ifma_available) return final_exponentiation_lanes(fp8.Lanes(.ifma), f);
+    return final_exponentiation_scalar(f);
+}
+
+/// The easy part f^((p^6 - 1)(p^2 + 1)), which lands in the cyclotomic subgroup.
+fn easy_part(f: Fp12) Fp12 {
+    assert(!f.is_zero());
+    const t = f.conjugate().mul(f.inverse());
+    return frobenius_power(t, 2).mul(t);
+}
+
+/// `final_exponentiation_scalar` with the hard part's cyclotomic squarings and products on
+/// lanes of `L` (an `fp8.Lanes`); frobenius maps run on Fp12 between them.
+fn final_exponentiation_lanes(comptime L: type, f: Fp12) Fp12 {
+    const F = fp12_lanes.Fp12Lanes(L);
+    const t2 = F.from_fp12(easy_part(f));
+    var t1 = t2.cyclotomic_square().conjugate();
+    const t3 = cyclotomic_exp_by_x_lanes(F, t2);
+    var t4 = t3.cyclotomic_square();
+    var t5 = t1.mul(t3);
+    t1 = cyclotomic_exp_by_x_lanes(F, t5);
+    const t0 = cyclotomic_exp_by_x_lanes(F, t1);
+    const t6 = cyclotomic_exp_by_x_lanes(F, t0).mul(t4);
+    t4 = cyclotomic_exp_by_x_lanes(F, t6);
+    t5 = t5.conjugate();
+    t4 = t4.mul(t5.mul(t2));
+    t5 = t2.conjugate();
+    const frob1 = F.from_fp12(frobenius_power(t1.mul(t2).to_fp12(), 3));
+    const frob6 = F.from_fp12(t6.mul(t5).to_fp12().frobenius());
+    const frob3 = F.from_fp12(frobenius_power(t3.mul(t0).to_fp12(), 2)).mul(frob1).mul(frob6);
+    const result = frob3.mul(t4).to_fp12();
+    assert(!result.is_zero());
+    return result;
+}
+
+/// `cyclotomic_exp_by_x` on lanes of `F` (an `fp12_lanes.Fp12Lanes`).
+fn cyclotomic_exp_by_x_lanes(comptime F: type, f: F) F {
+    var result = f;
+    // |x| has its top bit set: start from f and walk the bits below it.
+    comptime assert(x_abs >> 63 == 1);
+    var bit: u32 = 63;
+    while (bit > 0) {
+        bit -= 1;
+        result = result.cyclotomic_square();
+        if ((x_abs >> @intCast(bit)) & 1 == 1) result = result.mul(f);
+    }
+    return result.conjugate();
+}
+
+fn final_exponentiation_scalar(f: Fp12) Fp12 {
     assert(!f.is_zero());
     // Easy part: f^((p^6 - 1)(p^2 + 1)).
     var t2 = f.conjugate().mul(f.inverse());
@@ -275,6 +328,20 @@ fn fp12_pow(base: Fp12, exponent: u256) Fp12 {
         if ((exponent >> @intCast(bit)) & 1 == 1) result = result.mul(base);
     }
     return result;
+}
+
+test {
+    _ = fp12_lanes;
+}
+
+test "pairing: the final exponentiation on lanes matches the scalar one" {
+    var prng = Prng.init(0x66696e);
+    for (0..4) |_| {
+        const f = fields.random_fp12(&prng);
+        const want = final_exponentiation_scalar(f);
+        try testing.expect(final_exponentiation_lanes(fp8.Lanes(.portable), f).eql(want));
+        try testing.expect(final_exponentiation(f).eql(want));
+    }
 }
 
 test "pairing: prepared G2 lines match the plain Miller loop" {
