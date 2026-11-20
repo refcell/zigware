@@ -57,6 +57,21 @@ pub fn SyncState(comptime S: type, comptime C: type) type {
             };
         }
 
+        /// commonware's `SyncState::arbitrary`: an arbitrary bool picks a floor in progress
+        /// (true) or a completion height.
+        pub fn arbitrary(
+            gpa: Allocator,
+            u: *codec.arbitrary.Unstructured,
+        ) codec.arbitrary.Error!Self {
+            const in_progress = u.boolean();
+            const state: Self = if (in_progress)
+                .{ .in_progress = try Finalization.arbitrary(gpa, u) }
+            else
+                .{ .complete = try codec.arbitrary.value(Height, gpa, u) };
+            assert((state == .in_progress) == in_progress);
+            return state;
+        }
+
         pub fn deinit(self: *Self, gpa: Allocator) void {
             switch (self.*) {
                 .in_progress => |*finalization| finalization.deinit(gpa),

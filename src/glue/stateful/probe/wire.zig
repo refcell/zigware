@@ -18,6 +18,15 @@ pub const Tag = enum(u8) {
     request = 0,
     /// A response carrying a finalization.
     response = 1,
+
+    const count = 2;
+
+    /// arbitrary 1.4's derive: `(u64::from(u32) * variants) >> 32`.
+    pub fn arbitrary(_: Allocator, u: *codec.arbitrary.Unstructured) codec.arbitrary.Error!Tag {
+        const variant = (@as(u64, u.int(u32)) * count) >> 32;
+        assert(variant < count);
+        return @fromBackingInt(@intCast(variant));
+    }
 };
 
 /// A message exchanged over the probe channel, for scheme `S` and marshal variant `V`
@@ -61,6 +70,20 @@ pub fn Message(comptime S: type, comptime V: type) type {
                 },
                 else => error.InvalidEnum,
             };
+        }
+
+        /// commonware's `Message::arbitrary`: an arbitrary `Tag`, then a response's finalization.
+        pub fn arbitrary(
+            gpa: Allocator,
+            u: *codec.arbitrary.Unstructured,
+        ) codec.arbitrary.Error!Self {
+            const tag = try Tag.arbitrary(gpa, u);
+            const message: Self = switch (tag) {
+                .request => .request,
+                .response => .{ .response = try Finalization.arbitrary(gpa, u) },
+            };
+            assert(std.meta.activeTag(message) == tag);
+            return message;
         }
 
         pub fn deinit(self: *Self, gpa: Allocator) void {
