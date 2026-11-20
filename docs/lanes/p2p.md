@@ -847,6 +847,10 @@ Patch 2 is the fix: the sender yields when a send is not accepted.
 ```
 
 ## Log
+- 2026-11-20: secp256r1 verify, from crypto's long list (2.35× in its sweep, 2.80× here):
+  an aws-lc-shaped verify plus `mulx`/`adx` field multiplication in
+  `cryptography/secp256r1/{verify,field}.zig` takes it to 1.01× commonware (0.80× recoverable;
+  docs/BENCHMARKS.md). Results stay identical to std's.
 - 2026-11-19: end-to-end flood comparison (4 local peers, `etc/scripts/flood-compare.py`,
   docs/BENCHMARKS.md). zigware reaches the quota cap at every rate commonware does, up to
   131072 msg/s per peer, with 5 to 10 times lower mean latency. Where commonware saturates

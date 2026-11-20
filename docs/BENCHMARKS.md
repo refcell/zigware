@@ -591,6 +591,43 @@ benches ran on tmpfs, so per-run ratios swing: `merkle::append` mmr ran 0.91×, 
   0.37× to 0.98×. Before 5c5d48cd, `bmt::proof` (about 40 ns) and `bmt::multi_proof` read
   1.8× and 2.9×: the clock read per iteration dominated.
 
+## secp256r1: signature verification (2026-11-20, p2p lane)
+
+commonware verifies P-256 signatures with aws-lc, and zigware verified them with std's
+`mulDoubleBasePublic`. Same method as above: best of three alternating runs, commonware
+`a9ffc25f3`. "Before" is main at `91c3b6f4`; "after" adds `add57d98` (an aws-lc-shaped
+verify), `2de33dbe` (`mulx`/`adx` field multiplication), and `bdedcab4` (products in registers,
+u256 addition). The 1-minute load average was 60 to 73 before and 70 to 80 after, and
+commonware's own best moved from 47 to 69 µs between runs; at commonware's best seen in any
+run (47 µs), the after row is 1.24×.
+
+| bench | parameters | commonware | zigware before | commonware | zigware after | after / commonware |
+|---|---|---|---|---|---|---|
+| `secp256r1::signature_verification` | `variant=standard` | 68.6 µs | 192 µs (2.80×) | 57.8 µs | 58.5 µs | 1.01× |
+| `secp256r1::signature_verification` | `variant=recoverable` | 270 µs | 213 µs (0.79×) | 221 µs | 178 µs | 0.80× |
+
+Components by thread CPU time in scratch harnesses, best of ten (load about 60):
+- **Before.** One verify was about 155 µs of thread CPU: `mulDoubleBasePublic` 125 to 130 µs
+  (256 doublings and about 128 additions, all complete projective formulas), the scalar
+  inverse 15 µs (std's constant-time divsteps), and `affineCoordinates` 14 µs. Decompressing
+  the key (19 µs) happens once, in `PublicKey.from_bytes`.
+- **verify.zig** (`add57d98`) does what aws-lc does: one shared chain of a = -3 Jacobian
+  doublings; `G` from a width-8 wNAF over a comptime table of 64 affine odd multiples (mixed
+  additions), `Q` from a width-5 wNAF over 8 Jacobian multiples; `x(R) = r` checked as
+  `X = r Z^2` (and `(r + n) Z^2`), with no inversion. Public keys keep affine coordinates. 84 µs.
+- **field.zig** (`2de33dbe`, `bdedcab4`): std's fiat-crypto multiplication is portable code
+  (15.6 ns per dependent multiply). On x86_64 with BMI2 and ADX the multiply is aws-lc's
+  `mulx` with `adcx`/`adox` chains and shift reductions, returning limbs in registers: 10.5 ns.
+  Addition and subtraction are u256 arithmetic, about half std's time. A dedicated squaring
+  (aws-lc's `sqr_mont`) measured slower, so squaring is a multiply. The scalar inverse is a
+  variable-time binary extended GCD (2 µs; `s` is public). 39 to 41 µs per verify, against
+  110 to 120 µs for std's path in the same run.
+
+Every routine returns std's limbs exactly (tests check edges and random inputs against std,
+and a fuzz checks verify against std's `mulDoubleBasePublic`); signatures, encodings, and the
+conformance hashes are unchanged. Recoverable verification still recovers the key through
+std's `mulDoubleBasePublic`; it is already 0.80×, so it was left alone.
+
 ## Actor: mailbox (2026-11-19, actor-stream lane)
 
 All ten cases of commonware's `mailbox` bench, with bench-compare.sh's settings (warm-up 1 s,
