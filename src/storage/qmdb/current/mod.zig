@@ -27,6 +27,7 @@ pub const sync = @import("sync.zig");
 test {
     _ = @import("canonical_test.zig");
     _ = @import("db_test.zig");
+    _ = @import("storage_conformance_test.zig");
     _ = @import("batch_root_fuzz_test.zig");
     _ = @import("operations_fuzz_test.zig");
     _ = @import("prune_grow_fuzz_test.zig");
