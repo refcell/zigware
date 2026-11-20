@@ -179,6 +179,10 @@ Read this whole file before you change anything. These rules are not optional.
   cancel then makes the next `checkCancel` pass (the macOS "destroying a pool in a canceled
   task" failure, d301a875). Tests that free after a cancel use an allocator without stack
   traces.
+- `std.Io.Threaded`'s `io.async` runs the function inline on the caller once `async_limit`
+  (cpu_count − 1 by default) tasks are running. Code that must not run the work on the
+  caller, because the caller later opens a gate the task waits on, uses `io.concurrent` and
+  handles `ConcurrentError` (utils' Pool.push deadlocked on 3 pinned cores, f8a39e1a).
 - The build runner prints `run test test-X stderr` and a `failed command: ...` line for any
   test step that wrote to stderr, even when every test in it passed. That alone is not a
   failure: look for a step line with `fail`, `crash`, `timeout`, or `leaks`, an `error:`
