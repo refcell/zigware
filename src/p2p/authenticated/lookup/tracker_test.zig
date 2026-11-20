@@ -89,9 +89,12 @@ fn killed(outbox: *Outbox) bool {
 fn run(comptime function: anytype, args: anytype) !void {
     const timeout_ns = 600 * std.time.ns_per_s;
     const config: runtime.deterministic.Config = .{ .seed = 0, .timeout_ns = timeout_ns };
-    var runner = try runtime.deterministic.Runner.init(gpa, config);
-    defer runner.deinit();
-    try (try runner.start(function, .{runner.io()} ++ args));
+    const Args = @TypeOf(args);
+    try runtime.deterministic.soak(gpa, config, args, struct {
+        fn run(context: Args, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start(function, .{runner.io()} ++ context));
+        }
+    }.run);
 }
 
 /// A tracker with its unblock timer running, stopped and freed by `stop`.

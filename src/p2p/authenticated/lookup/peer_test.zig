@@ -237,11 +237,12 @@ test "an oversized payload fails to decode and ends the connection" {
 }
 
 fn run(comptime function: fn (Io) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{
-        .timeout_ns = 120 * std.time.ns_per_s,
-    });
-    defer runner.deinit();
-    try (try runner.start(function, .{runner.io()}));
+    const config: runtime.deterministic.Config = .{ .timeout_ns = 120 * std.time.ns_per_s };
+    try runtime.deterministic.soak(gpa, config, {}, struct {
+        fn run(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start(function, .{runner.io()}));
+        }
+    }.run);
 }
 
 test "two kills into a full one-slot mailbox leave one kill and nothing after" {

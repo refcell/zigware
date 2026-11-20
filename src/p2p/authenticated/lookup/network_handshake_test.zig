@@ -555,8 +555,11 @@ fn run_timed(seed: u64, comptime function: anytype, args: anytype) !void {
         .seed = seed,
         .timeout_ns = 10 * std.time.ns_per_s,
     };
-    var runner = try runtime.deterministic.Runner.init(gpa, config);
-    defer runner.deinit();
-    const args_all = .{ runner.io(), runner.network(), runner.metrics() } ++ args;
-    try (try runner.start(function, args_all));
+    const Args = @TypeOf(args);
+    try runtime.deterministic.soak(gpa, config, args, struct {
+        fn run(context: Args, runner: *runtime.deterministic.Runner) anyerror!void {
+            const args_all = .{ runner.io(), runner.network(), runner.metrics() } ++ context;
+            try (try runner.start(function, args_all));
+        }
+    }.run);
 }

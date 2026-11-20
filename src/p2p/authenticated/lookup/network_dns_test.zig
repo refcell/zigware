@@ -29,10 +29,14 @@ const max_message_size: u32 = 1024 * 1024;
 fn run_with_dns(seed: u64, timeout_s: u64, comptime function: anytype, args: anytype) !void {
     const timeout_ns = timeout_s * std.time.ns_per_s;
     const config: runtime.deterministic.Config = .{ .seed = seed, .timeout_ns = timeout_ns };
-    var runner = try runtime.deterministic.Runner.init(gpa, config);
-    defer runner.deinit();
-    const args_all = .{ runner.io(), runner.network(), runner.metrics(), &runner.dns } ++ args;
-    try (try runner.start(function, args_all));
+    const Args = @TypeOf(args);
+    try runtime.deterministic.soak(gpa, config, args, struct {
+        fn run(context: Args, runner: *runtime.deterministic.Runner) anyerror!void {
+            const io = runner.io();
+            const args_all = .{ io, runner.network(), runner.metrics(), &runner.dns } ++ context;
+            try (try runner.start(function, args_all));
+        }
+    }.run);
 }
 
 fn key(seed: u64) PublicKey {

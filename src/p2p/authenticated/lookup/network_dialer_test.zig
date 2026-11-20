@@ -156,10 +156,12 @@ test "a dial whose handshake never completes releases its reservation" {
 }
 
 fn run(comptime function: anytype, args: anytype) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{
-        .timeout_ns = 10 * std.time.ns_per_s,
-    });
-    defer runner.deinit();
-    const args_all = .{ runner.io(), runner.network(), runner.metrics() } ++ args;
-    try (try runner.start(function, args_all));
+    const config: runtime.deterministic.Config = .{ .timeout_ns = 10 * std.time.ns_per_s };
+    const Args = @TypeOf(args);
+    try runtime.deterministic.soak(gpa, config, args, struct {
+        fn run(context: Args, runner: *runtime.deterministic.Runner) anyerror!void {
+            const args_all = .{ runner.io(), runner.network(), runner.metrics() } ++ context;
+            try (try runner.start(function, args_all));
+        }
+    }.run);
 }
