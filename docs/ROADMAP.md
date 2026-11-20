@@ -28,7 +28,7 @@ and started when what they build on had landed (or could be stubbed behind an in
 | 3 | consensus-marshal | consensus: aggregation, marshal | done (marshal tally: 196/197 standard with 1 not portable, 0 in progress, 101/101 coding) |
 | 3 | deployer | deployer | done |
 | 3 | curve25519 | cryptography/curve25519 | done |
-| 4 | glue | glue: simulate, transfers, stateful, dkg | in progress (stateful: stable leaders; simulate and dkg done) |
+| 4 | glue | glue: simulate, transfers, stateful, dkg | done (all 26 stateful e2e tests under rotating and stable leaders, 25a36f3e) |
 | 4 | examples-dkg | examples/dkg | done |
 
 Status is the lane file's backlog: "done" means every backlog item is ticked. Each lane file

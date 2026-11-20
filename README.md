@@ -115,7 +115,7 @@ it, and every recorded difference from commonware.
 | [coding](src/coding) | Erasure-code data for recovery from fragments | ported |
 | [clearing](src/clearing) | Settle actions at scale | ported |
 | [consensus](src/consensus) | Order messages in a Byzantine environment (simplex, aggregation, marshal) | ported |
-| [glue](src/glue) | Default constructions spanning several primitives | porting |
+| [glue](src/glue) | Default constructions spanning several primitives | ported |
 | [deployer](src/deployer) | Deploy infrastructure across cloud providers | ported |
 
 Support packages: [formatting](src/formatting), [conformance](src/conformance),
