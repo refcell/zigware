@@ -105,7 +105,7 @@ fn KeyOf(comptime C: type) type {
 fn small_order(cache: anytype) ![]usize {
     var order: std.ArrayList(usize) = .empty;
     errdefer order.deinit(gpa);
-    var current = cache.small.head;
+    var current = cache_mod.linked(cache.small.head);
     while (current) |slot| : (current = linked(cache.topology[slot].next)) {
         try order.append(gpa, slot);
         try expect(order.items.len <= cache.capacity);
@@ -117,7 +117,7 @@ fn small_order(cache: anytype) ![]usize {
 fn main_order(cache: anytype) ![]usize {
     var order: std.ArrayList(usize) = .empty;
     errdefer order.deinit(gpa);
-    const hand = cache.main.hand orelse return order.toOwnedSlice(gpa);
+    const hand = cache_mod.linked(cache.main.hand) orelse return order.toOwnedSlice(gpa);
     var current = hand;
     while (true) {
         try order.append(gpa, current);
@@ -133,7 +133,7 @@ fn main_order(cache: anytype) ![]usize {
 fn ghost_order(ghost: anytype) ![]usize {
     var order: std.ArrayList(usize) = .empty;
     errdefer order.deinit(gpa);
-    var current = ghost.head;
+    var current = cache_mod.linked(ghost.head);
     while (current) |slot| : (current = linked(ghost.slots.items[slot].next)) {
         try order.append(gpa, slot);
         try expect(order.items.len <= ghost.capacity);
@@ -252,7 +252,7 @@ fn check_small(cache: anytype, resident: *BitSet) !void {
     const small = try small_order(cache);
     defer gpa.free(small);
     try expectEqual(cache.small.len, small.len);
-    const young_len: usize = if (cache.small.young_tail) |tail|
+    const young_len: usize = if (cache_mod.linked(cache.small.young_tail)) |tail|
         (std.mem.indexOfScalar(usize, small, tail) orelse return error.TestUnexpectedResult) + 1
     else
         0;
@@ -283,9 +283,9 @@ fn check_small(cache: anytype, resident: *BitSet) !void {
     const head: ?usize = if (small.len > 0) small[0] else null;
     const tail: ?usize = if (small.len > 0) small[small.len - 1] else null;
     const young_tail: ?usize = if (young_len > 0) small[young_len - 1] else null;
-    try expectEqual(head, cache.small.head);
-    try expectEqual(tail, cache.small.tail);
-    try expectEqual(young_tail, cache.small.young_tail);
+    try expectEqual(head, cache_mod.linked(cache.small.head));
+    try expectEqual(tail, cache_mod.linked(cache.small.tail));
+    try expectEqual(young_tail, cache_mod.linked(cache.small.young_tail));
 }
 
 fn check_main(cache: anytype, resident: *BitSet) !void {
@@ -316,7 +316,7 @@ fn check_ghost(cache: anytype) !void {
 
     var free = try BitSet.initEmpty(gpa, ghost.capacity);
     defer free.deinit(gpa);
-    var current = ghost.free_head;
+    var current = cache_mod.linked(ghost.free_head);
     while (current) |slot| : (current = linked(ghost.slots.items[slot].next)) {
         try expect(!free.isSet(slot));
         free.set(slot);
@@ -340,8 +340,8 @@ fn check_ghost(cache: anytype) !void {
     }
     const head: ?usize = if (order.len > 0) order[0] else null;
     const tail: ?usize = if (order.len > 0) order[order.len - 1] else null;
-    try expectEqual(head, ghost.head);
-    try expectEqual(tail, ghost.tail);
+    try expectEqual(head, cache_mod.linked(ghost.head));
+    try expectEqual(tail, cache_mod.linked(ghost.tail));
     for (ghost.slots.items, 0..) |entry, slot| {
         try expectEqual(seen.isSet(slot), entry.key != null);
         try expectEqual(free.isSet(slot), entry.key == null);
@@ -974,7 +974,7 @@ test "cache: correlation age survives an admission counter wrap" {
     try expectEqual(@as(?u64, 1), value_of(u64, wrapped.get(1)));
     try expect(wrapped.remove(4));
     try expect(wrapped.remove(3));
-    try expectEqual(@as(?usize, null), wrapped.small.young_tail);
+    try expectEqual(@as(?usize, null), cache_mod.linked(wrapped.small.young_tail));
     for (0..8) |cycle| {
         const first = 41 + 2 * cycle;
         const second = first + 1;
@@ -982,12 +982,12 @@ test "cache: correlation age survives an admission counter wrap" {
         _ = wrapped.put(first, first);
         const young_tail = slot_of(&wrapped, first);
         _ = wrapped.put(second, second);
-        try expectEqual(young_tail, wrapped.small.young_tail);
+        try expectEqual(young_tail, cache_mod.linked(wrapped.small.young_tail));
         try check_invariants(&wrapped);
         if (cycle < 7) {
             try expect(wrapped.remove(second));
             try expect(wrapped.remove(first));
-            try expectEqual(@as(?usize, null), wrapped.small.young_tail);
+            try expectEqual(@as(?usize, null), cache_mod.linked(wrapped.small.young_tail));
         }
     }
     _ = wrapped.put(57, 57);
@@ -1070,9 +1070,9 @@ fn expect_ghost(ghost: anytype, expected: []const u64) !void {
         try expectEqual(@as(?usize, slot), ghost.find(entry.key.?, 0));
         previous = slot;
     }
-    try expectEqual(previous, ghost.tail);
+    try expectEqual(previous, cache_mod.linked(ghost.tail));
     var free: usize = 0;
-    var current = ghost.free_head;
+    var current = cache_mod.linked(ghost.free_head);
     while (current) |slot| : (current = linked(ghost.slots.items[slot].next)) {
         try expect(ghost.slots.items[slot].key == null);
         free += 1;

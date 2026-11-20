@@ -48,10 +48,6 @@ pub fn linked(slot: usize) ?usize {
     return if (slot == UNLINKED) null else slot;
 }
 
-fn unlinked(slot: ?usize) usize {
-    return slot orelse UNLINKED;
-}
-
 fn has_decl(comptime T: type, comptime name: []const u8) bool {
     return switch (@typeInfo(T)) {
         .@"struct", .@"union", .@"enum", .@"opaque" => @hasDecl(T, name),
@@ -203,11 +199,13 @@ pub const SmallQueue = struct {
     /// Admission age at which a resident leaves the correlation window.
     correlation_window: usize,
     /// Newest Small resident.
-    head: ?usize = null,
+    /// Endpoints are `UNLINKED` when absent: an optional `usize` is 16 bytes, and its padding
+    /// stores blocked store-to-load forwarding on every put (5.5 blocks per put on Zen 5).
+    head: usize = UNLINKED,
     /// Oldest Small resident.
-    tail: ?usize = null,
+    tail: usize = UNLINKED,
     /// Oldest resident still inside the correlation window.
-    young_tail: ?usize = null,
+    young_tail: usize = UNLINKED,
     /// Modular count of Small admissions, including removed entries.
     admissions: usize = 0,
     len: usize = 0,
@@ -224,16 +222,16 @@ pub const SmallQueue = struct {
         const entry = &slots[slot];
         assert(entry.has_location(.free));
         entry.prev = UNLINKED;
-        entry.next = unlinked(old_head);
+        entry.next = old_head;
         entry.location_and_admission = Location.small.pack(small.admissions);
-        if (old_head) |head| slots[head].prev = slot else small.tail = slot;
+        if (old_head != UNLINKED) slots[old_head].prev = slot else small.tail = slot;
         small.head = slot;
         small.len += 1;
         assert(small.len <= small.capacity);
 
         // Only the oldest correlated survivor can leave the window after one new admission.
-        if (small.young_tail == null) small.young_tail = slot;
-        const demoted = small.young_tail.?;
+        if (small.young_tail == UNLINKED) small.young_tail = slot;
+        const demoted = small.young_tail;
         const age = (small.admissions -% slots[demoted].admitted_at()) & ADMISSION_GENERATION_MASK;
         if (age < small.correlation_window) return;
         const boundary = slots[demoted].prev;
@@ -249,12 +247,12 @@ pub const SmallQueue = struct {
         assert(slots[slot].has_location(.small));
         const prev = slots[slot].prev;
         const next = slots[slot].next;
-        if (prev != UNLINKED) slots[prev].next = next else small.head = linked(next);
-        if (next != UNLINKED) slots[next].prev = prev else small.tail = linked(prev);
+        if (prev != UNLINKED) slots[prev].next = next else small.head = next;
+        if (next != UNLINKED) slots[next].prev = prev else small.tail = prev;
         assert(small.len > 0);
         small.len -= 1;
         // Removing the boundary shrinks the window without making older residents young.
-        if (small.young_tail == slot) small.young_tail = linked(prev);
+        if (small.young_tail == slot) small.young_tail = prev;
         slots[slot] = .{};
     }
 
@@ -267,14 +265,16 @@ pub const SmallQueue = struct {
 pub const MainRing = struct {
     capacity: usize,
     /// Next resident considered for eviction.
-    hand: ?usize = null,
+    /// `UNLINKED` when Main is empty.
+    hand: usize = UNLINKED,
     len: usize = 0,
 
     /// Sweeps the hand to the first unreferenced resident, consuming reference bits.
     fn select(main: *MainRing, entries: anytype, slots: []const ResidentSlot) usize {
         // Each referenced resident passed loses its bit, so a full turn finds a victim.
         for (0..main.len + 1) |_| {
-            const slot = main.hand.?;
+            const slot = main.hand;
+            assert(slot != UNLINKED);
             if (!entries[slot].state.take_reference()) return slot;
             main.hand = slots[slot].next;
         }
@@ -287,12 +287,13 @@ pub const MainRing = struct {
     fn push(main: *MainRing, slots: []ResidentSlot, slot: usize) void {
         assert(main.len < main.capacity);
         assert(slots[slot].has_location(.free));
-        const hand = main.hand orelse {
+        const hand = main.hand;
+        if (hand == UNLINKED) {
             slots[slot] = .{ .prev = slot, .next = slot, .location_and_admission = main_tag };
             main.hand = slot;
             main.len = 1;
             return;
-        };
+        }
         const prev = slots[hand].prev;
         assert(prev != UNLINKED);
         slots[slot] = .{ .prev = prev, .next = hand, .location_and_admission = main_tag };
@@ -306,7 +307,7 @@ pub const MainRing = struct {
         assert(slots[slot].has_location(.main));
         if (main.len == 1) {
             assert(main.hand == slot);
-            main.hand = null;
+            main.hand = UNLINKED;
             main.len = 0;
         } else {
             const prev = slots[slot].prev;
@@ -321,7 +322,7 @@ pub const MainRing = struct {
     }
 
     fn clear(main: *MainRing) void {
-        main.hand = null;
+        main.hand = UNLINKED;
         main.len = 0;
     }
 };
@@ -335,11 +336,12 @@ pub fn GhostQueue(comptime K: type) type {
         index: handles.Table(usize),
         slots: std.ArrayList(Slot),
         /// First detached position, linked through `Slot.next`.
-        free_head: ?usize = null,
+        /// Endpoints are `UNLINKED` when absent, as `SmallQueue`'s.
+        free_head: usize = UNLINKED,
         /// Newest historical entry.
-        head: ?usize = null,
+        head: usize = UNLINKED,
         /// Oldest historical entry.
-        tail: ?usize = null,
+        tail: usize = UNLINKED,
         capacity: usize,
 
         pub const Slot = struct {
@@ -374,9 +376,10 @@ pub fn GhostQueue(comptime K: type) type {
         pub fn push(ghost: *Self, key: K, hash: u64) void {
             if (ghost.capacity == 0) return discard(K, key);
             var displaced: ?K = null;
-            const slot = if (ghost.free_head) |slot| slot: {
-                ghost.free_head = linked(ghost.slots.items[slot].next);
-                break :slot slot;
+            const slot = if (ghost.free_head != UNLINKED) slot: {
+                const free = ghost.free_head;
+                ghost.free_head = ghost.slots.items[free].next;
+                break :slot free;
             } else if (ghost.slots.items.len < ghost.capacity) slot: {
                 ghost.slots.appendAssumeCapacity(.{
                     .key = null,
@@ -385,7 +388,8 @@ pub fn GhostQueue(comptime K: type) type {
                 });
                 break :slot ghost.slots.items.len - 1;
             } else slot: {
-                const oldest = ghost.tail.?;
+                const oldest = ghost.tail;
+                assert(oldest != UNLINKED);
                 const historical = ghost.slots.items[oldest].key.?;
                 assert(ghost.index.remove(key_hash(K, historical), oldest));
                 displaced = ghost.unlink(oldest);
@@ -394,8 +398,10 @@ pub fn GhostQueue(comptime K: type) type {
             const old_head = ghost.head;
             const entry = &ghost.slots.items[slot];
             assert(entry.key == null);
-            entry.* = .{ .key = key, .prev = UNLINKED, .next = unlinked(old_head) };
-            if (old_head) |head| ghost.slots.items[head].prev = slot else ghost.tail = slot;
+            entry.* = .{ .key = key, .prev = UNLINKED, .next = old_head };
+            if (old_head != UNLINKED) {
+                ghost.slots.items[old_head].prev = slot;
+            } else ghost.tail = slot;
             ghost.head = slot;
             ghost.index.insert_assume_capacity(hash, slot);
             if (displaced) |historical| discard(K, historical);
@@ -414,7 +420,7 @@ pub fn GhostQueue(comptime K: type) type {
             const slot = ghost.find(key, hash) orelse return false;
             assert(ghost.index.remove(hash, slot));
             const historical = ghost.unlink(slot);
-            ghost.slots.items[slot].next = unlinked(ghost.free_head);
+            ghost.slots.items[slot].next = ghost.free_head;
             ghost.free_head = slot;
             discard(K, historical);
             return true;
@@ -425,8 +431,8 @@ pub fn GhostQueue(comptime K: type) type {
             const slots = ghost.slots.items;
             const prev = slots[slot].prev;
             const next = slots[slot].next;
-            if (prev != UNLINKED) slots[prev].next = next else ghost.head = linked(next);
-            if (next != UNLINKED) slots[next].prev = prev else ghost.tail = linked(prev);
+            if (prev != UNLINKED) slots[prev].next = next else ghost.head = next;
+            if (next != UNLINKED) slots[next].prev = prev else ghost.tail = prev;
             const key = slots[slot].key.?;
             slots[slot] = .{ .key = null, .prev = UNLINKED, .next = UNLINKED };
             return key;
@@ -436,9 +442,9 @@ pub fn GhostQueue(comptime K: type) type {
             for (ghost.slots.items) |slot| if (slot.key) |key| discard(K, key);
             ghost.index.clear();
             ghost.slots.clearRetainingCapacity();
-            ghost.free_head = null;
-            ghost.head = null;
-            ghost.tail = null;
+            ghost.free_head = UNLINKED;
+            ghost.head = UNLINKED;
+            ghost.tail = UNLINKED;
         }
     };
 }
@@ -783,7 +789,8 @@ pub fn Cache(comptime K: type, comptime V: type) type {
             switch (admission) {
                 .small => {
                     if (has_vacancy) return .vacant;
-                    const tail = self.small.tail.?; // A full cache has a Small tail.
+                    const tail = self.small.tail; // A full cache has a Small tail.
+                    assert(tail != UNLINKED);
                     if (!self.slots.items[tail].state.earned_promotion()) {
                         return .{ .evict = tail };
                     }
