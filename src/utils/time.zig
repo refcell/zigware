@@ -169,6 +169,9 @@ fn trim_whitespace(input: []const u8) []const u8 {
         // Find the start of the last code point (at most four bytes back).
         var begin = end - 1;
         while (begin > start and end - begin < 4 and input[begin] & 0xC0 == 0x80) begin -= 1;
+        // `utf8Decode` asserts the slice is one whole sequence, so a truncated one ends here.
+        const len = std.unicode.utf8ByteSequenceLength(input[begin]) catch break;
+        if (begin + len != end) break;
         const codepoint = std.unicode.utf8Decode(input[begin..end]) catch break;
         if (!is_whitespace(codepoint)) break;
         end = begin;
@@ -499,6 +502,15 @@ test "time: parse rejected forms" {
         "30S",       "500MS",    "2H",        "1_000s", "ms",     "s",   "+s",
     };
     for (rejected) |input| try testing.expect(std.meta.isError(Duration.parse(input)));
+}
+
+test "time: parse rejects a truncated UTF-8 sequence at either end" {
+    // A coverage-fuzz input: trimming decoded a 3-byte lead with one continuation byte as a
+    // 2-byte sequence and tripped `utf8Decode`'s assert.
+    const rejected = [_][]const u8{ "1s\xE2\x80", "1s\xF0\x9F\x98", "\xE2\x801s", "1s\x80" };
+    for (rejected) |input| try testing.expect(std.meta.isError(Duration.parse(input)));
+    // A whole multi-byte whitespace code point (U+3000) still trims.
+    try testing.expectEqual(Duration.from_secs(1), try Duration.parse("1s\xE3\x80\x80"));
 }
 
 test "time: parse overflow" {
