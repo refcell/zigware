@@ -140,8 +140,9 @@ setup, the commands, and the caveats). Below 1× means zigware is faster.
 | `qmdb::apply_batch` (16384 updates) | 0.97× |
 
 End to end, four local [flood](examples/flood) peers over authenticated p2p at
-262144 msg/s each: zigware receives 673–772k msg/s per peer at 23–80 ms mean latency,
-commonware 212–266k at 194–294 ms. Below saturation both hit the rate cap, and zigware's
+262144 msg/s each, both built for the native CPU: zigware receives 768–774k msg/s per peer
+at 8–10 ms mean latency, commonware 391–422k at 117–120 ms (1.87×, ahead in all 5 alternating
+rounds). Below saturation both hit the rate cap, and zigware's
 latency is lower at every rate ([details](docs/BENCHMARKS.md#end-to-end-flood-4-peers-2026-11-19-p2p-lane)).
 
 <p align="center">
