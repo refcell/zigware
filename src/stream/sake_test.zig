@@ -6,7 +6,6 @@ const testing = std.testing;
 const Io = std.Io;
 const codec = @import("codec");
 const cryptography = @import("cryptography");
-const build_options = @import("build_options");
 const runtime = @import("runtime");
 
 const stream = @import("root.zig");
@@ -41,25 +40,11 @@ const AdmitAll = struct {
 };
 
 fn run_deterministic(comptime function: anytype, args: anytype) !void {
-    for (0..build_options.fuzz_soak) |round| {
-        const config: runtime.deterministic.Config = .{
-            .seed = soak_seed(0, round),
-            .timeout_ns = 5 * std.time.ns_per_s,
-        };
-        var runner = try runtime.deterministic.Runner.init(gpa, config);
-        defer runner.deinit();
-        try (try runner.start(function, .{runner.io()} ++ args));
-    }
-}
-
-/// The `round`-th seed of a deterministic test whose unsoaked seed is `base`: `base` first, then
-/// `-Dfuzz-soak` rounds in all, spread by `-Dfuzz-seed`. Soaked rounds print their seed, so a
-/// failure names the seed to replay.
-fn soak_seed(base: u64, round: u64) u64 {
-    if (round == 0) return base;
-    const seed = base +% build_options.fuzz_seed *% 0x9e3779b97f4a7c15 +% round;
-    std.debug.print("dst: seed {d}\n", .{seed});
-    return seed;
+    try runtime.deterministic.soak(gpa, .{ .timeout_ns = 5 * std.time.ns_per_s }, args, struct {
+        fn run(context: @TypeOf(args), runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start(function, .{runner.io()} ++ context));
+        }
+    }.run);
 }
 
 fn Listened(comptime Sink: type) type {
@@ -475,13 +460,10 @@ fn over_network(io: Io, network: *runtime.network.deterministic.Network) !void {
 }
 
 test "SakeCups over the deterministic network" {
-    for (0..build_options.fuzz_soak) |round| {
-        const config: runtime.deterministic.Config = .{
-            .seed = soak_seed(0, round),
-            .timeout_ns = 5 * std.time.ns_per_s,
-        };
-        var runner = try runtime.deterministic.Runner.init(gpa, config);
-        defer runner.deinit();
-        try (try runner.start(over_network, .{ runner.io(), runner.network() }));
-    }
+    const config: runtime.deterministic.Config = .{ .timeout_ns = 5 * std.time.ns_per_s };
+    try runtime.deterministic.soak(gpa, config, {}, struct {
+        fn run(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start(over_network, .{ runner.io(), runner.network() }));
+        }
+    }.run);
 }

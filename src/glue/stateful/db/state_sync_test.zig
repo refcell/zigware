@@ -7,7 +7,6 @@
 //! in its own task and the tests sequence it with tip observers and release gates.
 
 const std = @import("std");
-const build_options = @import("build_options");
 const testing = std.testing;
 const cryptography = @import("cryptography");
 const runtime = @import("runtime");
@@ -1193,10 +1192,12 @@ fn lagging_sync(
 
 /// Runs `body` on a deterministic runtime that fails after 5 simulated seconds.
 fn run_deterministic(comptime body: fn (std.Io) anyerror!void) !void {
-    const timeout_ns = 5 * std.time.ns_per_s;
-    var runner = try runtime.deterministic.Runner.init(gpa, .{ .timeout_ns = timeout_ns });
-    defer runner.deinit();
-    try try runner.start(body, .{runner.io()});
+    const config: runtime.deterministic.Config = .{ .timeout_ns = 5 * std.time.ns_per_s };
+    try runtime.deterministic.soak(gpa, config, {}, struct {
+        fn run(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start(body, .{runner.io()});
+        }
+    }.run);
 }
 
 /// A lagging sync started and running, so the coordinator is parked before the test sends.
@@ -1293,42 +1294,24 @@ test "stateful state sync: a single sync adopts a queued tip before finishing" {
     try run_deterministic(adopts_queued_tip_before_finishing);
 }
 
-/// Runs `body` with every helper's `io` on a deterministic runner, which runs a reached
-/// report before the parked test continues, as commonware's deterministic runtime does.
-/// Runs `fuzz_soak` runner seeds from the runner's default (one, the default seed, in a
-/// plain `zig build test`), each mixed with `-Dfuzz-seed`; a failure prints its seed and the
-/// `-Dfuzz-seed` that replays it alone.
+/// Runs `body` with `io` on a deterministic runner, through `runtime.deterministic.soak`:
+/// `-Dfuzz-soak` runner seeds (one, the default seed, in a plain `zig build test`), and a
+/// failure prints the `-Dfuzz-seed` that replays it.
 fn run_on_deterministic(comptime body: fn () anyerror!void) !void {
-    const default_seed = (runtime.deterministic.Config{}).seed;
-    const seeds: u64 = build_options.fuzz_soak;
-    std.debug.assert(seeds > 0);
-    for (0..seeds) |index| {
-        const runner_seed = (default_seed + index) ^ build_options.fuzz_seed;
-        run_on_seed(body, runner_seed) catch |err| {
-            std.debug.print("deterministic runner seed={d} failed (replay: -Dfuzz-seed={d})\n", .{
-                runner_seed, runner_seed ^ default_seed,
-            });
-            return err;
-        };
-    }
-}
-
-fn run_on_seed(comptime body: fn () anyerror!void, runner_seed: u64) !void {
-    const config: runtime.deterministic.Config = .{
-        .timeout_ns = 5 * std.time.ns_per_s,
-        .seed = runner_seed,
-    };
-    var runner = try runtime.deterministic.Runner.init(gpa, config);
-    defer runner.deinit();
-    const threaded = io;
-    defer io = threaded;
-    io = runner.io();
-    try try runner.start(struct {
-        fn run(_: std.Io) anyerror!void {
-            try body();
+    const config: runtime.deterministic.Config = .{ .timeout_ns = 5 * std.time.ns_per_s };
+    try runtime.deterministic.soak(gpa, config, {}, struct {
+        fn run(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            const threaded = io;
+            defer io = threaded;
+            io = runner.io();
+            try try runner.start(struct {
+                fn run(_: std.Io) anyerror!void {
+                    try body();
+                }
+            }.run, .{runner.io()});
+            std.debug.assert(io.userdata == runner.io().userdata);
         }
-    }.run, .{runner.io()});
-    std.debug.assert(io.userdata == runner.io().userdata);
+    }.run);
 }
 
 test "stateful state sync: a tuple sync converges after evicted targets" {
