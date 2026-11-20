@@ -8,6 +8,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const zigware = @import("zigware");
+const ui = @import("ui");
 
 const Duration = zigware.utils.Duration;
 
@@ -44,25 +45,13 @@ pub const Lines = struct {
 };
 
 /// Rust `IntErrorKind`, printed as `ParseIntError { kind: ... }`.
-pub const ParseIntError = error{ Empty, InvalidDigit, PosOverflow };
+pub const ParseIntError = ui.rust.ParseIntError;
 
 /// Rust `FloatErrorKind`, printed as `ParseFloatError { kind: ... }`.
 pub const ParseFloatError = error{ Empty, Invalid };
 
 /// Rust `str::parse::<T>()` for an unsigned integer: an optional `+`, then decimal digits.
-pub fn parse_unsigned(comptime T: type, text: []const u8) ParseIntError!T {
-    comptime assert(@typeInfo(T).int.signedness == .unsigned);
-    if (text.len == 0) return error.Empty;
-    const digits = if (text[0] == '+' and text.len > 1) text[1..] else text;
-    assert(digits.len > 0);
-    var value: T = 0;
-    for (digits) |byte| {
-        if (byte < '0' or byte > '9') return error.InvalidDigit;
-        const shifted = std.math.mul(T, value, 10) catch return error.PosOverflow;
-        value = std.math.add(T, shifted, byte - '0') catch return error.PosOverflow;
-    }
-    return value;
-}
+pub const parse_unsigned = ui.rust.parse_unsigned;
 
 /// Rust `str::parse::<f64>()`: `[+-]` then `inf`, `infinity`, or `nan` (any case), or decimal
 /// digits with an optional fraction and exponent (`1.`, `.5`, `1e5`). Correctly rounded.
