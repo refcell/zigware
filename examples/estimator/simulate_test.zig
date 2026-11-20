@@ -21,21 +21,26 @@ const simulate = @import("simulate.zig");
 const Net = zigware.p2p.simulated.Network(simulate.Key);
 
 test "accepts_config" {
-    var runner = try zigware.runtime.deterministic.Runner.init(testing.allocator, .{});
-    defer runner.deinit();
-    const Root = struct {
-        fn run(io: std.Io) !void {
-            const network = try Net.init(testing.allocator, io, .{
-                .max_size = zigware.p2p.simulated.network.max_size_limit,
-                .max_peers_per_set = 1,
-                .disconnect_on_block = true,
-                .tracked_peer_sets = 1,
-            });
-            network.deinit();
+    const Runner = zigware.runtime.deterministic.Runner;
+    try zigware.runtime.deterministic.soak(testing.allocator, .{}, {}, struct {
+        fn round(_: void, runner: *Runner) anyerror!void {
+            try (try runner.start(AcceptsConfig.run, .{runner.io()}));
         }
-    };
-    try (try runner.start(Root.run, .{runner.io()}));
+    }.round);
 }
+
+/// Builds and frees a simulated network on the runner (commonware `accepts_config`).
+const AcceptsConfig = struct {
+    fn run(io: std.Io) !void {
+        const network = try Net.init(testing.allocator, io, .{
+            .max_size = zigware.p2p.simulated.network.max_size_limit,
+            .max_peers_per_set = 1,
+            .disconnect_on_block = true,
+            .tracked_peer_sets = 1,
+        });
+        network.deinit();
+    }
+};
 
 const Fixture = struct {
     distribution: lib.Distribution,

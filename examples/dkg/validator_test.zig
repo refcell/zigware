@@ -169,13 +169,17 @@ fn actor_completion_stops_validator(ctx: runtime.deterministic.Context) !void {
 }
 
 test "dkg: successful actor completion stops validator" {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(actor_completion_stops_validator, .{}));
+    try runtime.deterministic.soak(gpa, .{}, {}, struct {
+        fn round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start_context(actor_completion_stops_validator, .{}));
+        }
+    }.round);
 }
 
 test "dkg: validator probe resumes persisted floor" {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start(probe_resumes_persisted_floor, .{runner.io()}));
+    try runtime.deterministic.soak(gpa, .{}, {}, struct {
+        fn round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start(probe_resumes_persisted_floor, .{runner.io()}));
+        }
+    }.round);
 }

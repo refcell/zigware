@@ -276,14 +276,16 @@ fn expect_handoff(
 }
 
 test "dkg: bootstrap completes a singleton ceremony and hands off genesis" {
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "nodes/validator-0");
-    var runner = try runtime.deterministic.Runner.init(gpa, .{
-        .timeout_ns = 120 * std.time.ns_per_s,
-    });
-    defer runner.deinit();
-    try try runner.start_context(singleton_bootstrap, .{tmp.dir});
+    const runner_config: runtime.deterministic.Config = .{ .timeout_ns = 120 * std.time.ns_per_s };
+    try runtime.deterministic.soak(gpa, runner_config, {}, struct {
+        // Each seed bootstraps into a fresh directory.
+        fn round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            var tmp = testing.tmpDir(.{});
+            defer tmp.cleanup();
+            try tmp.dir.createDirPath(io, "nodes/validator-0");
+            try try runner.start_context(singleton_bootstrap, .{tmp.dir});
+        }
+    }.round);
 }
 
 /// A completion receiver whose ceremony never ends: `recv` waits until canceled.

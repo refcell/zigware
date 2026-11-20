@@ -22,9 +22,11 @@ const Exact = utils.acknowledgement.Exact;
 const gpa = testing.allocator;
 
 fn run(comptime body: fn (Ctx) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try try runner.start_context(body, .{});
+    try runtime.deterministic.soak(gpa, .{}, {}, struct {
+        fn round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start_context(body, .{});
+        }
+    }.round);
 }
 
 fn key() PublicKey {

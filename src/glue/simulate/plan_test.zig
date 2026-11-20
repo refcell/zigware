@@ -286,9 +286,12 @@ const QuietReporter = struct {
 };
 
 test "plan: completion does not require a quiet reporter" {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{ .timeout_ns = std.time.ns_per_s });
-    defer runner.deinit();
-    try try runner.start_context(QuietReporter.run, .{&runner});
+    const config: runtime.deterministic.Config = .{ .timeout_ns = std.time.ns_per_s };
+    try runtime.deterministic.soak(gpa, config, {}, struct {
+        fn round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start_context(QuietReporter.run, .{runner});
+        }
+    }.round);
 }
 
 test "plan: queued fork must fail simulation" {
@@ -667,43 +670,53 @@ const OutpacedChecks = struct {
         return result.crashes;
     }
 
-    fn crashes(crash: simulate.Crash(Key)) !u64 {
-        var runner = try runtime.deterministic.Runner.init(gpa, .{
-            .timeout_ns = 2 * std.time.ns_per_s,
-        });
-        defer runner.deinit();
-        return try runner.start_context(run, .{ &runner, crash });
+    /// A crash schedule and the count every seed must produce (null: at least one).
+    const Expected = struct { crash: simulate.Crash(Key), exact: ?u64 };
+
+    /// Runs `expected.crash` on every soak seed and checks each seed's crash count.
+    fn expect_crashes(crash: simulate.Crash(Key), exact: ?u64) !void {
+        const config: runtime.deterministic.Config = .{ .timeout_ns = 2 * std.time.ns_per_s };
+        const expected: Expected = .{ .crash = crash, .exact = exact };
+        try runtime.deterministic.soak(gpa, config, expected, struct {
+            fn round(want: Expected, runner: *runtime.deterministic.Runner) anyerror!void {
+                const count = try try runner.start_context(run, .{ runner, want.crash });
+                if (want.exact) |exact_count| {
+                    try testing.expectEqual(exact_count, count);
+                } else {
+                    try testing.expect(count > 0);
+                }
+            }
+        }.round);
     }
 
-    /// The crash count of a schedule that crashes the validator at `crash_ms` and restarts
-    /// it ten milliseconds later.
-    fn scheduled(crash_ms: u64) !u64 {
+    /// Checks the crash count of a schedule that crashes the validator at `crash_ms` and
+    /// restarts it ten milliseconds later: exactly one.
+    fn expect_scheduled(crash_ms: u64) !void {
         const pk = keys(1)[0];
         var schedule: Schedule = .empty;
         defer schedule.deinit(gpa);
         try schedule.add(gpa, .from_millis(crash_ms), .{ .crash = pk });
         try schedule.add(gpa, .from_millis(crash_ms + 10), .{ .restart = pk });
-        return crashes(.{ .schedule = &schedule });
+        try expect_crashes(.{ .schedule = &schedule }, 1);
     }
 };
 
 test "plan: scheduled crash applies while reports outpace checks" {
-    try testing.expectEqual(1, try OutpacedChecks.scheduled(10));
+    try OutpacedChecks.expect_scheduled(10);
 }
 
 test "plan: a scheduled crash due behind queued reports applies before completion" {
     // By 80ms the plan has checked about 16 reports, and reports up to 80 are queued. Taken in
     // arrival order, the crash would wait behind the 20th report, which completes the run.
-    try testing.expectEqual(1, try OutpacedChecks.scheduled(80));
+    try OutpacedChecks.expect_scheduled(80);
 }
 
 test "plan: random crash applies while reports outpace checks" {
-    const crashes = try OutpacedChecks.crashes(.{ .random = .{
+    try OutpacedChecks.expect_crashes(.{ .random = .{
         .frequency = .from_millis(30),
         .downtime = .from_millis(5),
         .count = 1,
-    } });
-    try testing.expect(crashes > 0);
+    } }, null);
 }
 
 test "plan: processed height crash stops participants together" {
