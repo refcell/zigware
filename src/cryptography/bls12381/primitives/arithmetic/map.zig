@@ -924,7 +924,7 @@ test "map: G1 batch sums equal the sum of the messages' maps" {
 
 test "map: fp8's variable-time lanes stay behind public inputs" {
     // The lanes branch on their values (square roots, inversions), so only the map of hashed
-    // messages and the pairing's final exponentiation, both on public data, use them: no other
+    // messages and the pairing, both on public data, use them: no other
     // arithmetic file names fp8, and secret scalars (signing, keys, shares) never reach them.
     const siblings = .{
         "curve.zig", "fields.zig", "g1.zig",      "g2.zig",     "montgomery.zig",
@@ -939,11 +939,13 @@ test "map: fp8's variable-time lanes stay behind public inputs" {
     const code = source[0..std.mem.indexOf(u8, source, "\nconst testing = std.testing;").?];
     try testing.expectEqual(1, std.mem.count(u8, code, "map_g1_lanes(fp8.Lanes("));
     try testing.expectEqual(1, std.mem.count(u8, code, "batch.u[2 * batch.count] = "));
-    // pairing.zig runs them only in `final_exponentiation`, on the Miller loop's output.
+    // pairing.zig runs them in the Miller loop's accumulator and the final exponentiation,
+    // whose inputs are public points: one comptime choice of each.
     const pairing = @embedFile("pairing.zig");
     const pairing_tests = std.mem.indexOf(u8, pairing, "\nconst testing = std.testing;").?;
     const pairing_code = pairing[0..pairing_tests];
     try testing.expectEqual(1, std.mem.count(u8, pairing_code, "final_exponentiation_lanes(fp8."));
+    try testing.expectEqual(1, std.mem.count(u8, pairing_code, "LaneAccumulator(fp8."));
 }
 
 test {

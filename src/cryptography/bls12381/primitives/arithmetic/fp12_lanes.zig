@@ -117,16 +117,56 @@ pub fn Fp12Lanes(comptime L: type) type {
             };
         }
 
-        /// The product, schoolbook over the w powers: round j multiplies every slot of `a` by
-        /// slot j of `b` and adds slot i's product at power i + j; powers 6 to 10 fold back
-        /// times xi.
+        /// The product.
         pub fn mul(a: Self, b: Self) Self {
+            return sum_of_products(a, b, comptime all_terms(.full));
+        }
+
+        /// The square: the 21 products f_i f_j with i <= j, those with i < j twice.
+        pub fn square(a: Self) Self {
+            return sum_of_products(a, a, comptime all_terms(.square));
+        }
+
+        /// The product with a line b0 + b1 v + b4 v w (`Fp12.mul_by_014`), which has the w
+        /// powers 0, 2, and 3 only.
+        pub fn mul_by_014(a: Self, line: Self) Self {
+            return sum_of_products(a, line, comptime all_terms(.line));
+        }
+
+        /// The line b0 + b1 v + b4 v w on lanes.
+        pub fn from_line(b0: Fp2, b1: Fp2, b4: Fp2) Self {
+            var re: [fp8.lanes]Fp = @splat(Fp.zero);
+            var im: [fp8.lanes]Fp = @splat(Fp.zero);
+            for ([_]usize{ 0, 2, 3 }, [_]Fp2{ b0, b1, b4 }) |slot, value| {
+                re[slot] = value.c0;
+                im[slot] = value.c1;
+            }
+            return .{ .re = L.from_fp(&re), .im = L.from_fp(&im) };
+        }
+
+        /// Sum over `terms` of a_i b_j at power i + j (twice when `twice`), with powers 6
+        /// to 10 folded back times xi. Terms run eight at a time, one lane product round
+        /// (three lane products) each; each round's products add into the powers through as
+        /// many shuffles as the most products one power receives in that round.
+        fn sum_of_products(a: Self, b: Self, comptime terms: []const Term) Self {
             var low = zero_lanes; // powers 0 to 7
             var high = zero_lanes; // powers 8 to 10, in slots 0 to 2
-            inline for (0..slots) |j| {
-                const product = a.mul_slots(shuffle2(b, b, @splat(@as(i32, j))));
-                low = low.add(shift_low(product, j));
-                if (j >= 3) high = high.add(shift_high(product, j));
+            comptime var start = 0;
+            inline while (start < terms.len) : (start += fp8.lanes) {
+                const batch = comptime terms[start..@min(start + fp8.lanes, terms.len)];
+                const plan = comptime batch_plan(batch);
+                var product = pick(a, plan.left).mul_slots(pick(b, plan.right));
+                if (plan.any_twice) {
+                    const twice = product.double();
+                    product = .{
+                        .re = L.select(plan.twice, twice.re, product.re),
+                        .im = L.select(plan.twice, twice.im, product.im),
+                    };
+                }
+                inline for (plan.low[0..plan.layers]) |mask| low = low.add(pick(product, mask));
+                inline for (plan.high[0..plan.layers]) |mask| {
+                    if (comptime !all_zero(mask)) high = high.add(pick(product, mask));
+                }
             }
             // Powers 6 and 7 from `low`, 8 to 10 from `high`, each times xi onto power - 6.
             const folded = shuffle2(low, high, .{
@@ -134,25 +174,6 @@ pub fn Fp12Lanes(comptime L: type) type {
             });
             const wrapped = pick(folded, .{ 0, 1, 2, 3, 4, z, z, z });
             return pick(low, .{ 0, 1, 2, 3, 4, 5, z, z }).add(wrapped.mul_by_nonresidue());
-        }
-
-        /// `product` (slots 0 to 5) moved up `j` slots, the part that stays below slot 8.
-        fn shift_low(product: Self, comptime j: usize) Self {
-            comptime var mask: [fp8.lanes]i32 = @splat(z);
-            inline for (0..fp8.lanes) |slot| {
-                if (slot >= j and slot - j < slots) mask[slot] = @intCast(slot - j);
-            }
-            return pick(product, mask);
-        }
-
-        /// The part of `product` moved up `j` slots that reaches slot 8 and above, from slot 0.
-        fn shift_high(product: Self, comptime j: usize) Self {
-            comptime var mask: [fp8.lanes]i32 = @splat(z);
-            inline for (0..3) |slot| {
-                const source = slot + 8 - j;
-                if (source < slots) mask[slot] = @intCast(source);
-            }
-            return pick(product, mask);
         }
 
         /// Granger-Scott squaring in the cyclotomic subgroup (as `Fp12.cyclotomic_square`):
@@ -210,6 +231,75 @@ pub fn Fp12Lanes(comptime L: type) type {
     };
 }
 
+/// One product a_i b_j of `sum_of_products`, added at power i + j (twice when `twice`).
+const Term = struct { i: u8, j: u8, twice: bool = false };
+
+/// The terms of a full product, a square, or a product with a line (powers 0, 2, and 3).
+fn all_terms(comptime kind: enum { full, square, line }) []const Term {
+    var terms: [slots * slots]Term = undefined;
+    var count = 0;
+    for (0..slots) |i| for (0..slots) |j| {
+        const keep = switch (kind) {
+            .full => true,
+            .square => i <= j,
+            .line => j == 0 or j == 2 or j == 3,
+        };
+        if (!keep) continue;
+        terms[count] = .{ .i = i, .j = j, .twice = kind == .square and i < j };
+        count += 1;
+    };
+    const final = terms[0..count].*;
+    return &final;
+}
+
+fn all_zero(comptime mask: [fp8.lanes]i32) bool {
+    for (mask) |entry| if (entry != z) return false;
+    return true;
+}
+
+/// Lane masks for one round of up to eight terms: the operand lanes, the lanes to double,
+/// and per layer the shuffles that move each product to its power (`low` for 0 to 7,
+/// `high` for 8 to 10), at most one product per power per layer.
+const BatchPlan = struct {
+    left: [fp8.lanes]i32,
+    right: [fp8.lanes]i32,
+    twice: fp8.Mask,
+    any_twice: bool,
+    layers: usize,
+    low: [fp8.lanes][fp8.lanes]i32,
+    high: [fp8.lanes][fp8.lanes]i32,
+};
+
+fn batch_plan(comptime batch: []const Term) BatchPlan {
+    assert(batch.len > 0 and batch.len <= fp8.lanes);
+    var plan: BatchPlan = .{
+        .left = @splat(z),
+        .right = @splat(z),
+        .twice = @splat(false),
+        .any_twice = false,
+        .layers = 0,
+        .low = @splat(@splat(z)),
+        .high = @splat(@splat(z)),
+    };
+    var used: [2 * slots - 1]usize = @splat(0);
+    for (batch, 0..) |term, lane| {
+        plan.left[lane] = term.i;
+        plan.right[lane] = term.j;
+        plan.twice[lane] = term.twice;
+        plan.any_twice = plan.any_twice or term.twice;
+        const power = term.i + term.j;
+        const layer = used[power];
+        used[power] += 1;
+        plan.layers = @max(plan.layers, layer + 1);
+        if (power < fp8.lanes) {
+            plan.low[layer][power] = lane;
+        } else {
+            plan.high[layer][power - fp8.lanes] = lane;
+        }
+    }
+    return plan;
+}
+
 /// f's coefficients of w^0 to w^5.
 fn w_coefficients(f: Fp12) [slots]Fp2 {
     return .{ f.c0.c0, f.c1.c0, f.c0.c1, f.c1.c1, f.c0.c2, f.c1.c2 };
@@ -242,6 +332,12 @@ fn check_lanes(comptime L: type, seed: u64) !void {
         try testing.expect(x.to_fp12().eql(a));
         try testing.expect(x.mul(F.from_fp12(b)).to_fp12().eql(a.mul(b)));
         try testing.expect(x.conjugate().to_fp12().eql(a.conjugate()));
+        try testing.expect(x.square().to_fp12().eql(a.square()));
+        const b0 = b.c0.c0;
+        const b1 = b.c0.c1;
+        const b4 = b.c1.c1;
+        const line = F.from_line(b0, b1, b4);
+        try testing.expect(x.mul_by_014(line).to_fp12().eql(a.mul_by_014(b0, b1, b4)));
         const c = random_cyclotomic(&prng);
         const y = F.from_fp12(c);
         try testing.expect(y.cyclotomic_square().to_fp12().eql(c.cyclotomic_square()));

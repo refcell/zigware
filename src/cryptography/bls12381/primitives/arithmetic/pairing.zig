@@ -77,15 +77,69 @@ fn addition_step(t: *G2, q: g2.Affine) Line {
 }
 
 /// Multiplies f by the line evaluated at the G1 point (px, py).
-fn ell(f: Fp12, line: Line, point: g1.Affine) Fp12 {
+fn pairing_ell(f: Fp12, line: Line, point: g1.Affine) Fp12 {
     const c0 = line[0].mul_by_fp(point.y);
     const c1 = line[1].mul_by_fp(point.x);
     return f.mul_by_014(line[2], c1, c0);
 }
 
+/// The Miller loop's f: on fp8's lanes where the target has IFMA (squares and line products
+/// there cost half the scalar tower's), the scalar Fp12 elsewhere. Same values either way.
+const Accumulator = if (fp8.ifma_available)
+    LaneAccumulator(fp8.Lanes(.ifma))
+else
+    ScalarAccumulator;
+
+const ScalarAccumulator = struct {
+    f: Fp12,
+
+    const one: ScalarAccumulator = .{ .f = Fp12.one };
+
+    fn ell(self: ScalarAccumulator, line: Line, point: g1.Affine) ScalarAccumulator {
+        return .{ .f = pairing_ell(self.f, line, point) };
+    }
+
+    fn square(self: ScalarAccumulator) ScalarAccumulator {
+        return .{ .f = self.f.square() };
+    }
+
+    fn finish(self: ScalarAccumulator) Fp12 {
+        return self.f.conjugate();
+    }
+};
+
+fn LaneAccumulator(comptime L: type) type {
+    const F = fp12_lanes.Fp12Lanes(L);
+    return struct {
+        const Self = @This();
+        f: F,
+
+        const one: Self = .{ .f = F.one };
+
+        fn ell(self: Self, line: Line, point: g1.Affine) Self {
+            const c0 = line[0].mul_by_fp(point.y);
+            const c1 = line[1].mul_by_fp(point.x);
+            return .{ .f = self.f.mul_by_014(F.from_line(line[2], c1, c0)) };
+        }
+
+        fn square(self: Self) Self {
+            return .{ .f = self.f.square() };
+        }
+
+        fn finish(self: Self) Fp12 {
+            return self.f.conjugate().to_fp12();
+        }
+    };
+}
+
 /// Miller loop over at most `pairs_per_loop_max` pairs; pairs with an
 /// infinity point contribute 1 and are skipped. The result is not reduced.
 pub fn miller_loop(pairs: []const Pair) Fp12 {
+    return miller_loop_on(Accumulator, pairs);
+}
+
+/// `miller_loop` with f kept in `A` (a scalar or lane accumulator).
+fn miller_loop_on(comptime A: type, pairs: []const Pair) Fp12 {
     assert(pairs.len <= pairs_per_loop_max);
     var active: [pairs_per_loop_max]Pair = undefined;
     var t: [pairs_per_loop_max]G2 = undefined;
@@ -97,29 +151,29 @@ pub fn miller_loop(pairs: []const Pair) Fp12 {
         t[count] = pair.g2.to_jacobian();
         count += 1;
     }
-    var f = Fp12.one;
-    if (count == 0) return f;
+    var f = A.one;
+    if (count == 0) return Fp12.one;
     // Bits of |x| below the leading one, most significant first; the last
     // doubling happens after the loop because the low 16 bits are zero.
     var bit: u32 = 63;
     while (bit > 1) {
         bit -= 1;
         for (active[0..count], t[0..count]) |pair, *point| {
-            f = ell(f, doubling_step(point), pair.g1);
+            f = f.ell(doubling_step(point), pair.g1);
         }
         if ((x_abs >> @intCast(bit)) & 1 == 1) {
             for (active[0..count], t[0..count]) |pair, *point| {
-                f = ell(f, addition_step(point, pair.g2), pair.g1);
+                f = f.ell(addition_step(point, pair.g2), pair.g1);
             }
         }
         f = f.square();
     }
     for (active[0..count], t[0..count]) |pair, *point| {
-        f = ell(f, doubling_step(point), pair.g1);
+        f = f.ell(doubling_step(point), pair.g1);
     }
     assert(x_abs & 1 == 0);
     // x < 0: f_{x} = conj(f_{|x|}) up to factors killed by the final exponentiation.
-    return f.conjugate();
+    return f.finish();
 }
 
 /// Lines in one Miller loop: 63 doublings plus one addition per set bit of |x|
@@ -163,7 +217,7 @@ pub const PreparedPair = struct {
 /// Miller loop over pairs whose G2 points are prepared; same result as `miller_loop`.
 pub fn miller_loop_prepared(pairs: []const PreparedPair) Fp12 {
     assert(pairs.len <= pairs_per_loop_max);
-    var f = Fp12.one;
+    var f = Accumulator.one;
     var index: usize = 0;
     var bit: u32 = 63;
     while (bit > 1) {
@@ -179,15 +233,15 @@ pub fn miller_loop_prepared(pairs: []const PreparedPair) Fp12 {
     f = ell_prepared(f, pairs, index);
     index += 1;
     assert(index == line_count);
-    return f.conjugate();
+    return f.finish();
 }
 
-fn ell_prepared(f: Fp12, pairs: []const PreparedPair, index: usize) Fp12 {
+fn ell_prepared(f: Accumulator, pairs: []const PreparedPair, index: usize) Accumulator {
     assert(index < line_count);
     var result = f;
     for (pairs) |pair| {
         if (pair.g1.infinity or pair.g2.infinity) continue;
-        result = ell(result, pair.g2.lines[index], pair.g1);
+        result = result.ell(pair.g2.lines[index], pair.g1);
     }
     return result;
 }
@@ -332,6 +386,21 @@ fn fp12_pow(base: Fp12, exponent: u256) Fp12 {
 
 test {
     _ = fp12_lanes;
+}
+
+test "pairing: the Miller loop on lanes matches the scalar one" {
+    var prng = Prng.init(0x6d696c);
+    const L = LaneAccumulator(fp8.Lanes(.portable));
+    for (0..2) |_| {
+        const p1 = g1.generator.to_jacobian().mul(prng.int(u256)).to_affine();
+        const q1 = g2.generator.to_jacobian().mul(prng.int(u256)).to_affine();
+        const p2 = g1.generator.to_jacobian().mul(prng.int(u256)).to_affine();
+        const q2 = g2.generator.to_jacobian().mul(prng.int(u256)).to_affine();
+        const pairs = [2]Pair{ .{ .g1 = p1, .g2 = q1 }, .{ .g1 = p2, .g2 = q2 } };
+        const want = miller_loop_on(ScalarAccumulator, &pairs);
+        try testing.expect(miller_loop_on(L, &pairs).eql(want));
+        try testing.expect(miller_loop(&pairs).eql(want));
+    }
 }
 
 test "pairing: the final exponentiation on lanes matches the scalar one" {
