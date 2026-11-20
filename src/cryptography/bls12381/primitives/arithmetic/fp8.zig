@@ -131,8 +131,38 @@ pub fn Lanes(comptime backend: Backend) type {
             return result;
         }
 
+        /// a^2 / 2^416 mod p, below 2p: each cross product once, doubled, then a separate
+        /// Montgomery reduction, 208 multiply-adds against `mul`'s 264.
         pub fn square(a: Self) Self {
-            return a.mul(a);
+            @setEvalBranchQuota(10_000);
+            var t: [2 * limbs]V = @splat(@splat(0));
+            inline for (0..limbs) |i| {
+                inline for (i + 1..limbs) |j| {
+                    t[i + j] = madd_low(t[i + j], a.rows[i], a.rows[j]);
+                    t[i + j + 1] = madd_high(t[i + j + 1], a.rows[i], a.rows[j]);
+                }
+            }
+            // A row holds at most 8 halves below 2^52, so doubling stays below 2^56.
+            inline for (&t) |*row| row.* <<= @splat(1);
+            inline for (0..limbs) |i| {
+                t[2 * i] = madd_low(t[2 * i], a.rows[i], a.rows[i]);
+                t[2 * i + 1] = madd_high(t[2 * i + 1], a.rows[i], a.rows[i]);
+            }
+            const m_factor: V = @splat(inverse_52);
+            inline for (0..limbs) |i| {
+                // As in `mul`: m zeroes the low 52 bits of row i, which carries into row i + 1.
+                const m = madd_low(@splat(0), t[i], m_factor);
+                inline for (0..limbs) |j| {
+                    const p_j: V = @splat(p_limbs[j]);
+                    t[i + j] = madd_low(t[i + j], m, p_j);
+                    t[i + j + 1] = madd_high(t[i + j + 1], m, p_j);
+                }
+                if (std.debug.runtime_safety) assert(@reduce(.Or, t[i] & mask()) == 0);
+                t[i + 1] += t[i] >> @splat(52);
+            }
+            const result = carry(t[limbs..].*);
+            if (std.debug.runtime_safety) assert(result.below(two_p_limbs));
+            return result;
         }
 
         /// Carries limbs (each below 2^63, total below 2^416) to 52 bits.
@@ -308,22 +338,63 @@ pub fn Lanes(comptime backend: Backend) type {
             return out;
         }
 
-        /// `a^exponent` for a public exponent, by 4-bit windows from the top.
+        /// `a^exponent` for a public exponent, by 5-bit sliding windows from the top: for
+        /// (p + 1) / 4, 375 squares and 66 products after a 16-entry table of odd powers.
         pub fn pow(a: Self, comptime exponent: Int) Self {
             comptime assert(exponent > 0);
-            const digits = comptime nibbles(exponent);
+            const steps = comptime window_steps(exponent);
+            // table[k] = a^(2k + 1).
             var table: [16]Self = undefined;
-            table[0] = one;
-            table[1] = a;
-            for (2..16) |index| table[index] = table[index - 1].mul(a);
-            var result = table[digits[0]];
-            for (digits[1..]) |digit| {
-                inline for (0..4) |_| result = result.square();
-                if (digit != 0) result = result.mul(table[digit]);
+            table[0] = a;
+            const a_squared = a.square();
+            for (1..16) |index| table[index] = table[index - 1].mul(a_squared);
+            var result = table[steps[0].digit >> 1];
+            for (steps[1..]) |step| {
+                for (0..step.squares) |_| result = result.square();
+                if (step.digit != 0) result = result.mul(table[step.digit >> 1]);
             }
             return result;
         }
     };
+}
+
+/// One step of a sliding-window exponentiation: square `squares` times, then multiply by
+/// the odd power `digit` (none when zero).
+const WindowStep = struct { squares: u16, digit: u5 };
+
+/// `exponent`'s 5-bit sliding windows from the top. The first step's digit is the starting
+/// power and its `squares` is zero.
+fn window_steps(comptime exponent: Int) []const WindowStep {
+    @setEvalBranchQuota(1_000_000);
+    const width = 5;
+    var out: [@bitSizeOf(Int)]WindowStep = undefined;
+    var count: usize = 0;
+    var bit: isize = @bitSizeOf(Int) - 1 - @clz(exponent);
+    var pending: u16 = 0;
+    while (bit >= 0) {
+        if ((exponent >> @intCast(bit)) & 1 == 0) {
+            pending += 1;
+            bit -= 1;
+            continue;
+        }
+        // The longest window from `bit` down that ends in a one bit.
+        var low: isize = @max(0, bit - (width - 1));
+        while ((exponent >> @intCast(low)) & 1 == 0) low += 1;
+        const size: u16 = @intCast(bit - low + 1);
+        const digit: u5 = @intCast((exponent >> @intCast(low)) & ((1 << size) - 1));
+        assert(digit & 1 == 1);
+        out[count] = .{ .squares = if (count == 0) 0 else pending + size, .digit = digit };
+        count += 1;
+        pending = 0;
+        bit = low - 1;
+    }
+    if (pending > 0) {
+        out[count] = .{ .squares = pending, .digit = 0 };
+        count += 1;
+    }
+    assert(count > 0 and out[0].squares == 0);
+    const final = out[0..count].*;
+    return &final;
 }
 
 fn limbs_int(value: [6]u64) Int {
@@ -336,19 +407,6 @@ fn int_limbs(value: Int) [6]u64 {
     var out: [6]u64 = undefined;
     inline for (0..6) |index| out[index] = @truncate(value >> (64 * index));
     return out;
-}
-
-/// `exponent`'s base-16 digits, most significant first, without leading zeros.
-fn nibbles(comptime exponent: Int) []const u4 {
-    @setEvalBranchQuota(100_000);
-    const count = (@bitSizeOf(Int) - @clz(exponent) + 3) / 4;
-    var out: [count]u4 = undefined;
-    for (0..count) |index| {
-        out[index] = @truncate(exponent >> @intCast(4 * (count - 1 - index)));
-    }
-    assert(out[0] != 0);
-    const final = out;
-    return &final;
 }
 
 const testing = std.testing;
@@ -409,15 +467,20 @@ test "fp8: the IFMA lanes match Field(6)" {
     try check_against_fp(Lanes(.ifma), 0x667039);
 }
 
-test "fp8: pow matches Field(6) for the square-root exponent" {
-    const exponent = (modulus + 1) / 4;
+test "fp8: pow matches Field(6) for the square-root exponent and window edges" {
+    // Trailing zeros, a lone top bit, windows split by long zero runs, and all-ones runs.
+    const exponents = [_]Int{
+        (modulus + 1) / 4, 1,                   2,             0b110000,
+        1 << 100,          (1 << 100) + 0b1001, (1 << 37) - 1, (modulus - 1) / 2,
+    };
     var prng = Prng.init(0x706f77);
     inline for (.{ Lanes(.portable), Fp8 }) |L| {
         const a = random_lanes(&prng, 0);
-        var want: [lanes]Fp = undefined;
-        for (&want, a) |*w, u| w.* = u.pow(exponent);
-        try expect_lanes(want, L.from_fp(&a).pow(exponent).to_fp());
-        try expect_lanes(a, L.from_fp(&a).pow(1).to_fp());
+        inline for (exponents) |exponent| {
+            var want: [lanes]Fp = undefined;
+            for (&want, a) |*w, u| w.* = u.pow(exponent);
+            try expect_lanes(want, L.from_fp(&a).pow(exponent).to_fp());
+        }
     }
 }
 
