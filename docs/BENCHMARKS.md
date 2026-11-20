@@ -60,6 +60,14 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
 
 ## Caveats
 
+- **Method from 2026-11-20 on.** `bench-compare.sh` runs rounds in ABBA order (default 4),
+  reports the median of per-round ratios, builds commonware with
+  `RUSTFLAGS="-C target-cpu=native"` (zigware also builds for the native CPU), and gives each
+  row a verdict: "faster" when the median is below 0.95 and every round is below 1, "slower"
+  when the median is above 1.05 and every round is above 1, "tie" otherwise. Rows measured
+  before then alternated with commonware first, often reported best-of-3 per side, and ran
+  commonware built for baseline x86-64, which favored zigware wherever commonware relies on
+  compiler auto-vectorization.
 - **The machine was not quiet.** Other lanes were running test suites on the same desktop, so
   the 1-minute load average on 32 threads ranged from 29 to 83. Best-of-three filters some of
   the noise, but every number here can move by tens of percent. Ratios near 1 (sha256,

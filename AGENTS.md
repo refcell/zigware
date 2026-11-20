@@ -63,6 +63,13 @@ Read this whole file before you change anything. These rules are not optional.
    of your builds is running and your clone's `.zig-cache` is over about 50 GB
    (`du -sh .zig-cache`), delete it with `rm -rf .zig-cache` in your own clone only.
 
+11. **Benchmarks are honest.** The target is every row faster than commonware. Measure with
+   `etc/scripts/bench-compare.sh`: rounds in ABBA order, the median of per-round ratios, and
+   commonware built with `RUSTFLAGS="-C target-cpu=native"` as zigware builds for the native
+   CPU. A row is "faster" only when the median is below 0.95 and every round is below 1; a row
+   inside the noise is not yet faster. Record rows with their verdict and load in
+   docs/BENCHMARKS.md.
+
 ## Style: TigerStyle (see docs/TIGER_STYLE.md)
 
 - Safety, then performance, then developer experience.

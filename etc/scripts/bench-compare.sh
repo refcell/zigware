@@ -2,20 +2,25 @@
 # Head-to-head benchmarks: commonware's criterion benches against zigware's counterparts of the
 # same name (and so the same parameters), on this machine. docs/BENCHMARKS.md has the results.
 #
-#   etc/scripts/bench-compare.sh [runs]     best of `runs` (default 3) medians per side
+#   etc/scripts/bench-compare.sh [runs]     `runs` rounds (default 4), in ABBA order
 #
 # COMMONWARE_REF names the commonware checkout (default ~/.cache/zigware/commonware-ref).
 # BENCH_DIR is where both sides' storage benches keep their files (default ${TMPDIR:-/tmp}):
 # commonware's tokio runner uses `env::temp_dir()` and zigware's benches `./.zig-cache/tmp`,
 # so commonware runs with TMPDIR and zigware with its working directory under it.
 # BENCH_FILTER keeps only the benches whose name contains it.
-# BENCH_STAT=median reports each side's median over the runs and the median of the per-run
-# (paired) ratios instead of the best of each side.
-# Each run alternates the two sides so both see the same machine load. The table goes to
-# stdout; the raw medians to .cache/bench-compare/raw.tsv.
+# Rounds run in ABBA order: odd rounds run commonware then zigware, even rounds zigware then
+# commonware, so drift within a round cancels. The ratio is the median of the per-round
+# (paired) zigware / commonware ratios; BENCH_STAT=best reports the best of each side instead.
+# A row is "faster" only when the median is below 0.95 and every round is below 1, "slower"
+# when the median is above 1.05 and every round is above 1, and "tie" otherwise (noise
+# counts as not yet faster). commonware builds with RUSTFLAGS="-C target-cpu=native" in its
+# own target directory (target-native), as zigware builds for the native CPU; CW_NATIVE=0
+# builds it for baseline x86-64 instead. The table goes to stdout; the raw medians to
+# .cache/bench-compare/raw.tsv.
 set -euo pipefail
 
-runs=${1:-3}
+runs=${1:-4}
 ref=${COMMONWARE_REF:-$HOME/.cache/zigware/commonware-ref}
 root=$(cd "$(dirname "$0")/../.." && pwd)
 out="$root/.cache/bench-compare"
@@ -109,8 +114,12 @@ msg_len=32"
 msg_len=32"
 )
 
-echo "building commonware benches (cargo bench --no-run, release)" >&2
-(cd "$ref" && cargo bench --no-run --message-format=json \
+cw_env=()
+if [[ "${CW_NATIVE:-1}" == 1 ]]; then
+  cw_env=(RUSTFLAGS="-C target-cpu=native" CARGO_TARGET_DIR="$ref/target-native")
+fi
+echo "building commonware benches (cargo bench --no-run, release, ${cw_env[*]:-baseline})" >&2
+(cd "$ref" && env "${cw_env[@]}" cargo bench --no-run --message-format=json \
   -p commonware-codec -p commonware-cryptography -p commonware-storage -p commonware-runtime \
   --features commonware-storage/test-traits \
   --bench codec --bench sha256 --bench ed25519 --bench bls12381 \
@@ -167,17 +176,22 @@ for run in $(seq 1 "$runs"); do
     load=$(cut -d' ' -f1 /proc/loadavg 2> /dev/null || uptime | sed 's/.*average[s]*: //')
     # A failed run records nan (its stderr is in bench.log) instead of ending the comparison.
     log="$out/bench.log"
-    cw=$(cd "$ref" && TMPDIR="$scratch" "$(cw_bin "$target")" "${cw_args[@]}" --exact "$name" \
-      2>> "$log" | median_ns "$name") || cw=nan
-    zw=$(cd "$scratch" && "$root/zig-out/bench/bench-$package" "${zw_args[@]}" -- "$name" \
-      2>> "$log" | median_ns "$name") || zw=nan
+    run_cw() {
+      cw=$(cd "$ref" && TMPDIR="$scratch" "$(cw_bin "$target")" "${cw_args[@]}" --exact \
+        "$name" 2>> "$log" | median_ns "$name") || cw=nan
+    }
+    run_zw() {
+      zw=$(cd "$scratch" && "$root/zig-out/bench/bench-$package" "${zw_args[@]}" -- "$name" \
+        2>> "$log" | median_ns "$name") || zw=nan
+    }
+    if ((run % 2 == 1)); then run_cw; run_zw; else run_zw; run_cw; fi
     printf '%s\t%s\t%s\t%s\t%s\n' "$run" "$name" "${cw:-nan}" "${zw:-nan}" "$load" |
       tee -a "$out/raw.tsv" >&2
   done
 done
 
 fstype=$(findmnt -no FSTYPE --target "$scratch" 2> /dev/null || echo unknown)
-python3 -I - "$out/raw.tsv" "$fstype" "${BENCH_STAT:-best}" << 'EOF'
+python3 -I - "$out/raw.tsv" "$fstype" "${BENCH_STAT:-median}" << 'EOF'
 import math, statistics, sys
 best = {}
 values = {}
@@ -209,8 +223,9 @@ def show(ns):
             return f"{ns / size:.3g} {unit}"
     return f"{ns:.3g} ns"
 
-print("| bench | parameters | commonware | zigware | zigware / commonware |")
-print("|---|---|---|---|---|")
+print("| bench | parameters | commonware | zigware | zigware / commonware | rounds | verdict |")
+print("|---|---|---|---|---|---|---|")
+counts = {"faster": 0, "tie": 0, "slower": 0}
 for name in order:
     group, _, params = name.partition("/")
     cw, zw = best[name]
@@ -218,9 +233,21 @@ for name in order:
     if median:
         cw, zw = (statistics.median(v) if v else math.inf for v in values[name])
         ratio = f"{statistics.median(ratios[name]):.2f}×" if ratios[name] else "n/a"
-    print(f"| `{group}` | `{params}` | {show(cw)} | {show(zw)} | {ratio} |")
+    paired = ratios[name]
+    spread = f"{min(paired):.2f}–{max(paired):.2f}× ({len(paired)})" if paired else "n/a"
+    verdict = "n/a"
+    if paired:
+        mid = statistics.median(paired)
+        verdict = "tie"
+        if mid < 0.95 and max(paired) < 1:
+            verdict = "faster"
+        elif mid > 1.05 and min(paired) > 1:
+            verdict = "slower"
+        counts[verdict] += 1
+    print(f"| `{group}` | `{params}` | {show(cw)} | {show(zw)} | {ratio} | {spread} | {verdict} |")
+print(f"\nfaster {counts['faster']}, tie {counts['tie']}, slower {counts['slower']}.")
 if median:
-    print("\nMedians over the runs; the ratio is the median of each run's paired ratio.")
+    print("Medians over the rounds; the ratio is the median of each round's paired ratio.")
 print(f"\nLoad average (1 min) during the runs: {min(loads):.1f} to {max(loads):.1f}.")
 print(f"Storage benches ran on: {sys.argv[2]}.")
 EOF
