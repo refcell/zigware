@@ -136,7 +136,7 @@ of the per-round ratios is below 0.95 with at most n/8 rounds at or above 1.
 | `codec::lazy::get` (100k shared) | 0.17× faster |
 | `journal::append_sync` (fixed) / `fixed_append` (10k) / `fixed_replay` (100k) | 0.09× / 0.26× / 0.76×, all faster |
 | `buffer_paged::append` (4 KiB) | 0.46× faster |
-| `bls12381::aggregate_verify_same_message` (1000 keys) / single verify | 1.04× tie / 1.20× slower |
+| `bls12381::aggregate_verify_same_message` (1000 keys) / single verify | 1.04× tie / 0.89× faster |
 | `sha256::hash_message` (4 KiB / 1 MiB) | 0.99× / 1.00×, both tie |
 | `ed25519::signature_verification` / `batch_verify_same_message` (100 keys) | 0.86× / 0.94×, both faster |
 | `qmdb::apply_batch` (16384 updates) | 1.14× slower |
