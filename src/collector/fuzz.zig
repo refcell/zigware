@@ -35,6 +35,8 @@ const Recipients = p2p.Recipients(Key);
 
 const max_len = 1_000_000;
 const operations_max = 256;
+/// Longest fuzzed byte string (`Vec<u8>`); the input runs out long before.
+const bytes_max = 4096;
 const min_buffer_size: u16 = 1;
 /// commonware creates peers for `i in 2..5`.
 const peer_count = 3;
@@ -56,23 +58,6 @@ fn digest_encoding(id: u64, data: []const u8) Sha256.Digest {
     codec.write(usize, data.len, &writer);
     assert(writer.written().len > 0);
     return Sha256.hash(&.{ &be_bytes(id), writer.written(), data });
-}
-
-/// `Vec<u8>::arbitrary`: `arbitrary_iter`, a continue bit before each byte. At most 4096
-/// bytes (the input runs out long before).
-fn arbitrary_bytes(gpa: Allocator, u: *Unstructured) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    while (out.items.len < 4096 and try u.arbitrary(bool)) {
-        try out.append(gpa, try u.arbitrary(u8));
-    }
-    return out.toOwnedSlice(gpa);
-}
-
-/// A `derive(Arbitrary)` variant index among `count`.
-fn variant(u: *Unstructured, count: u64) !u64 {
-    const raw: u64 = try u.arbitrary(u32);
-    return (raw * count) >> 32;
 }
 
 /// A request: an id and some data, committed to by its id.
@@ -113,7 +98,7 @@ pub const FuzzRequest = struct {
 
     fn arbitrary(gpa: Allocator, u: *Unstructured) !FuzzRequest {
         const id = try u.arbitrary(u64);
-        return .{ .id = id, .data = try arbitrary_bytes(gpa, u) };
+        return .{ .id = id, .data = try u.arbitrary_bytes(gpa, bytes_max) };
     }
 };
 
@@ -164,7 +149,7 @@ pub const FuzzResponse = struct {
 
     fn arbitrary(gpa: Allocator, u: *Unstructured) !FuzzResponse {
         const id = try u.arbitrary(u64);
-        return .{ .id = id, .result = try arbitrary_bytes(gpa, u), .gpa = gpa };
+        return .{ .id = id, .result = try u.arbitrary_bytes(gpa, bytes_max), .gpa = gpa };
     }
 };
 
@@ -353,7 +338,7 @@ const Operation = union(enum) {
     },
 
     fn arbitrary(gpa: Allocator, u: *Unstructured) !Operation {
-        return switch (try variant(u, 5)) {
+        return switch (try u.variant_index(5)) {
             0 => .{ .send_request = .{
                 .peer_index = try u.arbitrary(u8),
                 .request = try FuzzRequest.arbitrary(gpa, u),

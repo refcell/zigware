@@ -37,6 +37,8 @@ const test_quota = p2p.Quota.per_second(1_024);
 const sleep_ms_max = 1000;
 const peers_max = 5;
 const actions_max = 10;
+/// Longest fuzzed byte string (`Vec<u8>`); the input runs out long before.
+const bytes_max = 4096;
 
 /// A fuzzed message, digested over its encoding.
 pub const FuzzMessage = struct {
@@ -85,28 +87,11 @@ pub const FuzzMessage = struct {
     }
 
     fn arbitrary(gpa: Allocator, u: *Unstructured) !FuzzMessage {
-        const commitment = try arbitrary_bytes(gpa, u);
+        const commitment = try u.arbitrary_bytes(gpa, bytes_max);
         errdefer gpa.free(commitment);
-        return .{ .commitment = commitment, .content = try arbitrary_bytes(gpa, u) };
+        return .{ .commitment = commitment, .content = try u.arbitrary_bytes(gpa, bytes_max) };
     }
 };
-
-/// `Vec<u8>::arbitrary`: `arbitrary_iter`, a continue bit before each byte. At most 4096
-/// bytes (the input runs out long before).
-fn arbitrary_bytes(gpa: Allocator, u: *Unstructured) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    while (out.items.len < 4096 and try u.arbitrary(bool)) {
-        try out.append(gpa, try u.arbitrary(u8));
-    }
-    return out.toOwnedSlice(gpa);
-}
-
-/// A `derive(Arbitrary)` variant index among `count`.
-fn variant(u: *Unstructured, count: u64) !u64 {
-    const raw: u64 = try u.arbitrary(u32);
-    return (raw * count) >> 32;
-}
 
 const RecipientPattern = union(enum) { all, some: u64, one: u64 };
 
@@ -134,7 +119,7 @@ const Action = union(enum) {
 };
 
 fn arbitrary_pattern(u: *Unstructured) !RecipientPattern {
-    return switch (try variant(u, 3)) {
+    return switch (try u.variant_index(3)) {
         0 => .all,
         1 => .{ .some = try u.arbitrary(u64) },
         else => .{ .one = try u.arbitrary(u64) },
@@ -142,7 +127,7 @@ fn arbitrary_pattern(u: *Unstructured) !RecipientPattern {
 }
 
 fn arbitrary_source(gpa: Allocator, u: *Unstructured) !Source {
-    if (try variant(u, 2) == 0) return .{ .random = try FuzzMessage.arbitrary(gpa, u) };
+    if (try u.variant_index(2) == 0) return .{ .random = try FuzzMessage.arbitrary(gpa, u) };
     return .{ .recent = try u.arbitrary(u8) };
 }
 

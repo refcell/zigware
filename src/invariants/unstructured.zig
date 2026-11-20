@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const Allocator = std.mem.Allocator;
 
 pub const Error = error{
     /// The data ran out before the value was complete.
@@ -119,6 +120,31 @@ pub const Unstructured = struct {
         return self.byte_size() / element_size;
     }
 
+    /// derive(Arbitrary)'s variant index: a u32 scaled into `count` variants.
+    pub fn variant_index(self: *Unstructured, count: u64) Error!u64 {
+        const raw: u64 = try self.arbitrary(u32);
+        const index = (raw * count) >> 32;
+        assert(index <= count);
+        assert(count == 0 or index < count);
+        return index;
+    }
+
+    /// `Vec<u8>::arbitrary` (`arbitrary_iter`): a continue bit before each byte, stopping
+    /// after `len_max` bytes. The caller frees the result.
+    pub fn arbitrary_bytes(
+        self: *Unstructured,
+        gpa: Allocator,
+        len_max: usize,
+    ) (Error || Allocator.Error)![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(gpa);
+        while (out.items.len < len_max and try self.arbitrary(bool)) {
+            try out.append(gpa, try self.arbitrary(u8));
+        }
+        assert(out.items.len <= len_max);
+        return out.toOwnedSlice(gpa);
+    }
+
     /// The `Arbitrary` value of `T`.
     pub fn arbitrary(self: *Unstructured, comptime T: type) Error!T {
         if (comptime has_arbitrary(T)) return T.arbitrary(self);
@@ -155,9 +181,7 @@ pub const Unstructured = struct {
                 return out;
             },
             .@"enum" => |info| {
-                // derive(Arbitrary): a u32 scaled into the variant count.
-                const raw: u64 = try self.arbitrary(u32);
-                const index = (raw * info.field_names.len) >> 32;
+                const index = try self.variant_index(info.field_names.len);
                 assert(index < info.field_names.len);
                 return std.enums.values(T)[index];
             },
@@ -271,4 +295,23 @@ test "arbitrary enums and structs follow derive(Arbitrary)" {
     // byte_size reads the last byte: 0 % 10 = 0.
     try testing.expectEqual(@as(usize, 0), v.arbitrary_len(u32));
     try testing.expect(v.ratio(u8, 1, 1));
+}
+
+test "arbitrary_bytes reads a continue bit before each byte, up to len_max" {
+    // Continue bits are the low bit: 3 continues, 2 stops.
+    const data = [_]u8{ 3, 0xaa, 1, 0xbb, 2, 0xcc };
+    var u: Unstructured = .init(&data);
+    const bytes = try u.arbitrary_bytes(testing.allocator, 8);
+    defer testing.allocator.free(bytes);
+    try testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb }, bytes);
+    try testing.expectEqual(@as(usize, 1), u.len());
+    // The cap stops before reading another continue bit.
+    var v: Unstructured = .init(&data);
+    const capped = try v.arbitrary_bytes(testing.allocator, 1);
+    defer testing.allocator.free(capped);
+    try testing.expectEqualSlices(u8, &.{0xaa}, capped);
+    try testing.expectEqual(@as(usize, 4), v.len());
+    // 0x80000000 * 6 >> 32 = 3.
+    var w: Unstructured = .init(&.{ 0, 0, 0, 0x80 });
+    try testing.expectEqual(@as(u64, 3), try w.variant_index(6));
 }
