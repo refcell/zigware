@@ -71,8 +71,10 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
   reports the median of per-round ratios, builds commonware with
   `RUSTFLAGS="-C target-cpu=native"` (zigware also builds for the native CPU), and gives each
   row a verdict: "faster" when the median is below 0.95 and at most n/8 of its n rounds reach
-  1, "slower" mirrored, "tie" otherwise. Each round's pair holds a machine-wide bench lock, so
-  two lanes' benches never run at once. Rows measured
+  1, "slower" mirrored, "tie" otherwise. Each round's pair waits its turn in a first-come, first-served
+  queue (etc/scripts/bench-lock.sh) for one of two slots, one CCD each (8 cores and its own
+  L3), and both sides run pinned to that slot, so two lanes' benches never share cores; rows
+  above 16 threads take both slots with BENCH_WHOLE=1. Rows measured
   before then alternated with commonware first, often reported best-of-3 per side, and ran
   commonware built for baseline x86-64, which favored zigware wherever commonware relies on
   compiler auto-vectorization.

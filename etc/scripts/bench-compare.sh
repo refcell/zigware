@@ -18,8 +18,11 @@
 # (paired) zigware / commonware ratios; BENCH_STAT=best reports the best of each side instead.
 # A row is "faster" only when the median is below 0.95 and at most n/8 of its n rounds
 # (rounded down: none of 4, one of 8) reach 1, "slower" mirrored, and "tie" otherwise (noise
-# counts as not yet faster); raise `runs` on noisy rows. Each round's pair holds the
-# machine-wide bench lock (~/.cache/zigware/bench.lock), so lanes' benches never overlap. commonware builds with RUSTFLAGS="-C target-cpu=native" in its
+# counts as not yet faster); raise `runs` on noisy rows. Each round's pair holds one slot of
+# the machine-wide bench queue (etc/scripts/bench-lock.sh: first come, first served, one CCD
+# per slot), and both sides run pinned to it, so lanes' benches never share cores.
+# BENCH_WHOLE=1 takes both slots for rows above 16 threads. commonware builds with
+# RUSTFLAGS="-C target-cpu=native" in its
 # own target directory (target-native), as zigware builds for the native CPU; CW_NATIVE=0
 # builds it for baseline x86-64 instead. The table goes to stdout; the raw medians to
 # .cache/bench-compare/raw.tsv, in the format docs/bench/<lane>.tsv takes: `# key: value`
@@ -31,6 +34,7 @@ set -euo pipefail
 runs=${1:-4}
 ref=${COMMONWARE_REF:-$HOME/.cache/zigware/commonware-ref}
 root=$(cd "$(dirname "$0")/../.." && pwd)
+source "$root/etc/scripts/bench-lock.sh"
 out="$root/.cache/bench-compare"
 mkdir -p "$out"
 scratch=$(mktemp -d "${BENCH_DIR:-${TMPDIR:-/tmp}}/bench-compare.XXXXXX")
@@ -295,17 +299,18 @@ for run in $(seq 1 "$runs"); do
     # A failed run records nan (its stderr is in bench.log) instead of ending the comparison.
     log="$out/bench.log"
     run_cw() {
-      cw=$(cd "$ref" && TMPDIR="$scratch" "$(cw_bin "$target")" "${cw_args[@]}" --exact \
+      cw=$(cd "$ref" && TMPDIR="$scratch" taskset -c "$BENCH_CPUS" "$(cw_bin "$target")" \
+        "${cw_args[@]}" --exact \
         "$name" 2>> "$log" | median_ns "$name") || cw=nan
     }
     run_zw() {
-      zw=$(cd "$scratch" && "$root/zig-out/bench/bench-$package" "${zw_args[@]}" -- "$name" \
+      zw=$(cd "$scratch" && taskset -c "$BENCH_CPUS" "$root/zig-out/bench/bench-$package" \
+        "${zw_args[@]}" -- "$name" \
         2>> "$log" | median_ns "$name") || zw=nan
     }
-    exec {bench_lock}> "$HOME/.cache/zigware/bench.lock"
-    flock "$bench_lock"
+    bench_lock_acquire
     if ((run % 2 == 1)); then run_cw; run_zw; else run_zw; run_cw; fi
-    exec {bench_lock}>&-
+    bench_lock_release
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$run" "$package" "$name" "${cw:-nan}" "${zw:-nan}" \
       "$load" |
       tee -a "$out/raw.tsv" >&2
