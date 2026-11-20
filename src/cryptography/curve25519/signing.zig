@@ -18,6 +18,7 @@
 //! batches run through `batch`, the crate's counter-mode coefficients and bucket MSM.
 
 const std = @import("std");
+const utils = @import("utils");
 const codec = @import("codec");
 const cryptography = @import("cryptography");
 const formatting = @import("formatting");
@@ -189,7 +190,7 @@ pub const VerifyingKey = struct {
 
     /// Equality and order are by encoding, so aliases of one point are different keys.
     pub fn eql(a: VerifyingKey, b: VerifyingKey) bool {
-        return std.mem.eql(u8, &a.bytes, &b.bytes);
+        return utils.bytes_eql(a.bytes.len, &a.bytes, &b.bytes);
     }
 
     pub fn order(a: VerifyingKey, b: VerifyingKey) std.math.Order {
@@ -230,7 +231,7 @@ pub const Signature = struct {
     }
 
     pub fn eql(a: Signature, b: Signature) bool {
-        return std.mem.eql(u8, &a.bytes, &b.bytes);
+        return utils.bytes_eql(a.bytes.len, &a.bytes, &b.bytes);
     }
 
     pub fn order(a: Signature, b: Signature) std.math.Order {

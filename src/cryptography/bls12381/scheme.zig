@@ -7,6 +7,7 @@
 //! bytes, as commonware's do.
 
 const std = @import("std");
+const utils = @import("utils");
 const assert = std.debug.assert;
 const codec = @import("codec");
 const parallel = @import("parallel");
@@ -162,7 +163,7 @@ pub const PublicKey = struct {
     }
 
     pub fn eql(a: PublicKey, b: PublicKey) bool {
-        return std.mem.eql(u8, &a.raw, &b.raw);
+        return utils.bytes_eql(a.raw.len, &a.raw, &b.raw);
     }
 
     pub fn order(a: PublicKey, b: PublicKey) std.math.Order {
@@ -205,7 +206,7 @@ pub const Signature = struct {
     }
 
     pub fn eql(a: Signature, b: Signature) bool {
-        return std.mem.eql(u8, &a.raw, &b.raw);
+        return utils.bytes_eql(a.raw.len, &a.raw, &b.raw);
     }
 
     pub fn order(a: Signature, b: Signature) std.math.Order {

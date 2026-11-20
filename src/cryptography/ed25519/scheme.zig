@@ -5,6 +5,7 @@
 //! Messages are signed as `union_unique(namespace, message)`; verification follows ZIP-215.
 
 const std = @import("std");
+const utils = @import("utils");
 const assert = std.debug.assert;
 const codec = @import("codec");
 const core = @import("core.zig");
@@ -149,7 +150,7 @@ pub const PublicKey = struct {
     }
 
     pub fn eql(a: PublicKey, b: PublicKey) bool {
-        return std.mem.eql(u8, &a.key.bytes, &b.key.bytes);
+        return utils.bytes_eql(a.key.bytes.len, &a.key.bytes, &b.key.bytes);
     }
 
     /// Order of the encodings (two encodings of one point are distinct keys).
@@ -188,7 +189,7 @@ pub const Signature = struct {
     }
 
     pub fn eql(a: Signature, b: Signature) bool {
-        return std.mem.eql(u8, &a.raw, &b.raw);
+        return utils.bytes_eql(a.raw.len, &a.raw, &b.raw);
     }
 
     pub fn order(a: Signature, b: Signature) std.math.Order {

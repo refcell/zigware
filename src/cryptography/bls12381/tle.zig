@@ -11,6 +11,7 @@
 //! Wire format: `U` (compressed `V.Public`), then `V` and `W` (32 bytes each).
 
 const std = @import("std");
+const utils = @import("utils");
 const assert = std.debug.assert;
 const codec = @import("codec");
 const primitives = @import("primitives/root.zig");
@@ -48,7 +49,8 @@ pub fn Ciphertext(comptime V: type) type {
         pub const fixed_size: usize = V.Public.fixed_size + 2 * block_size;
 
         pub fn eql(a: Self, b: Self) bool {
-            return a.u.eql(b.u) and std.mem.eql(u8, &a.v, &b.v) and std.mem.eql(u8, &a.w, &b.w);
+            return a.u.eql(b.u) and utils.bytes_eql(a.v.len, &a.v, &b.v) and
+                utils.bytes_eql(a.w.len, &a.w, &b.w);
         }
 
         pub fn write(self: Self, writer: *codec.Writer) void {

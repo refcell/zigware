@@ -16,6 +16,7 @@
 //!   follows the `ecdsa` crate.
 
 const std = @import("std");
+const utils = @import("utils");
 const assert = std.debug.assert;
 const codec = @import("codec");
 const Opaque = @import("../secret.zig").Opaque;
@@ -271,7 +272,7 @@ pub const PublicKeyInner = struct {
     }
 
     pub fn eql(a: *const PublicKeyInner, b: *const PublicKeyInner) bool {
-        return std.mem.eql(u8, &a.raw, &b.raw);
+        return utils.bytes_eql(a.raw.len, &a.raw, &b.raw);
     }
 
     pub fn order(a: *const PublicKeyInner, b: *const PublicKeyInner) std.math.Order {

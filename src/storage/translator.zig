@@ -138,7 +138,7 @@ pub fn UnhashedArray(comptime n: usize) type {
         }
 
         pub fn eql(a: Self, b: Self) bool {
-            return std.mem.eql(u8, &a.inner, &b.inner);
+            return utils.bytes_eql(a.inner.len, &a.inner, &b.inner);
         }
 
         /// Hashes like commonware: one `write` of the bytes into `UintIdentity`.

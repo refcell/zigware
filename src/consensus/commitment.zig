@@ -16,6 +16,7 @@
 //! scheme's `Commitment`, and `Context` the context hasher's digest.
 
 const std = @import("std");
+const utils = @import("utils");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
@@ -97,7 +98,7 @@ pub fn Commitment(comptime BlockDigest: type, comptime Root: type, comptime Cont
         }
 
         pub fn eql(a: Self, b: Self) bool {
-            return std.mem.eql(u8, &a.bytes, &b.bytes);
+            return utils.bytes_eql(a.bytes.len, &a.bytes, &b.bytes);
         }
 
         pub fn order(a: Self, b: Self) std.math.Order {

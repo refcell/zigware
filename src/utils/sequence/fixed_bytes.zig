@@ -49,7 +49,7 @@ pub fn FixedBytes(comptime N: usize) type {
         }
 
         pub fn eql(a: Self, b: Self) bool {
-            return std.mem.eql(u8, &a.bytes, &b.bytes);
+            return @import("../bytes_eql.zig").eql(N, &a.bytes, &b.bytes);
         }
 
         pub fn format(self: Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {

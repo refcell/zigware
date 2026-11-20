@@ -4,6 +4,7 @@
 //! out-of-range scalars and high `s`, so every signature has one encoding.
 
 const std = @import("std");
+const utils = @import("utils");
 const assert = std.debug.assert;
 const codec = @import("codec");
 const signer = @import("../signer.zig");
@@ -170,7 +171,7 @@ pub const Signature = struct {
     }
 
     pub fn eql(a: Signature, b: Signature) bool {
-        return std.mem.eql(u8, &a.raw, &b.raw);
+        return utils.bytes_eql(a.raw.len, &a.raw, &b.raw);
     }
 
     pub fn order(a: Signature, b: Signature) std.math.Order {

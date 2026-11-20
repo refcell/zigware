@@ -7,6 +7,7 @@
 //! bytes.
 
 const std = @import("std");
+const utils = @import("utils");
 const assert = std.debug.assert;
 const codec = @import("codec");
 
@@ -57,7 +58,7 @@ pub fn Digest(comptime length: usize, comptime name: []const u8) type {
         }
 
         pub fn eql(a: Self, b: Self) bool {
-            return std.mem.eql(u8, &a.bytes, &b.bytes);
+            return utils.bytes_eql(a.bytes.len, &a.bytes, &b.bytes);
         }
 
         /// Lexicographic order of the bytes, as commonware's `Ord` (a `memcmp`): big-endian

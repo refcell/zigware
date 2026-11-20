@@ -7,6 +7,7 @@
 //! x25519-dalek's `was_contributory` does.
 
 const std = @import("std");
+const utils = @import("utils");
 const assert = std.debug.assert;
 const codec = @import("codec");
 const Opaque = @import("../secret.zig").Opaque;
@@ -20,7 +21,7 @@ pub const EphemeralPublicKey = struct {
     pub const fixed_size: usize = 32;
 
     pub fn eql(a: EphemeralPublicKey, b: EphemeralPublicKey) bool {
-        return std.mem.eql(u8, &a.bytes, &b.bytes);
+        return utils.bytes_eql(a.bytes.len, &a.bytes, &b.bytes);
     }
 
     pub fn write(self: *const EphemeralPublicKey, writer: *codec.Writer) void {
