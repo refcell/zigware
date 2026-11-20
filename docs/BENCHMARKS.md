@@ -1010,6 +1010,209 @@ zigware's fastest samples run 1.5 to 2× under commonware's (`decode` 1 MiB chun
 The coding benches now run their pool through `Rayon.with_policy`, the adaptive strategy
 commonware's `Rayon::new` builds. That made no difference beyond noise here.
 
+## Journal: every bench group, paired rounds (2026-11-19, storage-journal lane)
+
+All 161 of commonware's `journal` benches (12 groups) against zigware's of the same names,
+on tmpfs with bench-compare.sh's criterion settings. Each round runs a whole group on both
+sides back to back, alternating which goes first, and a row's ratio is the median of its
+per-round ratios (zigware / commonware), not a ratio of bests. "before" is main at 3d7a069c
+(3 rounds, load 33 to 116). "after" re-ran the five groups that had rows over 1.3× (3
+rounds, load 50 to 112), `variable_prepare_append` on 3075f3a9 (load 77 to 112); a dash
+means the group was not re-run and its times are the before run's. The load moves both sides
+by tens of percent, so read ratios between 0.8 and 1.3 as even.
+
+Fixes, each with a planted bug its tests catch:
+- 269da2cd: `paged.Replay` sized its read slots and data buffer to the requested buffer even
+  for a blob of a few pages (1 MiB rows, 2.3 to 3.2×, now 0.3 to 1.0×); a read never spans
+  more than the stored pages, so the cap leaves every read unchanged. The journal benches
+  also run on `allocator.Heap` (commonware's harness installs mimalloc with
+  `Config::DEFAULT`), so a buffer above smp_allocator's size classes is no longer a fresh
+  `mmap` faulting on every page (`segmented_variable_append_buffered` size=256 1.46× to
+  0.50×).
+- 13008b07: a native zstd decoder (`zstd/decode.zig`). `std.compress.zstd` copied matches a
+  byte at a time, 0.16 to 0.6 GB/s; the new decoder decodes the bench's 16 KiB records at
+  tens of GB/s. Every `variable_read_compressed` row is now below 1× (it was up to 10.5×).
+- 3075f3a9: uncompressed `prepare_append` sizes the batch and encodes into one exact buffer
+  instead of growing a list and shrinking it (size=1024 items=32 9.3× to 1.0×).
+- 501df260: the journals' recovery scans read whole pages up to the replay buffer per blob
+  read (`recoverable_prefix_len_scan`), as commonware's do. Reopening 100k committed items
+  above the watermark takes 56 mock reads instead of 785. Wall time is unchanged within the
+  noise: 405 against 389 µs in memory, and 16.4 ms either way on tmpfs (3 alternating
+  rounds). Replay does not scan, so replay rows don't move.
+
+Still over 1.3×, all `variable_prepare_append`: the single-item rows (8.3× at size=64, 3.9×
+at size=1024) and most compressed size=1024 rows (1.3 to 1.6×), where `Heap`'s small
+allocations take 35 to 45 ns against smp_allocator's 15 ns (a 64-byte prepare is about four
+allocations, and with smp the same rows read 1.1 to 2.3×); and compressible 1 MiB items (3.3
+to 5.5×), which are the byte-exact libzstd level-3 encoder's match finding
+(storage-merkle's). Fixed append waits for storage-qmdb's write-side findings: the paged
+write path does not run inside its timed batch, and its tip copy is first-touch page faults
+of a fresh buffer, an allocator effect.
+
+| bench | parameters | commonware | zigware | before | after |
+|---|---|---|---|---|---|
+| `append_sync` | `journal=fixed mode=sync` | 21.6 µs | 1.75 µs | 0.08× | — |
+| `append_sync` | `journal=fixed mode=start_sync` | 22.8 µs | 1.81 µs | 0.08× | — |
+| `append_sync` | `journal=fixed mode=commit` | 18.2 µs | 1.27 µs | 0.07× | — |
+| `append_sync` | `journal=variable mode=sync` | 42.9 µs | 3.35 µs | 0.08× | — |
+| `append_sync` | `journal=variable mode=start_sync` | 45.2 µs | 3.46 µs | 0.08× | — |
+| `append_sync` | `journal=variable mode=commit` | 16.9 µs | 2.46 µs | 0.15× | — |
+| `fixed_append` | `items=1000 size=32` | 283 µs | 67.1 µs | 0.22× | — |
+| `fixed_append` | `items=10000 size=32` | 2.37 ms | 653 µs | 0.28× | — |
+| `fixed_append` | `items=100000 size=32` | 22.2 ms | 6.59 ms | 0.30× | — |
+| `fixed_append` | `items=1000000 size=32` | 201 ms | 65.5 ms | 0.33× | — |
+| `fixed_append` | `items=100000 size=32 items_per_blob=1000000` | 21 ms | 5.87 ms | 0.28× | — |
+| `fixed_append` | `items=1000000 size=32 items_per_blob=1000000` | 199 ms | 55 ms | 0.27× | — |
+| `fixed_append_buffered` | `items=10240 size=32 prepared=false` | 1.57 ms | 353 µs | 0.22× | — |
+| `fixed_append_buffered` | `items=10240 size=32 prepared=true` | 1.84 ms | 683 µs | 0.37× | — |
+| `fixed_append_buffered` | `items=1280 size=256 prepared=false` | 198 µs | 84.1 µs | 0.42× | — |
+| `fixed_append_buffered` | `items=1280 size=256 prepared=true` | 247 µs | 130 µs | 0.52× | — |
+| `fixed_read_random` | `mode=serial items=100 size=32` | 7.23 µs | 3.75 µs | 0.53× | — |
+| `fixed_read_random` | `mode=serial items=1000 size=32` | 94.5 µs | 35.4 µs | 0.47× | — |
+| `fixed_read_random` | `mode=serial items=10000 size=32` | 6.67 ms | 501 µs | 0.08× | — |
+| `fixed_read_random` | `mode=serial items=100000 size=32` | 677 ms | 225 ms | 0.33× | — |
+| `fixed_read_random` | `mode=concurrent items=100 size=32` | 20 µs | 4 µs | 0.20× | — |
+| `fixed_read_random` | `mode=concurrent items=1000 size=32` | 256 µs | 41.9 µs | 0.16× | — |
+| `fixed_read_random` | `mode=concurrent items=10000 size=32` | 21 ms | 547 µs | 0.02× | — |
+| `fixed_read_random` | `mode=concurrent items=100000 size=32` | 683 ms | 153 ms | 0.25× | — |
+| `fixed_read_random` | `mode=read_many items=100 size=32` | 28.5 µs | 5.42 µs | 0.19× | — |
+| `fixed_read_random` | `mode=read_many items=1000 size=32` | 246 µs | 57.4 µs | 0.28× | — |
+| `fixed_read_random` | `mode=read_many items=10000 size=32` | 1.83 ms | 797 µs | 0.47× | — |
+| `fixed_read_random` | `mode=read_many items=100000 size=32` | 102 ms | 73.9 ms | 0.79× | — |
+| `fixed_read_sequential` | `items=1000 size=32` | 68.2 µs | 33.6 µs | 0.52× | — |
+| `fixed_read_sequential` | `items=10000 size=32` | 672 µs | 346 µs | 0.57× | — |
+| `fixed_read_sequential` | `items=100000 size=32` | 6.72 ms | 3.34 ms | 0.50× | — |
+| `fixed_read_sequential` | `items=500000 size=32` | 34.1 ms | 17.6 ms | 0.52× | — |
+| `fixed_replay` | `items=1000 buffer=16384 size=32 read_options=dont_cache` | 48.7 µs | 4.91 µs | 0.10× | 0.11× |
+| `fixed_replay` | `items=1000 buffer=65536 size=32 read_options=dont_cache` | 22.1 µs | 4.51 µs | 1.19× | 0.20× |
+| `fixed_replay` | `items=1000 buffer=1048576 size=32 read_options=dont_cache` | 13.1 µs | 4.62 µs | 2.63× | 0.34× |
+| `fixed_replay` | `items=1000 buffer=16384 size=32 read_options=cache` | 45.9 µs | 4.62 µs | 0.12× | 0.09× |
+| `fixed_replay` | `items=1000 buffer=65536 size=32 read_options=cache` | 17.4 µs | 4.63 µs | 1.63× | 0.25× |
+| `fixed_replay` | `items=1000 buffer=1048576 size=32 read_options=cache` | 11.1 µs | 4.47 µs | 3.17× | 0.38× |
+| `fixed_replay` | `items=10000 buffer=16384 size=32 read_options=dont_cache` | 590 µs | 43.8 µs | 0.11× | 0.08× |
+| `fixed_replay` | `items=10000 buffer=65536 size=32 read_options=dont_cache` | 174 µs | 42.9 µs | 0.58× | 0.25× |
+| `fixed_replay` | `items=10000 buffer=1048576 size=32 read_options=dont_cache` | 97.8 µs | 45 µs | 2.33× | 0.47× |
+| `fixed_replay` | `items=10000 buffer=16384 size=32 read_options=cache` | 433 µs | 43.2 µs | 0.09× | 0.10× |
+| `fixed_replay` | `items=10000 buffer=65536 size=32 read_options=cache` | 164 µs | 43.3 µs | 0.79× | 0.26× |
+| `fixed_replay` | `items=10000 buffer=1048576 size=32 read_options=cache` | 71.6 µs | 44.1 µs | 3.10× | 0.70× |
+| `fixed_replay` | `items=100000 buffer=16384 size=32 read_options=dont_cache` | 6.76 ms | 593 µs | 0.07× | 0.09× |
+| `fixed_replay` | `items=100000 buffer=65536 size=32 read_options=dont_cache` | 1.71 ms | 435 µs | 0.31× | 0.27× |
+| `fixed_replay` | `items=100000 buffer=1048576 size=32 read_options=dont_cache` | 685 µs | 475 µs | 1.30× | 0.69× |
+| `fixed_replay` | `items=100000 buffer=16384 size=32 read_options=cache` | 3.64 ms | 474 µs | 0.07× | 0.13× |
+| `fixed_replay` | `items=100000 buffer=65536 size=32 read_options=cache` | 1.5 ms | 473 µs | 0.33× | 0.32× |
+| `fixed_replay` | `items=100000 buffer=1048576 size=32 read_options=cache` | 621 µs | 471 µs | 1.60× | 0.75× |
+| `fixed_replay` | `items=500000 buffer=16384 size=32 read_options=dont_cache` | 27.8 ms | 4.07 ms | 0.12× | 0.15× |
+| `fixed_replay` | `items=500000 buffer=65536 size=32 read_options=dont_cache` | 10.1 ms | 3.79 ms | 0.41× | 0.39× |
+| `fixed_replay` | `items=500000 buffer=1048576 size=32 read_options=dont_cache` | 4.65 ms | 4.1 ms | 1.44× | 0.88× |
+| `fixed_replay` | `items=500000 buffer=16384 size=32 read_options=cache` | 20 ms | 4.24 ms | 0.25× | 0.19× |
+| `fixed_replay` | `items=500000 buffer=65536 size=32 read_options=cache` | 7.6 ms | 4.08 ms | 0.37× | 0.55× |
+| `fixed_replay` | `items=500000 buffer=1048576 size=32 read_options=cache` | 4.03 ms | 4.01 ms | 1.20× | 0.97× |
+| `read_cached` | `journal=fixed size=8` | 1.45 ms | 672 µs | 0.46× | — |
+| `read_cached` | `journal=fixed size=32` | 1.66 ms | 695 µs | 0.42× | — |
+| `read_cached` | `journal=fixed size=64` | 1.8 ms | 706 µs | 0.36× | — |
+| `read_cached` | `journal=fixed size=128` | 2.79 ms | 769 µs | 0.28× | — |
+| `read_cached` | `journal=fixed size=129` | 5.26 ms | 823 µs | 0.16× | — |
+| `read_cached` | `journal=fixed size=256` | 5.5 ms | 961 µs | 0.23× | — |
+| `read_cached` | `journal=variable size=32` | 5.08 ms | 2.1 ms | 0.41× | — |
+| `segmented_variable_append_buffered` | `items=10240 size=32` | 306 µs | 114 µs | 0.52× | 0.37× |
+| `segmented_variable_append_buffered` | `items=1280 size=256` | 48.7 µs | 25.8 µs | 1.46× | 0.54× |
+| `variable_prepare_append` | `items=1 size=64 compression=none random=false` | 37.9 ns | 384 ns | 2.25× | 8.29× |
+| `variable_prepare_append` | `items=1 size=64 compression=3 random=false` | 1.35 µs | 1.42 µs | 0.85× | 1.05× |
+| `variable_prepare_append` | `items=32 size=64 compression=none random=false` | 457 ns | 164 ns | 0.58× | 0.37× |
+| `variable_prepare_append` | `items=32 size=64 compression=3 random=false` | 40.5 µs | 34 µs | 0.80× | 0.84× |
+| `variable_prepare_append` | `items=256 size=64 compression=none random=false` | 2.16 µs | 632 ns | 0.73× | 0.29× |
+| `variable_prepare_append` | `items=256 size=64 compression=3 random=false` | 316 µs | 279 µs | 0.81× | 0.88× |
+| `variable_prepare_append` | `items=1024 size=64 compression=none random=false` | 7.71 µs | 1.91 µs | 2.51× | 0.25× |
+| `variable_prepare_append` | `items=1024 size=64 compression=3 random=false` | 1.17 ms | 1.17 ms | 1.06× | 1.03× |
+| `variable_prepare_append` | `items=32768 size=64 compression=none random=false` | 296 µs | 51.7 µs | 2.23× | 0.17× |
+| `variable_prepare_append` | `items=32768 size=64 compression=3 random=false` | 37.2 ms | 38.2 ms | 0.81× | 1.05× |
+| `variable_prepare_append` | `items=1 size=64 compression=3 random=true` | 824 ns | 920 ns | 0.78× | 1.12× |
+| `variable_prepare_append` | `items=32 size=64 compression=3 random=true` | 20.8 µs | 19.4 µs | 0.69× | 0.93× |
+| `variable_prepare_append` | `items=256 size=64 compression=3 random=true` | 176 µs | 170 µs | 0.76× | 0.87× |
+| `variable_prepare_append` | `items=1024 size=64 compression=3 random=true` | 700 µs | 982 µs | 1.21× | 1.40× |
+| `variable_prepare_append` | `items=32768 size=64 compression=3 random=true` | 23.6 ms | 30.9 ms | 1.09× | 1.31× |
+| `variable_prepare_append` | `items=1 size=1024 compression=none random=false` | 57 ns | 224 ns | 1.74× | 3.86× |
+| `variable_prepare_append` | `items=1 size=1024 compression=3 random=false` | 1.4 µs | 2.16 µs | 1.08× | 1.61× |
+| `variable_prepare_append` | `items=32 size=1024 compression=none random=false` | 1.36 µs | 838 ns | 9.31× | 0.62× |
+| `variable_prepare_append` | `items=32 size=1024 compression=3 random=false` | 43.2 µs | 62 µs | 1.14× | 1.49× |
+| `variable_prepare_append` | `items=256 size=1024 compression=none random=false` | 9.86 µs | 5.7 µs | 5.28× | 0.53× |
+| `variable_prepare_append` | `items=256 size=1024 compression=3 random=false` | 373 µs | 543 µs | 0.87× | 1.22× |
+| `variable_prepare_append` | `items=1024 size=1024 compression=none random=false` | 52.7 µs | 25.3 µs | 3.39× | 0.48× |
+| `variable_prepare_append` | `items=1024 size=1024 compression=3 random=false` | 1.47 ms | 1.99 ms | 0.74× | 1.27× |
+| `variable_prepare_append` | `items=32768 size=1024 compression=none random=false` | 6.72 ms | 2.59 ms | 1.11× | 0.42× |
+| `variable_prepare_append` | `items=32768 size=1024 compression=3 random=false` | 53.7 ms | 63.3 ms | 1.13× | 1.50× |
+| `variable_prepare_append` | `items=1 size=1024 compression=3 random=true` | 2.73 µs | 2.93 µs | 0.80× | 1.09× |
+| `variable_prepare_append` | `items=32 size=1024 compression=3 random=true` | 99.5 µs | 95 µs | 0.83× | 0.93× |
+| `variable_prepare_append` | `items=256 size=1024 compression=3 random=true` | 918 µs | 1.27 ms | 1.22× | 1.39× |
+| `variable_prepare_append` | `items=1024 size=1024 compression=3 random=true` | 3.53 ms | 4.73 ms | 1.29× | 1.33× |
+| `variable_prepare_append` | `items=32768 size=1024 compression=3 random=true` | 116 ms | 159 ms | 1.20× | 1.37× |
+| `variable_prepare_append` | `items=1 size=1048576 compression=none random=false` | 26.4 µs | 39.4 µs | 12.73× | 1.48× |
+| `variable_prepare_append` | `items=1 size=1048576 compression=3 random=false` | 199 µs | 861 µs | 7.65× | 5.50× |
+| `variable_prepare_append` | `items=32 size=1048576 compression=none random=false` | 7.32 ms | 3.08 ms | 1.51× | 0.42× |
+| `variable_prepare_append` | `items=32 size=1048576 compression=3 random=false` | 8.36 ms | 28.8 ms | 6.14× | 3.32× |
+| `variable_prepare_append` | `items=1 size=1048576 compression=3 random=true` | 200 µs | 208 µs | 4.24× | 1.06× |
+| `variable_prepare_append` | `items=32 size=1048576 compression=3 random=true` | 10.5 ms | 14.6 ms | 2.16× | 1.56× |
+| `variable_read_compressed` | `mode=read_many items=10000 size=64 random=false` | 2.36 ms | 1.74 ms | 2.06× | 0.75× |
+| `variable_read_compressed` | `mode=read_many_uncached items=10000 size=64 random=false` | 2.56 ms | 1.34 ms | 1.64× | 0.53× |
+| `variable_read_compressed` | `mode=read_uncached items=10000 size=64 random=false` | 97.2 ms | 10 ms | 0.13× | 0.14× |
+| `variable_read_compressed` | `mode=replay items=10000 size=64 random=false` | 2.89 ms | 1.33 ms | 1.22× | 0.46× |
+| `variable_read_compressed` | `mode=read_many items=10000 size=64 random=true` | 1.51 ms | 978 µs | 1.73× | 0.65× |
+| `variable_read_compressed` | `mode=read_many_uncached items=10000 size=64 random=true` | 1.88 ms | 998 µs | 1.13× | 0.53× |
+| `variable_read_compressed` | `mode=read_uncached items=10000 size=64 random=true` | 91.8 ms | 10.8 ms | 0.10× | 0.12× |
+| `variable_read_compressed` | `mode=replay items=10000 size=64 random=true` | 2.33 ms | 606 µs | 1.10× | 0.26× |
+| `variable_read_compressed` | `mode=read_many items=10000 size=1024 random=false` | 6.55 ms | 2.81 ms | 3.49× | 0.43× |
+| `variable_read_compressed` | `mode=read_many_uncached items=10000 size=1024 random=false` | 7.26 ms | 2.08 ms | 2.08× | 0.29× |
+| `variable_read_compressed` | `mode=read_uncached items=10000 size=1024 random=false` | 108 ms | 11.8 ms | 0.26× | 0.11× |
+| `variable_read_compressed` | `mode=replay items=10000 size=1024 random=false` | 6.47 ms | 2.79 ms | 4.53× | 0.43× |
+| `variable_read_compressed` | `mode=read_many items=10000 size=1024 random=true` | 5.25 ms | 3.29 ms | 0.87× | 0.62× |
+| `variable_read_compressed` | `mode=read_many_uncached items=10000 size=1024 random=true` | 11.6 ms | 4.4 ms | 0.54× | 0.38× |
+| `variable_read_compressed` | `mode=read_uncached items=10000 size=1024 random=true` | 129 ms | 18.2 ms | 0.12× | 0.15× |
+| `variable_read_compressed` | `mode=replay items=10000 size=1024 random=true` | 6.73 ms | 3.84 ms | 1.15× | 0.57× |
+| `variable_read_compressed` | `mode=read_many items=1024 size=16384 random=false` | 3.66 ms | 1.32 ms | 10.46× | 0.36× |
+| `variable_read_compressed` | `mode=read_many_uncached items=1024 size=16384 random=false` | 4.85 ms | 620 µs | 4.66× | 0.12× |
+| `variable_read_compressed` | `mode=read_uncached items=1024 size=16384 random=false` | 11.2 ms | 1.74 ms | 3.49× | 0.16× |
+| `variable_read_compressed` | `mode=replay items=1024 size=16384 random=false` | 5.42 ms | 4.72 ms | 6.53× | 0.83× |
+| `variable_read_compressed` | `mode=read_many items=1024 size=16384 random=true` | 7.02 ms | 2.97 ms | 0.46× | 0.42× |
+| `variable_read_compressed` | `mode=read_many_uncached items=1024 size=16384 random=true` | 12.5 ms | 4.09 ms | 0.37× | 0.31× |
+| `variable_read_compressed` | `mode=read_uncached items=1024 size=16384 random=true` | 45.4 ms | 6.89 ms | 0.14× | 0.15× |
+| `variable_read_compressed` | `mode=replay items=1024 size=16384 random=true` | 10.2 ms | 4.81 ms | 0.58× | 0.48× |
+| `variable_read_random` | `mode=serial items=100 size=32` | 23.8 µs | 10.4 µs | 0.44× | — |
+| `variable_read_random` | `mode=serial items=1000 size=32` | 421 µs | 110 µs | 0.29× | — |
+| `variable_read_random` | `mode=serial items=10000 size=32` | 162 ms | 31.5 ms | 0.19× | — |
+| `variable_read_random` | `mode=serial items=100000 size=32` | 1.27 s | 356 ms | 0.29× | — |
+| `variable_read_random` | `mode=concurrent items=100 size=32` | 45.4 µs | 11.7 µs | 0.26× | — |
+| `variable_read_random` | `mode=concurrent items=1000 size=32` | 798 µs | 119 µs | 0.15× | — |
+| `variable_read_random` | `mode=concurrent items=10000 size=32` | 176 ms | 24.1 ms | 0.15× | — |
+| `variable_read_random` | `mode=concurrent items=100000 size=32` | 1.32 s | 392 ms | 0.30× | — |
+| `variable_read_random` | `mode=read_many items=100 size=32` | 32.1 µs | 13.2 µs | 0.41× | — |
+| `variable_read_random` | `mode=read_many items=1000 size=32` | 336 µs | 148 µs | 0.46× | — |
+| `variable_read_random` | `mode=read_many items=10000 size=32` | 34.7 ms | 22.6 ms | 0.65× | — |
+| `variable_read_random` | `mode=read_many items=100000 size=32` | 133 ms | 107 ms | 0.88× | — |
+| `variable_replay` | `items=1000 buffer=16384 size=32 read_options=dont_cache` | 80.2 µs | 12.6 µs | 0.43× | 0.16× |
+| `variable_replay` | `items=1000 buffer=65536 size=32 read_options=dont_cache` | 67.7 µs | 13.2 µs | 0.76× | 0.20× |
+| `variable_replay` | `items=1000 buffer=1048576 size=32 read_options=dont_cache` | 48 µs | 12.9 µs | 1.03× | 0.27× |
+| `variable_replay` | `items=1000 buffer=16384 size=32 read_options=cache` | 84.7 µs | 12.3 µs | 0.40× | 0.14× |
+| `variable_replay` | `items=1000 buffer=65536 size=32 read_options=cache` | 57.9 µs | 12.8 µs | 0.81× | 0.23× |
+| `variable_replay` | `items=1000 buffer=1048576 size=32 read_options=cache` | 44.7 µs | 12.9 µs | 1.01× | 0.29× |
+| `variable_replay` | `items=10000 buffer=16384 size=32 read_options=dont_cache` | 738 µs | 106 µs | 0.30× | 0.15× |
+| `variable_replay` | `items=10000 buffer=65536 size=32 read_options=dont_cache` | 468 µs | 111 µs | 0.49× | 0.24× |
+| `variable_replay` | `items=10000 buffer=1048576 size=32 read_options=dont_cache` | 490 µs | 124 µs | 0.54× | 0.25× |
+| `variable_replay` | `items=10000 buffer=16384 size=32 read_options=cache` | 575 µs | 110 µs | 0.37× | 0.21× |
+| `variable_replay` | `items=10000 buffer=65536 size=32 read_options=cache` | 441 µs | 112 µs | 0.53× | 0.25× |
+| `variable_replay` | `items=10000 buffer=1048576 size=32 read_options=cache` | 520 µs | 121 µs | 0.62× | 0.23× |
+| `variable_replay` | `items=100000 buffer=16384 size=32 read_options=dont_cache` | 7.45 ms | 1.15 ms | 0.28× | 0.15× |
+| `variable_replay` | `items=100000 buffer=65536 size=32 read_options=dont_cache` | 4.72 ms | 1.24 ms | 0.43× | 0.26× |
+| `variable_replay` | `items=100000 buffer=1048576 size=32 read_options=dont_cache` | 4.16 ms | 1.42 ms | 0.92× | 0.32× |
+| `variable_replay` | `items=100000 buffer=16384 size=32 read_options=cache` | 6.41 ms | 1.15 ms | 0.54× | 0.18× |
+| `variable_replay` | `items=100000 buffer=65536 size=32 read_options=cache` | 4.33 ms | 1.28 ms | 0.49× | 0.30× |
+| `variable_replay` | `items=100000 buffer=1048576 size=32 read_options=cache` | 3.95 ms | 1.55 ms | 0.48× | 0.36× |
+| `variable_replay` | `items=500000 buffer=16384 size=32 read_options=dont_cache` | 34.9 ms | 7.53 ms | 0.22× | 0.22× |
+| `variable_replay` | `items=500000 buffer=65536 size=32 read_options=dont_cache` | 22.9 ms | 7.42 ms | 0.35× | 0.32× |
+| `variable_replay` | `items=500000 buffer=1048576 size=32 read_options=dont_cache` | 21.7 ms | 7.92 ms | 0.55× | 0.37× |
+| `variable_replay` | `items=500000 buffer=16384 size=32 read_options=cache` | 31.2 ms | 7.01 ms | 0.33× | 0.22× |
+| `variable_replay` | `items=500000 buffer=65536 size=32 read_options=cache` | 21.9 ms | 7.16 ms | 0.54× | 0.34× |
+| `variable_replay` | `items=500000 buffer=1048576 size=32 read_options=cache` | 19.6 ms | 7.58 ms | 0.47× | 0.39× |
+
 ## Appendix: bench coverage
 
 Every Criterion bench in commonware a9ffc25f3 (`benches/` dirs with `criterion_main!`), listed
