@@ -221,7 +221,45 @@ pub fn Merge(comptime K: type, comptime V: type) type {
             return if (position < entries.len) &entries[position].key else null;
         }
 
+        /// The next entry in key order: the nearest stream's on equal keys, which advances every
+        /// stream holding that key. One and two streams, the common chain depths, take
+        /// commonware's fast paths: one key comparison per entry instead of a scan and a pass.
         pub fn next(self: *Self) ?*const Pair(K, V) {
+            return switch (self.streams.len) {
+                0 => null,
+                1 => self.next_one(),
+                2 => self.next_two(),
+                else => self.next_general(),
+            };
+        }
+
+        fn next_one(self: *Self) ?*const Pair(K, V) {
+            assert(self.streams.len == 1);
+            _ = self.peek(0) orelse return null;
+            self.positions[0] += 1;
+            return &self.streams[0][self.positions[0] - 1];
+        }
+
+        fn next_two(self: *Self) ?*const Pair(K, V) {
+            assert(self.streams.len == 2);
+            const level: usize = level: {
+                const near = self.peek(0) orelse break :level 1;
+                const far = self.peek(1) orelse break :level 0;
+                switch (order(K, near, far)) {
+                    .lt => break :level 0,
+                    .gt => break :level 1,
+                    .eq => {
+                        self.positions[1] += 1; // The nearer stream's entry shadows this one.
+                        break :level 0;
+                    },
+                }
+            };
+            _ = self.peek(level) orelse return null;
+            self.positions[level] += 1;
+            return &self.streams[level][self.positions[level] - 1];
+        }
+
+        fn next_general(self: *Self) ?*const Pair(K, V) {
             var winner: ?usize = null;
             for (0..self.streams.len) |level| {
                 const key = self.peek(level) orelse continue;
@@ -269,9 +307,19 @@ test "diff lookup, cursors, and merge prefer the nearest diff" {
     try testing.expectEqual(@as(?u64, 20), cursors.resolve(&.{ 0, 2 }).?.loc());
     try testing.expect(cursors.resolve(&.{ 0, 4 }) == null);
     try testing.expectEqual(@as(?u64, 7), cursors.resolve(&.{ 0, 5 }).?.base_old_loc());
-    var merge = try Merge(Key, u32).init(gpa, &diffs);
-    defer merge.deinit(gpa);
-    const expected = [_]struct { u8, ?u64 }{ .{ 1, 10 }, .{ 2, 20 }, .{ 5, null }, .{ 9, 13 } };
+    const mid = [_]P{ active(2, 15), active(3, 16), active(9, 17) };
+    // One, two, and three streams: the fast paths and the general merge.
+    try expect_merge(&.{&far}, &.{ .{ 1, 10 }, .{ 2, 11 }, .{ 5, 12 }, .{ 9, 13 } });
+    try expect_merge(&diffs, &.{ .{ 1, 10 }, .{ 2, 20 }, .{ 5, null }, .{ 9, 13 } });
+    try expect_merge(&.{ &near, &mid, &far }, &.{
+        .{ 1, 10 }, .{ 2, 20 }, .{ 3, 16 }, .{ 5, null }, .{ 9, 17 },
+    });
+    try expect_merge(&.{ &mid, &near }, &.{ .{ 2, 15 }, .{ 3, 16 }, .{ 5, null }, .{ 9, 17 } });
+}
+
+fn expect_merge(streams: []const []const P, expected: []const struct { u8, ?u64 }) !void {
+    var merge = try Merge(Key, u32).init(testing.allocator, streams);
+    defer merge.deinit(testing.allocator);
     for (expected) |want| {
         const pair = merge.next().?;
         try testing.expectEqual(want[0], pair.key[1]);
