@@ -510,6 +510,9 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
         /// Replaces several leaf digests; validates them all first so a failure changes nothing.
         pub fn update_leaf_batched(self: *Self, gpa: Allocator, updates: []const LeafUpdate) !void {
             for (updates) |update| try self.validate_location(update.location);
+            // Size `overwrites` once for the whole batch instead of growing it as leaves land.
+            const count: u32 = std.math.cast(u32, updates.len) orelse return error.OutOfMemory;
+            try self.overwrites.ensureUnusedCapacity(gpa, count);
             for (updates) |update| try self.store_leaf(gpa, update.location, update.digest);
         }
 
@@ -539,10 +542,22 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
                 for (level.items) |position| overwritten += @intFromBool(position < parent_size);
             }
             try self.overwrites.ensureUnusedCapacity(gpa, overwritten);
+            var below: Hashed = .{};
+            defer gpa.free(below.digests);
             for (&levels, 0..) |*level, height| {
                 if (level.items.len == 0) continue;
                 const positions = level.items;
-                try self.merkleize_level(gpa, base, hasher, positions, @intCast(height), strategy);
+                const digests = try self.merkleize_level(
+                    gpa,
+                    base,
+                    hasher,
+                    positions,
+                    @intCast(height),
+                    strategy,
+                    below,
+                );
+                gpa.free(below.digests);
+                below = .{ .positions = positions, .digests = digests, .height = @intCast(height) };
             }
             const ancestors = try collect_ancestors(F, Digest, gpa, self.parent);
             errdefer release_all(gpa, ancestors);
@@ -628,11 +643,12 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
             positions: []const u64,
             height: u32,
             strategy: anytype,
-        ) !void {
+            below: Hashed,
+        ) ![]Digest {
             assert(height > 0);
             assert(positions.len > 0);
             const digests = try gpa.alloc(Digest, positions.len);
-            defer gpa.free(digests);
+            errdefer gpa.free(digests);
             const level: Level(@TypeOf(base), @TypeOf(hasher)) = .{
                 .batch = self,
                 .base = base,
@@ -640,11 +656,21 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
                 .positions = positions,
                 .digests = digests,
                 .height = height,
+                // Only the height just below holds this height's children.
+                .below = if (below.height + 1 == height) below else .{},
             };
             const pairs = positions.len / 2 + positions.len % 2;
             strategy.run_batches(pairs, 1, 2, level);
             for (positions, digests) |position, digest| try self.store_node(gpa, position, digest);
+            return digests;
         }
+
+        /// The nodes `merkleize` hashed at one height, in the order it listed them.
+        const Hashed = struct {
+            positions: []const u64 = &.{},
+            digests: []Digest = &.{},
+            height: u32 = 0,
+        };
 
         /// One height's hashing, as a `run_batches` operation over its node pairs.
         fn Level(comptime Base: type, comptime HasherRef: type) type {
@@ -655,6 +681,8 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
                 positions: []const u64,
                 digests: []Digest,
                 height: u32,
+                /// The height below's hashed nodes, which most children are.
+                below: Hashed,
 
                 pub fn run(level: @This(), batches: anytype) void {
                     if (batches.is_whole()) {
@@ -670,10 +698,14 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
                     const positions = level.positions[2 * range.start .. end];
                     const digests = level.digests[2 * range.start .. end];
                     assert(positions.len > 0);
+                    // The children of ascending positions ascend, so a cursor walks the height
+                    // below once instead of looking each child up in `overwrites`.
+                    const first = F.children(positions[0], level.height).left;
+                    var cursor = std.sort.lowerBound(u64, level.below.positions, first, order);
                     var index: usize = 0;
                     while (index + 1 < positions.len) : (index += 2) {
-                        const left = level.children(positions[index]);
-                        const right = level.children(positions[index + 1]);
+                        const left = level.children(positions[index], &cursor);
+                        const right = level.children(positions[index + 1], &cursor);
                         digests[index..][0..2].* = level.hasher.node_digest_pair(.{
                             .{ .position = positions[index], .left = &left[0], .right = &left[1] },
                             .{
@@ -685,15 +717,31 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
                     }
                     if (index < positions.len) {
                         const position = positions[index];
-                        const children_digests = level.children(position);
+                        const children_digests = level.children(position, &cursor);
                         const left = &children_digests[0];
                         const right = &children_digests[1];
                         digests[index] = level.hasher.node_digest(position, left, right);
                     }
                 }
 
-                fn children(level: @This(), position: u64) [2]Digest {
-                    return level.batch.child_digests(level.base, position, level.height);
+                /// The digests of `position`'s children. A child the cursor finds below is
+                /// taken from there; any other (a leaf, a clean node, or one listed out of
+                /// order) is read as before, so the cursor never decides a digest's value.
+                fn children(level: @This(), position: u64, cursor: *usize) [2]Digest {
+                    const pair = F.children(position, level.height);
+                    const left = level.from_below(pair.left, cursor);
+                    const right = level.from_below(pair.right, cursor);
+                    if (left != null and right != null) return .{ left.?, right.? };
+                    const read = level.batch.child_digests(level.base, position, level.height);
+                    return .{ left orelse read[0], right orelse read[1] };
+                }
+
+                /// The digest the height below hashed at `position`, if the cursor reaches it.
+                fn from_below(level: @This(), position: u64, cursor: *usize) ?Digest {
+                    const below = level.below.positions;
+                    while (cursor.* < below.len and below[cursor.*] < position) cursor.* += 1;
+                    if (cursor.* == below.len or below[cursor.*] != position) return null;
+                    return level.below.digests[cursor.*];
                 }
             };
         }
