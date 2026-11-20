@@ -1,0 +1,388 @@
+# date: 2026-11-20
+# zigware: 655836a6
+# commonware: a9ffc25f3
+# method: ABBA rounds=8 through bench-lock.sh, bench-compare.sh Criterion settings, commonware target-cpu=native; ed25519 and hash rows on 655836a6, lthash and sha256 individual on c7935b0c
+1	cryptography	ed25519::signature_generation/ns_len=9 msg_len=32	28889.0	20335.0	73.45
+2	cryptography	ed25519::signature_generation/ns_len=9 msg_len=32	16351.0	15728.0	39.91
+3	cryptography	ed25519::signature_generation/ns_len=9 msg_len=32	12965.0	15306.0	24.14
+4	cryptography	ed25519::signature_generation/ns_len=9 msg_len=32	13409.0	10464.0	56.09
+5	cryptography	ed25519::signature_generation/ns_len=9 msg_len=32	13105.0	10386.0	76.70
+6	cryptography	ed25519::signature_generation/ns_len=9 msg_len=32	19587.0	15987.0	48.63
+7	cryptography	ed25519::signature_generation/ns_len=9 msg_len=32	19103.0	12442.0	40.94
+8	cryptography	ed25519::signature_generation/ns_len=9 msg_len=32	12401.0	9773.300000000001	3.10
+1	cryptography	ed25519::signature_verification/ns_len=9 msg_len=32	19974.0	15893.0	73.45
+2	cryptography	ed25519::signature_verification/ns_len=9 msg_len=32	16621.0	14073.0	39.91
+3	cryptography	ed25519::signature_verification/ns_len=9 msg_len=32	15212.0	14581.0	24.14
+4	cryptography	ed25519::signature_verification/ns_len=9 msg_len=32	15654.0	12341.0	56.09
+5	cryptography	ed25519::signature_verification/ns_len=9 msg_len=32	15457.0	12274.0	76.70
+6	cryptography	ed25519::signature_verification/ns_len=9 msg_len=32	18341.0	14976.0	48.63
+7	cryptography	ed25519::signature_verification/ns_len=9 msg_len=32	16765.0	13460.0	40.94
+8	cryptography	ed25519::signature_verification/ns_len=9 msg_len=32	14627.0	11678.0	3.10
+1	cryptography	sha256::hash_message/msg_len=256	137.96	132.81	2.08
+2	cryptography	sha256::hash_message/msg_len=256	137.87	127.47	2.23
+3	cryptography	sha256::hash_message/msg_len=256	137.82	127.46	2.47
+4	cryptography	sha256::hash_message/msg_len=256	137.64	127.35	2.37
+5	cryptography	sha256::hash_message/msg_len=256	146.32	134.69	1.75
+6	cryptography	sha256::hash_message/msg_len=256	144.82	135.61	2.37
+7	cryptography	sha256::hash_message/msg_len=256	144.59	133.15	2.23
+8	cryptography	sha256::hash_message/msg_len=256	137.37	127.18	2.93
+1	cryptography	sha256::hash_message/msg_len=4096	1662.4	1650.1999999999998	2.08
+2	cryptography	sha256::hash_message/msg_len=4096	1656.7	1647.0	2.23
+3	cryptography	sha256::hash_message/msg_len=4096	1658.3000000000002	1646.6000000000001	2.47
+4	cryptography	sha256::hash_message/msg_len=4096	1655.0	1644.8	2.37
+5	cryptography	sha256::hash_message/msg_len=4096	1756.2	1738.0	1.75
+6	cryptography	sha256::hash_message/msg_len=4096	1752.3999999999999	1729.0	2.37
+7	cryptography	sha256::hash_message/msg_len=4096	1739.4	1724.6	2.23
+8	cryptography	sha256::hash_message/msg_len=4096	1654.7	1643.0	2.93
+1	cryptography	sha256::hash_message/msg_len=65536	26023.0	25944.0	2.08
+2	cryptography	sha256::hash_message/msg_len=65536	25933.0	25936.0	2.23
+3	cryptography	sha256::hash_message/msg_len=65536	25958.0	25955.0	2.47
+4	cryptography	sha256::hash_message/msg_len=65536	25912.0	25927.0	2.37
+5	cryptography	sha256::hash_message/msg_len=65536	27471.0	27391.0	1.75
+6	cryptography	sha256::hash_message/msg_len=65536	27459.0	27298.0	2.37
+7	cryptography	sha256::hash_message/msg_len=65536	27164.0	27160.0	2.23
+8	cryptography	sha256::hash_message/msg_len=65536	25907.0	25907.0	2.93
+1	cryptography	sha256::hash_message/msg_len=524288	207500.0	207250.0	2.08
+2	cryptography	sha256::hash_message/msg_len=524288	207180.0	207270.0	2.23
+3	cryptography	sha256::hash_message/msg_len=524288	207550.0	207470.0	2.47
+4	cryptography	sha256::hash_message/msg_len=524288	207110.0	207190.0	2.37
+5	cryptography	sha256::hash_message/msg_len=524288	219610.0	218290.0	1.75
+6	cryptography	sha256::hash_message/msg_len=524288	220360.0	219360.0	2.37
+7	cryptography	sha256::hash_message/msg_len=524288	216920.0	217010.0	2.23
+8	cryptography	sha256::hash_message/msg_len=524288	207180.0	206980.0	2.93
+1	cryptography	sha256::hash_message/msg_len=1048576	415230.0	414680.0	2.08
+2	cryptography	sha256::hash_message/msg_len=1048576	414680.0	414820.0	2.23
+3	cryptography	sha256::hash_message/msg_len=1048576	415060.0	415240.0	2.47
+4	cryptography	sha256::hash_message/msg_len=1048576	414670.0	414820.0	2.37
+5	cryptography	sha256::hash_message/msg_len=1048576	437880.0	436560.0	1.75
+6	cryptography	sha256::hash_message/msg_len=1048576	436540.0	438930.0	2.37
+7	cryptography	sha256::hash_message/msg_len=1048576	434000.0	432610.0	2.23
+8	cryptography	sha256::hash_message/msg_len=1048576	414410.0	414270.0	2.93
+1	cryptography	sha256::hash_message/msg_len=16777216	6648300.0	6635600.0	2.08
+2	cryptography	sha256::hash_message/msg_len=16777216	6643000.0	6631400.0	2.23
+3	cryptography	sha256::hash_message/msg_len=16777216	6639000.0	6641100.0	2.47
+4	cryptography	sha256::hash_message/msg_len=16777216	6628000.0	6628600.0	2.37
+5	cryptography	sha256::hash_message/msg_len=16777216	7026900.0	6975800.0	1.75
+6	cryptography	sha256::hash_message/msg_len=16777216	6975400.0	6960200.0	2.37
+7	cryptography	sha256::hash_message/msg_len=16777216	6945000.0	6873900.0	2.23
+8	cryptography	sha256::hash_message/msg_len=16777216	6623700.0	6632600.0	2.93
+1	cryptography	sha256::hash_pair/shape=bmt	58.203	60.895	1.92
+2	cryptography	sha256::hash_pair/shape=bmt	61.456	64.086	1.64
+3	cryptography	sha256::hash_pair/shape=bmt	61.308	63.694	3.64
+4	cryptography	sha256::hash_pair/shape=bmt	58.213	60.998	2.39
+5	cryptography	sha256::hash_pair/shape=bmt	58.254	60.806	1.46
+6	cryptography	sha256::hash_pair/shape=bmt	61.377	64.607	2.25
+7	cryptography	sha256::hash_pair/shape=bmt	61.362	63.684	2.68
+8	cryptography	sha256::hash_pair/shape=bmt	58.293	60.774	2.33
+1	cryptography	sha256::hash_pair/shape=mmr	59.34	61.651	1.92
+2	cryptography	sha256::hash_pair/shape=mmr	62.688	64.804	1.64
+3	cryptography	sha256::hash_pair/shape=mmr	62.446	64.218	3.64
+4	cryptography	sha256::hash_pair/shape=mmr	59.326	61.328	2.39
+5	cryptography	sha256::hash_pair/shape=mmr	59.296	61.542	1.46
+6	cryptography	sha256::hash_pair/shape=mmr	62.445	65.131	2.25
+7	cryptography	sha256::hash_pair/shape=mmr	62.195	65.203	2.68
+8	cryptography	sha256::hash_pair/shape=mmr	59.316	61.517	2.33
+1	cryptography	sha256::hash_parts/shape=mmr_node	37.193	35.767	1.92
+2	cryptography	sha256::hash_parts/shape=mmr_node	39.165	37.795	1.64
+3	cryptography	sha256::hash_parts/shape=mmr_node	39.046	37.58	3.64
+4	cryptography	sha256::hash_parts/shape=mmr_node	37.196	35.745	2.39
+5	cryptography	sha256::hash_parts/shape=mmr_node	37.117	35.813	1.46
+6	cryptography	sha256::hash_parts/shape=mmr_node	39.05	37.922	2.25
+7	cryptography	sha256::hash_parts/shape=mmr_node	38.971	38.171	2.68
+8	cryptography	sha256::hash_parts/shape=mmr_node	37.108	35.764	2.33
+1	cryptography	sha256::hash_parts/shape=bmt_node	32.689	31.182	1.92
+2	cryptography	sha256::hash_parts/shape=bmt_node	34.782	32.949	1.64
+3	cryptography	sha256::hash_parts/shape=bmt_node	34.28	32.751	3.64
+4	cryptography	sha256::hash_parts/shape=bmt_node	32.717	31.183	2.39
+5	cryptography	sha256::hash_parts/shape=bmt_node	32.684	31.217	1.46
+6	cryptography	sha256::hash_parts/shape=bmt_node	34.357	32.968	2.25
+7	cryptography	sha256::hash_parts/shape=bmt_node	34.334	33.086	2.68
+8	cryptography	sha256::hash_parts/shape=bmt_node	32.658	31.175	2.33
+1	cryptography	sha256::hash_parts/shape=mmr_leaf	18.367	17.835	1.92
+2	cryptography	sha256::hash_parts/shape=mmr_leaf	19.359	19.034	1.64
+3	cryptography	sha256::hash_parts/shape=mmr_leaf	19.178	18.681	3.64
+4	cryptography	sha256::hash_parts/shape=mmr_leaf	18.288	17.79	2.39
+5	cryptography	sha256::hash_parts/shape=mmr_leaf	18.231	17.789	1.46
+6	cryptography	sha256::hash_parts/shape=mmr_leaf	19.243	18.736	2.25
+7	cryptography	sha256::hash_parts/shape=mmr_leaf	19.108	18.967	2.68
+8	cryptography	sha256::hash_parts/shape=mmr_leaf	18.277	17.771	2.33
+1	cryptography	sha256::hash_parts/shape=bmt_leaf	18.759	18.284	1.92
+2	cryptography	sha256::hash_parts/shape=bmt_leaf	19.614	19.393	1.64
+3	cryptography	sha256::hash_parts/shape=bmt_leaf	19.748	19.218	3.64
+4	cryptography	sha256::hash_parts/shape=bmt_leaf	18.762	18.305	2.39
+5	cryptography	sha256::hash_parts/shape=bmt_leaf	18.789	18.305	1.46
+6	cryptography	sha256::hash_parts/shape=bmt_leaf	19.73	19.249	2.25
+7	cryptography	sha256::hash_parts/shape=bmt_leaf	19.709	19.506	2.68
+8	cryptography	sha256::hash_parts/shape=bmt_leaf	18.778	18.414	2.33
+1	cryptography	blake3::hash_message/msg_len=256 conc=1	289.51	230.43	2.13
+2	cryptography	blake3::hash_message/msg_len=256 conc=1	289.29	229.21	3.00
+3	cryptography	blake3::hash_message/msg_len=256 conc=1	288.77	229.21	2.59
+4	cryptography	blake3::hash_message/msg_len=256 conc=1	304.73	237.97	2.91
+5	cryptography	blake3::hash_message/msg_len=256 conc=1	304.58	239.78	2.31
+6	cryptography	blake3::hash_message/msg_len=256 conc=1	303.54	240.16	2.30
+7	cryptography	blake3::hash_message/msg_len=256 conc=1	289.32	226.93	2.56
+8	cryptography	blake3::hash_message/msg_len=256 conc=1	288.22	227.54	2.06
+1	cryptography	blake3::hash_message/msg_len=256 conc=8	289.37	229.96	2.13
+2	cryptography	blake3::hash_message/msg_len=256 conc=8	288.88	230.19	3.00
+3	cryptography	blake3::hash_message/msg_len=256 conc=8	289.37	228.43	2.59
+4	cryptography	blake3::hash_message/msg_len=256 conc=8	304.39	239.08	2.91
+5	cryptography	blake3::hash_message/msg_len=256 conc=8	305.14	243.01	2.31
+6	cryptography	blake3::hash_message/msg_len=256 conc=8	306.35	241.13	2.30
+7	cryptography	blake3::hash_message/msg_len=256 conc=8	288.82	227.5	2.56
+8	cryptography	blake3::hash_message/msg_len=256 conc=8	289.1	227.8	2.06
+1	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=10% query=positive	93.276	89.89	2.12
+2	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=10% query=positive	89.466	81.294	2.79
+3	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=10% query=positive	92.232	85.139	2.00
+4	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=10% query=positive	89.418	81.576	2.43
+5	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=10% query=positive	87.537	81.45	2.03
+6	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=10% query=positive	93.909	81.078	2.22
+7	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=10% query=positive	89.129	80.999	2.75
+8	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=10% query=positive	89.364	81.179	2.25
+1	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=0.1% query=positive	104.63	100.8	2.12
+2	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=0.1% query=positive	100.01	92.719	2.79
+3	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=0.1% query=positive	103.78	97.167	2.00
+4	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=0.1% query=positive	99.809	92.494	2.43
+5	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=0.1% query=positive	98.071	92.717	2.03
+6	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=0.1% query=positive	104.65	92.304	2.22
+7	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=0.1% query=positive	100.19	92.218	2.75
+8	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=0.1% query=positive	99.662	92.267	2.25
+1	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=10% query=negative	102.69	95.552	2.12
+2	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=10% query=negative	98.277	87.984	2.79
+3	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=10% query=negative	103.46	92.203	2.00
+4	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=10% query=negative	97.977	87.934	2.43
+5	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=10% query=negative	96.664	87.979	2.03
+6	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=10% query=negative	102.76	87.553	2.22
+7	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=10% query=negative	97.991	87.525	2.75
+8	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=10% query=negative	98.357	87.686	2.25
+1	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=0.1% query=negative	104.13	98.22	2.12
+2	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=0.1% query=negative	98.767	89.2	2.79
+3	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=0.1% query=negative	103.71	93.511	2.00
+4	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=0.1% query=negative	98.884	88.858	2.43
+5	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=0.1% query=negative	97.134	89.027	2.03
+6	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=0.1% query=negative	103.47	88.956	2.22
+7	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=0.1% query=negative	98.681	88.39	2.75
+8	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=0.1% query=negative	98.593	88.925	2.25
+1	cryptography	sha512::hash_many::individual/count=1 len=96	134.1	147.99	2.42
+2	cryptography	sha512::hash_many::individual/count=1 len=96	135.21	147.92	2.98
+3	cryptography	sha512::hash_many::individual/count=1 len=96	136.05	147.95	2.58
+4	cryptography	sha512::hash_many::individual/count=1 len=96	138.38	148.85	1.73
+5	cryptography	sha512::hash_many::individual/count=1 len=96	145.05	156.14	2.04
+6	cryptography	sha512::hash_many::individual/count=1 len=96	136.02	143.87	2.95
+7	cryptography	sha512::hash_many::individual/count=1 len=96	136.72	148.63	2.79
+8	cryptography	sha512::hash_many::individual/count=1 len=96	136.77	148.62	2.70
+1	cryptography	sha512::hash_many::individual/count=1 len=1024	990.68	1268.7	2.42
+2	cryptography	sha512::hash_many::individual/count=1 len=1024	978.16	1269.5	2.98
+3	cryptography	sha512::hash_many::individual/count=1 len=1024	984.87	1268.8999999999999	2.58
+4	cryptography	sha512::hash_many::individual/count=1 len=1024	990.21	1269.2	1.73
+5	cryptography	sha512::hash_many::individual/count=1 len=1024	1034.7	1350.6	2.04
+6	cryptography	sha512::hash_many::individual/count=1 len=1024	978.14	1268.3999999999999	2.95
+7	cryptography	sha512::hash_many::individual/count=1 len=1024	982.45	1268.3	2.79
+8	cryptography	sha512::hash_many::individual/count=1 len=1024	980.03	1269.5	2.70
+1	cryptography	sha512::hash_many::individual/count=1 len=16384	13658.0	17548.0	2.42
+2	cryptography	sha512::hash_many::individual/count=1 len=16384	13603.0	17574.0	2.98
+3	cryptography	sha512::hash_many::individual/count=1 len=16384	13639.0	17574.0	2.58
+4	cryptography	sha512::hash_many::individual/count=1 len=16384	13703.0	17572.0	1.73
+5	cryptography	sha512::hash_many::individual/count=1 len=16384	14332.0	18526.0	2.04
+6	cryptography	sha512::hash_many::individual/count=1 len=16384	13608.0	17581.0	2.95
+7	cryptography	sha512::hash_many::individual/count=1 len=16384	13648.0	17550.0	2.79
+8	cryptography	sha512::hash_many::individual/count=1 len=16384	13600.0	17573.0	2.70
+1	cryptography	sha512::hash_many::individual/count=1 len=65536	54217.0	69644.0	2.42
+2	cryptography	sha512::hash_many::individual/count=1 len=65536	53992.0	69721.0	2.98
+3	cryptography	sha512::hash_many::individual/count=1 len=65536	54086.0	69749.0	2.58
+4	cryptography	sha512::hash_many::individual/count=1 len=65536	54252.0	69671.0	1.73
+5	cryptography	sha512::hash_many::individual/count=1 len=65536	57009.0	73524.0	2.04
+6	cryptography	sha512::hash_many::individual/count=1 len=65536	54028.0	69749.0	2.95
+7	cryptography	sha512::hash_many::individual/count=1 len=65536	54019.0	69643.0	2.79
+8	cryptography	sha512::hash_many::individual/count=1 len=65536	53955.0	69773.0	2.70
+1	cryptography	sha512::hash_many::individual/count=1 len=262144	216750.0	278150.0	2.42
+2	cryptography	sha512::hash_many::individual/count=1 len=262144	216100.0	278270.0	2.98
+3	cryptography	sha512::hash_many::individual/count=1 len=262144	215760.0	278400.0	2.58
+4	cryptography	sha512::hash_many::individual/count=1 len=262144	215830.0	278260.0	1.73
+5	cryptography	sha512::hash_many::individual/count=1 len=262144	226700.0	293820.0	2.04
+6	cryptography	sha512::hash_many::individual/count=1 len=262144	215620.0	278210.0	2.95
+7	cryptography	sha512::hash_many::individual/count=1 len=262144	215670.0	278130.0	2.79
+8	cryptography	sha512::hash_many::individual/count=1 len=262144	215740.0	278410.0	2.70
+1	cryptography	lthash::add/bytes=32	626.57	331.22	6.74
+2	cryptography	lthash::add/bytes=32	619.33	326.88	2.22
+3	cryptography	lthash::add/bytes=32	668.5	327.61	2.91
+4	cryptography	lthash::add/bytes=32	641.63	309.9	2.80
+5	cryptography	lthash::add/bytes=32	610.23	307.63	2.53
+6	cryptography	lthash::add/bytes=32	583.83	307.18	2.64
+7	cryptography	lthash::add/bytes=32	599.55	307.5	2.94
+8	cryptography	lthash::add/bytes=32	586.31	310.64	2.23
+1	cryptography	lthash::add/bytes=256	801.89	502.79	6.74
+2	cryptography	lthash::add/bytes=256	796.71	500.04	2.22
+3	cryptography	lthash::add/bytes=256	781.16	505.26	2.91
+4	cryptography	lthash::add/bytes=256	811.97	475.7	2.80
+5	cryptography	lthash::add/bytes=256	740.97	472.26	2.53
+6	cryptography	lthash::add/bytes=256	750.0	472.1	2.64
+7	cryptography	lthash::add/bytes=256	749.11	472.52	2.94
+8	cryptography	lthash::add/bytes=256	734.38	474.65	2.23
+1	cryptography	lthash::add/bytes=1024	1635.6999999999998	1163.4	6.74
+2	cryptography	lthash::add/bytes=1024	1637.7	1143.7	2.22
+3	cryptography	lthash::add/bytes=1024	1601.0	1154.3000000000002	2.91
+4	cryptography	lthash::add/bytes=1024	1535.0	1091.8000000000002	2.80
+5	cryptography	lthash::add/bytes=1024	1523.3000000000002	1086.5	2.53
+6	cryptography	lthash::add/bytes=1024	1549.0	1084.2	2.64
+7	cryptography	lthash::add/bytes=1024	1536.6	1088.6	2.94
+8	cryptography	lthash::add/bytes=1024	1551.5	1086.2	2.23
+1	cryptography	lthash::add/bytes=4096	1746.6	1710.5	6.74
+2	cryptography	lthash::add/bytes=4096	1782.4	1696.1999999999998	2.22
+3	cryptography	lthash::add/bytes=4096	1753.1000000000001	1702.9	2.91
+4	cryptography	lthash::add/bytes=4096	1704.0	1612.9	2.80
+5	cryptography	lthash::add/bytes=4096	1699.3	1607.2	2.53
+6	cryptography	lthash::add/bytes=4096	1665.7	1603.9	2.64
+7	cryptography	lthash::add/bytes=4096	1665.8	1603.5	2.94
+8	cryptography	lthash::add/bytes=4096	1678.8000000000002	1607.6999999999998	2.23
+1	cryptography	lthash::subtract/bytes=32	573.66	332.73	6.74
+2	cryptography	lthash::subtract/bytes=32	539.98	330.38	2.22
+3	cryptography	lthash::subtract/bytes=32	557.76	327.58	2.91
+4	cryptography	lthash::subtract/bytes=32	546.62	311.98	2.80
+5	cryptography	lthash::subtract/bytes=32	526.47	313.44	2.53
+6	cryptography	lthash::subtract/bytes=32	540.12	308.62	2.64
+7	cryptography	lthash::subtract/bytes=32	516.23	308.98	2.94
+8	cryptography	lthash::subtract/bytes=32	543.5	319.83	2.23
+1	cryptography	lthash::subtract/bytes=256	785.31	506.77	6.74
+2	cryptography	lthash::subtract/bytes=256	742.97	504.97	2.22
+3	cryptography	lthash::subtract/bytes=256	747.05	508.89	2.91
+4	cryptography	lthash::subtract/bytes=256	755.02	478.1	2.80
+5	cryptography	lthash::subtract/bytes=256	709.91	478.07	2.53
+6	cryptography	lthash::subtract/bytes=256	747.73	473.57	2.64
+7	cryptography	lthash::subtract/bytes=256	713.33	473.89	2.94
+8	cryptography	lthash::subtract/bytes=256	720.31	482.2	2.23
+1	cryptography	lthash::subtract/bytes=1024	1633.3	1153.8999999999999	6.74
+2	cryptography	lthash::subtract/bytes=1024	1589.9	1151.1	2.22
+3	cryptography	lthash::subtract/bytes=1024	1599.2	1150.3000000000002	2.91
+4	cryptography	lthash::subtract/bytes=1024	1544.8999999999999	1093.0	2.80
+5	cryptography	lthash::subtract/bytes=1024	1518.3	1091.1	2.53
+6	cryptography	lthash::subtract/bytes=1024	1523.6000000000001	1085.3999999999999	2.64
+7	cryptography	lthash::subtract/bytes=1024	1518.5	1086.4	2.94
+8	cryptography	lthash::subtract/bytes=1024	1540.1000000000001	1097.8000000000002	2.23
+1	cryptography	lthash::combine	84.358	22.355	6.74
+2	cryptography	lthash::combine	70.262	22.369	2.22
+3	cryptography	lthash::combine	84.833	22.414	2.91
+4	cryptography	lthash::combine	120.72	21.234	2.80
+5	cryptography	lthash::combine	103.07	21.236	2.53
+6	cryptography	lthash::combine	97.315	21.26	2.64
+7	cryptography	lthash::combine	94.072	21.262	2.94
+8	cryptography	lthash::combine	98.244	21.263	2.23
+1	cryptography	lthash::checksum	1228.5	1309.7	6.74
+2	cryptography	lthash::checksum	1220.3999999999999	1313.9	2.22
+3	cryptography	lthash::checksum	1225.0	1310.3	2.91
+4	cryptography	lthash::checksum	1168.6000000000001	1246.8	2.80
+5	cryptography	lthash::checksum	1167.7	1245.9	2.53
+6	cryptography	lthash::checksum	1168.4	1245.6000000000001	2.64
+7	cryptography	lthash::checksum	1167.5	1243.9	2.94
+8	cryptography	lthash::checksum	1172.0	1244.8	2.23
+1	cryptography	lthash::update/mode=incremental	1817.3999999999999	1664.8	6.74
+2	cryptography	lthash::update/mode=incremental	1808.0	1662.4	2.22
+3	cryptography	lthash::update/mode=incremental	1784.6	1655.8	2.91
+4	cryptography	lthash::update/mode=incremental	1736.2	1579.1	2.80
+5	cryptography	lthash::update/mode=incremental	1729.0	1572.8999999999999	2.53
+6	cryptography	lthash::update/mode=incremental	1728.1	1576.7	2.64
+7	cryptography	lthash::update/mode=incremental	1695.2	1580.8	2.94
+8	cryptography	lthash::update/mode=incremental	1721.3	1575.7	2.23
+1	cryptography	lthash::update/mode=full	5168200.0	3118100.0	6.74
+2	cryptography	lthash::update/mode=full	5426500.0	3099500.0	2.22
+3	cryptography	lthash::update/mode=full	5553100.0	3260500.0	2.91
+4	cryptography	lthash::update/mode=full	5179900.0	2951400.0	2.80
+5	cryptography	lthash::update/mode=full	4919600.0	2972300.0	2.53
+6	cryptography	lthash::update/mode=full	5162000.0	2939900.0	2.64
+7	cryptography	lthash::update/mode=full	5145500.0	2959900.0	2.94
+8	cryptography	lthash::update/mode=full	5228700.0	2949000.0	2.23
+1	cryptography	sha256::hash_many::individual/count=1 len=64	60.094	46.326	3.20
+2	cryptography	sha256::hash_many::individual/count=1 len=64	65.784	44.761	2.43
+3	cryptography	sha256::hash_many::individual/count=1 len=64	65.662	44.667	2.85
+4	cryptography	sha256::hash_many::individual/count=1 len=64	59.737	47.705	2.98
+5	cryptography	sha256::hash_many::individual/count=1 len=64	69.581	46.4	2.82
+6	cryptography	sha256::hash_many::individual/count=1 len=64	65.644	44.702	3.28
+7	cryptography	sha256::hash_many::individual/count=1 len=64	56.833	44.721	2.28
+8	cryptography	sha256::hash_many::individual/count=1 len=64	56.67	44.673	2.22
+1	cryptography	sha256::hash_many::individual/count=1 len=256	152.31	134.2	3.20
+2	cryptography	sha256::hash_many::individual/count=1 len=256	147.9	128.67	2.43
+3	cryptography	sha256::hash_many::individual/count=1 len=256	148.79	128.5	2.85
+4	cryptography	sha256::hash_many::individual/count=1 len=256	151.07	136.9	2.98
+5	cryptography	sha256::hash_many::individual/count=1 len=256	157.48	133.36	2.82
+6	cryptography	sha256::hash_many::individual/count=1 len=256	148.1	128.51	3.28
+7	cryptography	sha256::hash_many::individual/count=1 len=256	143.66	128.8	2.28
+8	cryptography	sha256::hash_many::individual/count=1 len=256	142.85	128.64	2.22
+1	cryptography	sha256::hash_many::individual/count=1 len=4096	1764.6	1715.9	3.20
+2	cryptography	sha256::hash_many::individual/count=1 len=4096	1667.5	1646.2	2.43
+3	cryptography	sha256::hash_many::individual/count=1 len=4096	1670.1	1644.4	2.85
+4	cryptography	sha256::hash_many::individual/count=1 len=4096	1749.4	1734.5	2.98
+5	cryptography	sha256::hash_many::individual/count=1 len=4096	1767.6000000000001	1731.5	2.82
+6	cryptography	sha256::hash_many::individual/count=1 len=4096	1667.0	1645.6	3.28
+7	cryptography	sha256::hash_many::individual/count=1 len=4096	1673.5	1646.2	2.28
+8	cryptography	sha256::hash_many::individual/count=1 len=4096	1672.1999999999998	1644.5	2.22
+1	cryptography	sha256::hash_many::individual/count=1 len=16384	6863.6	6798.7	3.20
+2	cryptography	sha256::hash_many::individual/count=1 len=16384	6519.9	6501.7	2.43
+3	cryptography	sha256::hash_many::individual/count=1 len=16384	6520.0	6496.7	2.85
+4	cryptography	sha256::hash_many::individual/count=1 len=16384	6888.5	6851.099999999999	2.98
+5	cryptography	sha256::hash_many::individual/count=1 len=16384	6911.5	6841.2	2.82
+6	cryptography	sha256::hash_many::individual/count=1 len=16384	6520.8	6503.4	3.28
+7	cryptography	sha256::hash_many::individual/count=1 len=16384	6534.3	6502.5	2.28
+8	cryptography	sha256::hash_many::individual/count=1 len=16384	6522.5	6493.9	2.22
+1	cryptography	sha256::hash_many::individual/count=1 len=65536	27375.0	27029.0	3.20
+2	cryptography	sha256::hash_many::individual/count=1 len=65536	25927.0	25927.0	2.43
+3	cryptography	sha256::hash_many::individual/count=1 len=65536	25940.0	25903.0	2.85
+4	cryptography	sha256::hash_many::individual/count=1 len=65536	27322.0	27314.0	2.98
+5	cryptography	sha256::hash_many::individual/count=1 len=65536	26853.0	27227.0	2.82
+6	cryptography	sha256::hash_many::individual/count=1 len=65536	25946.0	25902.0	3.28
+7	cryptography	sha256::hash_many::individual/count=1 len=65536	25980.0	25937.0	2.28
+8	cryptography	sha256::hash_many::individual/count=1 len=65536	25949.0	25902.0	2.22
+1	cryptography	sha256::hash_many::individual/count=1 len=262144	108490.0	108350.0	3.20
+2	cryptography	sha256::hash_many::individual/count=1 len=262144	103580.0	103560.0	2.43
+3	cryptography	sha256::hash_many::individual/count=1 len=262144	103630.0	103530.0	2.85
+4	cryptography	sha256::hash_many::individual/count=1 len=262144	108780.0	108410.0	2.98
+5	cryptography	sha256::hash_many::individual/count=1 len=262144	107340.0	111030.0	2.82
+6	cryptography	sha256::hash_many::individual/count=1 len=262144	103600.0	103590.0	3.28
+7	cryptography	sha256::hash_many::individual/count=1 len=262144	103670.0	103660.0	2.28
+8	cryptography	sha256::hash_many::individual/count=1 len=262144	103680.0	103550.0	2.22
+1	cryptography	sha256::hash_many::individual/count=7 len=64	420.59	313.4	2.69
+2	cryptography	sha256::hash_many::individual/count=7 len=64	387.53	326.86	2.23
+3	cryptography	sha256::hash_many::individual/count=7 len=64	420.1	313.13	3.04
+4	cryptography	sha256::hash_many::individual/count=7 len=64	441.2	332.05	2.77
+5	cryptography	sha256::hash_many::individual/count=7 len=64	365.72	312.81	3.34
+6	cryptography	sha256::hash_many::individual/count=7 len=64	420.64	309.43	2.49
+7	cryptography	sha256::hash_many::individual/count=7 len=64	420.72	564.39	2.35
+8	cryptography	sha256::hash_many::individual/count=7 len=64	378.39	325.63	2.21
+1	cryptography	sha256::hash_many::individual/count=7 len=256	982.89	899.9	2.69
+2	cryptography	sha256::hash_many::individual/count=7 len=256	1036.0	941.96	2.23
+3	cryptography	sha256::hash_many::individual/count=7 len=256	980.44	900.5	3.04
+4	cryptography	sha256::hash_many::individual/count=7 len=256	1028.1	951.17	2.77
+5	cryptography	sha256::hash_many::individual/count=7 len=256	975.26	899.45	3.34
+6	cryptography	sha256::hash_many::individual/count=7 len=256	981.89	900.97	2.49
+7	cryptography	sha256::hash_many::individual/count=7 len=256	983.23	901.8	2.35
+8	cryptography	sha256::hash_many::individual/count=7 len=256	1023.0999999999999	941.6	2.21
+1	cryptography	sha256::hash_many::individual/count=7 len=4096	11601.0	11520.0	2.69
+2	cryptography	sha256::hash_many::individual/count=7 len=4096	12222.0	12109.0	2.23
+3	cryptography	sha256::hash_many::individual/count=7 len=4096	11617.0	11525.0	3.04
+4	cryptography	sha256::hash_many::individual/count=7 len=4096	12185.0	12173.0	2.77
+5	cryptography	sha256::hash_many::individual/count=7 len=4096	11605.0	11515.0	3.34
+6	cryptography	sha256::hash_many::individual/count=7 len=4096	11592.0	11523.0	2.49
+7	cryptography	sha256::hash_many::individual/count=7 len=4096	11611.0	11522.0	2.35
+8	cryptography	sha256::hash_many::individual/count=7 len=4096	12061.0	11961.0	2.21
+1	cryptography	sha256::hash_many::individual/count=7 len=16384	45572.0	45512.0	2.69
+2	cryptography	sha256::hash_many::individual/count=7 len=16384	47856.0	47836.0	2.23
+3	cryptography	sha256::hash_many::individual/count=7 len=16384	45601.0	45520.0	3.04
+4	cryptography	sha256::hash_many::individual/count=7 len=16384	48356.0	47915.0	2.77
+5	cryptography	sha256::hash_many::individual/count=7 len=16384	45631.0	45521.0	3.34
+6	cryptography	sha256::hash_many::individual/count=7 len=16384	45536.0	45510.0	2.49
+7	cryptography	sha256::hash_many::individual/count=7 len=16384	45588.0	45523.0	2.35
+8	cryptography	sha256::hash_many::individual/count=7 len=16384	47330.0	47322.0	2.21
+1	cryptography	sha256::hash_many::individual/count=7 len=65536	181510.0	181350.0	2.69
+2	cryptography	sha256::hash_many::individual/count=7 len=65536	191040.0	190430.0	2.23
+3	cryptography	sha256::hash_many::individual/count=7 len=65536	181490.0	181600.0	3.04
+4	cryptography	sha256::hash_many::individual/count=7 len=65536	192000.0	190960.0	2.77
+5	cryptography	sha256::hash_many::individual/count=7 len=65536	181450.0	181530.0	3.34
+6	cryptography	sha256::hash_many::individual/count=7 len=65536	181400.0	181460.0	2.49
+7	cryptography	sha256::hash_many::individual/count=7 len=65536	181800.0	181780.0	2.35
+8	cryptography	sha256::hash_many::individual/count=7 len=65536	188440.0	188020.0	2.21
+1	cryptography	sha256::hash_many::individual/count=7 len=262144	725950.0	724930.0	2.69
+2	cryptography	sha256::hash_many::individual/count=7 len=262144	761670.0	761520.0	2.23
+3	cryptography	sha256::hash_many::individual/count=7 len=262144	725390.0	725920.0	3.04
+4	cryptography	sha256::hash_many::individual/count=7 len=262144	765360.0	763220.0	2.77
+5	cryptography	sha256::hash_many::individual/count=7 len=262144	725100.0	725960.0	3.34
+6	cryptography	sha256::hash_many::individual/count=7 len=262144	725220.0	725530.0	2.49
+7	cryptography	sha256::hash_many::individual/count=7 len=262144	726350.0	727180.0	2.35
+8	cryptography	sha256::hash_many::individual/count=7 len=262144	755870.0	750020.0	2.21

@@ -121,11 +121,8 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
 
 ## Perf bugs (zigware more than 1.5× slower)
 
-- **`ed25519::signature_verification` (1.62×), owned by the crypto lane.** Verification uses
-  `std.crypto`'s `Edwards25519.mulDoubleBasePublic` over its radix-2^51 scalar field
-  arithmetic. commonware's vendored curve25519 code picks a SIMD backend (AVX2 or IFMA) on
-  x86-64, which this Zen CPU supports. Guess: a vectorized field backend, or a wider
-  precomputed base-point table for the `s B` half.
+- None in the crypto lane's groups since 2026-11-20: `ed25519::signature_verification` (was
+  1.62×) is 0.80× commonware; see "cryptography: hashes, ed25519, lthash" below.
 
 ## Updates since the table
 
@@ -1318,6 +1315,44 @@ of a fresh buffer, an allocator effect.
 | `variable_replay` | `items=500000 buffer=16384 size=32 read_options=cache` | 31.2 ms | 7.01 ms | 0.33× | 0.22× |
 | `variable_replay` | `items=500000 buffer=65536 size=32 read_options=cache` | 21.9 ms | 7.16 ms | 0.54× | 0.34× |
 | `variable_replay` | `items=500000 buffer=1048576 size=32 read_options=cache` | 19.6 ms | 7.58 ms | 0.47× | 0.39× |
+
+## cryptography: hashes, ed25519, lthash (2026-11-20, crypto lane)
+
+ABBA rounds=8 through `etc/scripts/bench-lock.sh` (one CCD slot per pair), bench-compare.sh's
+Criterion settings, commonware built with `-C target-cpu=native`; the ratio is the median of
+per-round zigware/commonware ratios, and a verdict allows n/8 rounds past 1. Raw rounds are in
+`docs/bench/crypto.tsv`. Load 1–7, except ed25519 (3–77). ed25519 and the sha256/blake3/bloom
+rows ran on 655836a6, lthash and sha256 individual on c7935b0c (before_iter planning fixed).
+Totals: 22 faster, 20 tie, 6 slower.
+
+| bench | params | commonware | zigware | median | worst | verdict |
+|---|---|---|---|---|---|---|
+| `ed25519::signature_verification` | `ns_len=9 msg_len=32` | 16.1 µs | 13.8 µs | 0.80× | 0.96× | faster |
+| `ed25519::signature_generation` | `ns_len=9 msg_len=32` | 14.9 µs | 13.9 µs | 0.79× | 1.18× | faster |
+| `sha256::hash_message` | `msg_len=256` | 138 ns | 130 ns | 0.93× | 0.96× | faster |
+| `sha256::hash_message` | 4 KiB to 16 MiB (5 rows) | | | 0.99–1.00× | ≤1.01× | tie |
+| `sha256::hash_parts` | 4 shapes | 18.7–38.1 ns | 18.3–36.7 ns | 0.95–0.98× | ≤0.99× | tie |
+| `sha256::hash_pair` | `shape=bmt`, `shape=mmr` | 60 ns | 62–63 ns | 1.04× | 1.05× | tie |
+| `sha256::hash_many::individual` | `count=1/7 len=64/256` (4 rows) | | | 0.73–0.92× | | faster |
+| `sha256::hash_many::individual` | `count=1/7 len≥4096` (8 rows) | | | 0.98–1.00× | ≤1.03× | tie |
+| `sha512::hash_many::individual` | `count=1 len=96` | 136 ns | 148 ns | 1.09× | 1.10× | slower |
+| `sha512::hash_many::individual` | `count=1 len=1 KiB to 256 KiB` (4 rows) | | | 1.29× | 1.31× | slower |
+| `blake3::hash_message` | `msg_len=256 conc=1`, `conc=8` | 289 ns | 230 ns | 0.79× | 0.80× | faster |
+| `bloomfilter::contains` | `hasher=blake3 item_size=32` (4 rows) | 89–100 ns | 81–93 ns | 0.89–0.93× | ≤0.96× | faster |
+| `lthash::add` / `subtract` | 32 B to 1 KiB (6 rows) | | | 0.52–0.71× | ≤0.72× | faster |
+| `lthash::add` | `bytes=4096` | 1.7 µs | 1.61 µs | 0.96× | 0.98× | tie |
+| `lthash::combine` | | 95.7 ns | 21.3 ns | 0.22× | 0.32× | faster |
+| `lthash::update` | `incremental`, `full` | | | 0.92×, 0.57× | ≤0.93× | faster |
+| `lthash::checksum` | | 1.17 µs | 1.25 µs | 1.07× | 1.08× | slower |
+
+- **ed25519** went from 1.62× to 0.80×: `half_size` runs Lehmer's algorithm (a1fdd462, 3.8 ->
+  0.9 µs), and decompression's `pow2523` and sign's point encoding square with 64-bit
+  coefficient products (2642cac4, 6e46b58f). The IFMA double-scalar sum was already on.
+- **Long SHA-256 is at SHA-NI parity** (0.99–1.00×): both sides run the same instructions at
+  the same rate. A hybrid of the x16 AVX-512 kernel with 2–4 interleaved SHA-NI streams was
+  slower than x16 alone (3.0 against 3.1–3.3 µs a 16 KiB message), so it did not land.
+- **sha512 individual** (1.29×) is the open gap: commonware's `sha2` crate runs its AVX2 message
+  schedule; zigware's `sha512_blocks.zig` four-block schedule beats std by 15–20% but not it.
 
 ## Appendix: bench coverage
 
