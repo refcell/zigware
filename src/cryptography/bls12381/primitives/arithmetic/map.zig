@@ -189,35 +189,30 @@ fn IsogenyMap(comptime F: type) type {
     };
 }
 
-/// Applies an isogeny map to (x', y'); a zero denominator gives the identity.
-fn isogeny(comptime F: type, comptime map: IsogenyMap(F), point: [2]F) ?[2]F {
-    const parts = isogeny_parts(F, map, point[0]);
-    const denominators = parts.x_den.mul(parts.y_den);
-    if (denominators.is_zero()) return null;
-    return isogeny_finish(F, parts, point[1], denominators.inverse());
+/// Applies an isogeny map to (x', y') as a Jacobian `Point` (g1.G1 or g2.G2) without an
+/// inversion; a zero denominator gives the identity.
+fn isogeny(
+    comptime Point: type,
+    comptime map: IsogenyMap(Field(Point)),
+    point: [2]Field(Point),
+) Point {
+    const F = Field(Point);
+    const x = point[0];
+    const jacobian = isogeny_jacobian(
+        F,
+        polynomial(F, map.x_numerator, x),
+        polynomial_monic(F, map.x_denominator, x),
+        point[1].mul(polynomial(F, map.y_numerator, x)),
+        polynomial_monic(F, map.y_denominator, x),
+    );
+    if (jacobian[2].is_zero()) return Point.identity;
+    const result: Point = .{ .x = jacobian[0], .y = jacobian[1], .z = jacobian[2] };
+    if (std.debug.runtime_safety) assert(result.is_on_curve());
+    return result;
 }
 
-/// The isogeny's four polynomials at x'.
-fn IsogenyParts(comptime F: type) type {
-    return struct { x_num: F, x_den: F, y_num: F, y_den: F };
-}
-
-fn isogeny_parts(comptime F: type, comptime map: IsogenyMap(F), x: F) IsogenyParts(F) {
-    return .{
-        .x_num = polynomial(F, map.x_numerator, x),
-        .x_den = polynomial_monic(F, map.x_denominator, x),
-        .y_num = polynomial(F, map.y_numerator, x),
-        .y_den = polynomial_monic(F, map.y_denominator, x),
-    };
-}
-
-/// The image of (x', y') from `inverse` = 1 / (x_den y_den), which must be nonzero.
-fn isogeny_finish(comptime F: type, parts: IsogenyParts(F), y: F, inverse: F) [2]F {
-    assert(!inverse.is_zero());
-    return .{
-        parts.x_num.mul(parts.y_den).mul(inverse),
-        y.mul(parts.y_num).mul(parts.x_den).mul(inverse),
-    };
+fn Field(comptime Point: type) type {
+    return @FieldType(Point, "x");
 }
 
 /// 1 / a and 1 / b from one inversion (Montgomery's trick); inverse(0) = 0 as `inverse`.
@@ -230,15 +225,15 @@ fn inverse_pair(comptime F: type, values: [2]F) [2]F {
     return result;
 }
 
-/// SSWU then the isogeny for both of hash_to_curve's field elements, sharing each stage's
-/// inversion between them. Each result is the same point `isogeny(map_to_curve_sswu(u))`
-/// gives; null is the identity.
+/// SSWU then the isogeny for both of hash_to_curve's field elements, sharing SSWU's
+/// inversion between them: the sum of the points `isogeny(map_to_curve_sswu(u[i]))` gives.
 fn map_pair(
-    comptime F: type,
-    comptime params: SswuParameters(F),
-    comptime map: IsogenyMap(F),
-    u: [2]F,
-) [2]?[2]F {
+    comptime Point: type,
+    comptime params: SswuParameters(Field(Point)),
+    comptime map: IsogenyMap(Field(Point)),
+    u: [2]Field(Point),
+) Point {
+    const F = Field(Point);
     var z_u2: [2]F = undefined;
     var denominators: [2]F = undefined;
     for (&z_u2, &denominators, u) |*z, *denominator, value| {
@@ -246,19 +241,11 @@ fn map_pair(
         denominator.* = sswu_denominator(F, z.*);
     }
     const tv1 = inverse_pair(F, denominators);
-    var points: [2][2]F = undefined;
-    var parts: [2]IsogenyParts(F) = undefined;
-    for (&points, &parts, &denominators, 0..) |*point, *part, *denominator, index| {
-        point.* = sswu_finish(F, params, u[index], z_u2[index], tv1[index]);
-        part.* = isogeny_parts(F, map, point[0]);
-        denominator.* = part.x_den.mul(part.y_den);
+    var sum = Point.identity;
+    for (u, z_u2, tv1) |value, z, inverse| {
+        sum = sum.add(isogeny(Point, map, sswu_finish(F, params, value, z, inverse)));
     }
-    const inverses = inverse_pair(F, denominators);
-    var out: [2]?[2]F = undefined;
-    for (&out, parts, points, inverses) |*mapped, part, point, inverse| {
-        mapped.* = if (inverse.is_zero()) null else isogeny_finish(F, part, point[1], inverse);
-    }
-    return out;
+    return sum;
 }
 
 const g1_sswu: SswuParameters(Fp) = .{
@@ -293,20 +280,16 @@ const g2_sswu: SswuParameters(Fp2) = .{
 
 /// map_to_curve for G1: a point on E (not yet in G1).
 pub fn map_to_curve_g1(u: Fp) g1.G1 {
-    const mapped = isogeny(Fp, g1_isogeny, map_to_curve_sswu(Fp, g1_sswu, u)) orelse
-        return g1.G1.identity;
-    const point: g1.Affine = .{ .x = mapped[0], .y = mapped[1], .infinity = false };
+    const point = isogeny(g1.G1, g1_isogeny, map_to_curve_sswu(Fp, g1_sswu, u));
     assert(point.is_on_curve());
-    return point.to_jacobian();
+    return point;
 }
 
 /// map_to_curve for G2: a point on E' (not yet in G2).
 pub fn map_to_curve_g2(u: Fp2) g2.G2 {
-    const mapped = isogeny(Fp2, g2_isogeny, map_to_curve_sswu(Fp2, g2_sswu, u)) orelse
-        return g2.G2.identity;
-    const point: g2.Affine = .{ .x = mapped[0], .y = mapped[1], .infinity = false };
+    const point = isogeny(g2.G2, g2_isogeny, map_to_curve_sswu(Fp2, g2_sswu, u));
     assert(point.is_on_curve());
-    return point.to_jacobian();
+    return point;
 }
 
 /// EIP-2537 MAP_FP_TO_G1: map_to_curve then clear_cofactor.
@@ -357,20 +340,79 @@ pub fn map_to_g1_jacobian_parts(parts: []const []const u8, dst: []const u8) Expa
 /// The point `hash_to_g2_jacobian_parts` clears, as `map_to_g1_jacobian_parts` for G2.
 pub fn map_to_g2_jacobian_parts(parts: []const []const u8, dst: []const u8) ExpandError!g2.G2 {
     const u = try hash_to_field_fp2_parts(parts, dst);
-    return sum_mapped(g2.G2, map_pair(Fp2, g2_sswu, g2_isogeny, u));
+    if (fp8.ifma_available) {
+        if (map_g2_lanes(fp8.Lanes(.ifma), u)) |point| return point;
+    }
+    return map_pair(g2.G2, g2_sswu, g2_isogeny, u);
 }
 
-/// The sum of two `map_pair` results as a `Point` (g1.G1 or g2.G2).
-fn sum_mapped(comptime Point: type, mapped: anytype) Point {
-    var sum = Point.identity;
-    for (mapped) |point| {
-        const affine: Point.Affine = .{
-            .x = (point orelse continue)[0],
-            .y = point.?[1],
-            .infinity = false,
-        };
-        assert(affine.is_on_curve());
-        sum = sum.add_affine(affine);
+/// `map_pair` for G2 with its Fp square roots on `L` (an `fp8.Lanes`): one lane exponentiation
+/// for both elements' norm roots and one for both coordinates' roots, where the scalar path
+/// spends two to three per element. Null when a gx has a zero imaginary part, which
+/// `map_pair` handles. Variable time, for the public messages a hash maps.
+fn map_g2_lanes(comptime L: type, u: [2]Fp2) ?g2.G2 {
+    const params = g2_sswu;
+    var z_u2: [2]Fp2 = undefined;
+    var denominators: [2]Fp2 = undefined;
+    for (&z_u2, &denominators, u) |*z, *denominator, value| {
+        z.* = params.z.mul(value.square());
+        denominator.* = sswu_denominator(Fp2, z.*);
+    }
+    const tv1 = inverse_pair(Fp2, denominators);
+    var x: [2]Fp2 = undefined;
+    var gx: [2]Fp2 = undefined;
+    var norms: [fp8.lanes]Fp = undefined;
+    for (&x, &gx, norms[0..2], tv1) |*x1, *gx1, *norm, inverse| {
+        x1.* = if (inverse.is_zero())
+            params.b_over_za
+        else
+            params.minus_b_over_a.mul(Fp2.one.add(inverse));
+        gx1.* = curve_rhs(Fp2, params, x1.*);
+        if (gx1.c1.is_zero()) return null;
+        norm.* = gx1.norm();
+    }
+    // Unused lanes repeat lane 0; their results are dropped.
+    for (norms[2..]) |*norm| norm.* = norms[0];
+    // As `sswu_y_fp` on each norm: N^((p + 1) / 4) is sqrt(N), or sqrt(-N) when N, and so
+    // gx1, is not a square.
+    const norm_roots = L.from_fp(&norms).pow((fields.p + 1) / 4).to_fp();
+    var t: [fp8.lanes]Fp = undefined;
+    for (&x, &gx, t[0..2], z_u2, u, norms[0..2], norm_roots[0..2]) |*xi, *g, *ti, z, v, n, root| {
+        var s = root;
+        if (!root.square().eql(n)) {
+            assert(root.square().eql(n.neg()));
+            // gx2 = (Z u^2)^3 gx1 is a square, and with N(Z) = 5, sqrt(N(gx2)) is
+            // N(Z u^2) N(u) sqrt(-5) sqrt(-N(gx1)).
+            xi.* = z.mul(xi.*);
+            g.* = curve_rhs(Fp2, params, xi.*);
+            if (g.c1.is_zero()) return null;
+            s = z.norm().mul(v.norm()).mul(comptime sqrt_neg(Fp.from_int_comptime(5))).mul(root);
+        }
+        if (std.debug.runtime_safety) assert(s.square().eql(g.norm()));
+        ti.* = g.c0.add(s).mul(comptime Fp.from_int_comptime((fields.p + 1) / 2));
+        // t = 0 would give c1^2 = s^2 - c0^2 = 0.
+        assert(!ti.is_zero());
+    }
+    for (t[2..]) |*ti| ti.* = t[0];
+    const roots = L.from_fp(&t).pow((fields.p + 1) / 4).to_fp();
+    return g2_lanes_finish(t[0..2].*, roots[0..2].*, u, x, gx);
+}
+
+/// Each element's root of gx from y = t^((p + 1) / 4), as `Fp2.sqrt_general`: y^2 is t or -t
+/// and c1 / (2y) is the other coordinate. Signs the roots as SSWU does and sums the images.
+fn g2_lanes_finish(t: [2]Fp, y: [2]Fp, u: [2]Fp2, x: [2]Fp2, gx: [2]Fp2) g2.G2 {
+    const inverses = inverse_pair(Fp, .{ y[0].double(), y[1].double() });
+    var sum = g2.G2.identity;
+    for (t, y, inverses, u, x, gx) |ti, yi, inverse, v, xi, g| {
+        assert(!inverse.is_zero());
+        const other = g.c1.mul(inverse);
+        var root: Fp2 = if (yi.square().eql(ti))
+            .{ .c0 = yi, .c1 = other }
+        else
+            .{ .c0 = other, .c1 = yi };
+        assert(root.square().eql(g));
+        if (sgn0(Fp2, v) != sgn0(Fp2, root)) root = root.neg();
+        sum = sum.add(isogeny(g2.G2, g2_isogeny, .{ xi, root }));
     }
     return sum;
 }
@@ -415,7 +457,7 @@ pub fn G1BatchOn(comptime backend: ?fp8.Backend) type {
             if (backend == null) {
                 for (out, 0..) |*point, index| {
                     const u = batch.u[2 * index ..][0..2].*;
-                    point.* = sum_mapped(g1.G1, map_pair(Fp, g1_sswu, g1_isogeny, u));
+                    point.* = map_pair(g1.G1, g1_sswu, g1_isogeny, u);
                 }
                 return;
             }
@@ -423,7 +465,7 @@ pub fn G1BatchOn(comptime backend: ?fp8.Backend) type {
             for (batch.u[2 * batch.count ..]) |*u| u.* = batch.u[0];
             const mapped = map_g1_lanes(fp8.Lanes(backend.?), &batch.u);
             for (out, 0..) |*point, index| {
-                point.* = sum_mapped(g1.G1, mapped[2 * index ..][0..2]);
+                point.* = mapped[2 * index].add(mapped[2 * index + 1]);
             }
         }
 
@@ -440,8 +482,8 @@ pub fn G1BatchOn(comptime backend: ?fp8.Backend) type {
 }
 
 /// SSWU then the 11-isogeny for every lane of `u` on `L` (an `fp8.Lanes`): lane i is the
-/// point `isogeny(map_to_curve_sswu(u[i]))` gives, null for the identity.
-fn map_g1_lanes(comptime L: type, u: *const [fp8.lanes]Fp) [fp8.lanes]?[2]Fp {
+/// point `isogeny(map_to_curve_sswu(u[i]))` gives, in Jacobian coordinates.
+fn map_g1_lanes(comptime L: type, u: *const [fp8.lanes]Fp) [fp8.lanes]g1.G1 {
     const params = g1_sswu;
     const lane_u = L.from_fp(u);
     const z = L.constant(params.z);
@@ -498,22 +540,32 @@ fn curve_rhs_lanes(comptime L: type, x: L) L {
     return x.square().add(L.constant(g1_sswu.a)).mul(x).add(L.constant(g1_sswu.b));
 }
 
-/// The G1 isogeny map lane-wise; a zero denominator gives the identity (null).
-fn isogeny_g1_lanes(comptime L: type, x: L, y: L) [fp8.lanes]?[2]Fp {
+/// The G1 isogeny map lane-wise, in Jacobian coordinates without an inversion; a zero
+/// denominator gives the identity.
+fn isogeny_g1_lanes(comptime L: type, x: L, y: L) [fp8.lanes]g1.G1 {
     const x_num = polynomial_lanes(L, g1_isogeny.x_numerator, false, x);
     const x_den = polynomial_lanes(L, g1_isogeny.x_denominator, true, x);
     const y_num = polynomial_lanes(L, g1_isogeny.y_numerator, false, x);
     const y_den = polynomial_lanes(L, g1_isogeny.y_denominator, true, x);
-    const denominators = x_den.mul(y_den);
-    const inverse = inverse_lanes(L, denominators);
-    const out_x = x_num.mul(y_den).mul(inverse).to_fp();
-    const out_y = y.mul(y_num).mul(x_den).mul(inverse).to_fp();
-    const identity: [fp8.lanes]bool = denominators.is_zero();
-    var out: [fp8.lanes]?[2]Fp = undefined;
-    for (&out, identity, out_x, out_y) |*point, empty, px, py| {
-        point.* = if (empty) null else .{ px, py };
+    const jacobian = isogeny_jacobian(L, x_num, x_den, y.mul(y_num), y_den);
+    const z = jacobian[2].to_fp();
+    var out: [fp8.lanes]g1.G1 = undefined;
+    for (&out, jacobian[0].to_fp(), jacobian[1].to_fp(), z) |*point, px, py, pz| {
+        point.* = if (pz.is_zero()) g1.G1.identity else .{ .x = px, .y = py, .z = pz };
     }
     return out;
+}
+
+/// (x_num / x_den, y_num / y_den) as Jacobian (X, Y, Z) with Z = x_den y_den: X = x_num
+/// x_den y_den^2 and Y = y_num y_den^2 x_den^3. Z is zero exactly when a denominator is.
+fn isogeny_jacobian(comptime F: type, x_num: F, x_den: F, y_num: F, y_den: F) [3]F {
+    const y_den2 = y_den.square();
+    const x_den_y_den2 = x_den.mul(y_den2);
+    return .{
+        x_num.mul(x_den_y_den2),
+        y_num.mul(x_den_y_den2).mul(x_den.square()),
+        x_den.mul(y_den),
+    };
 }
 
 /// `polynomial`, or `polynomial_monic` when `monic`, lane-wise with compile-time coefficients.
@@ -897,11 +949,33 @@ test "map: G1 lanes match the scalar map on edge and random inputs" {
                 u[2] = Fp.one.neg();
             }
             for (map_g1_lanes(L, &u), u) |lane, value| {
-                const want = isogeny(Fp, g1_isogeny, map_to_curve_sswu(Fp, g1_sswu, value));
-                try testing.expect(want != null and lane != null);
-                try testing.expect(want.?[0].eql(lane.?[0]) and want.?[1].eql(lane.?[1]));
+                const want = map_to_curve_g1(value);
+                try testing.expect(!want.is_identity() and lane.is_on_curve());
+                try testing.expect(want.eql(lane));
             }
         }
+    }
+}
+
+test "map: G2 lanes match the scalar map on edge and random inputs" {
+    var prng = @import("prng.zig").Prng.init(0x6d6132);
+    inline for (.{ fp8.Lanes(.portable), fp8.Fp8 }) |L| {
+        var lane_maps: usize = 0;
+        for (0..24) |round| {
+            var u: [2]Fp2 = undefined;
+            for (&u) |*value| value.* = .{
+                .c0 = Fp.from_int(prng.int(Fp.Int) % fields.p),
+                .c1 = Fp.from_int(prng.int(Fp.Int) % fields.p),
+            };
+            // u = 0 takes the zero-denominator branch; 1 and -1 differ only in sign.
+            if (round == 0) u = .{ Fp2.zero, Fp2.one };
+            if (round == 1) u = .{ Fp2.one.neg(), .{ .c0 = Fp.zero, .c1 = Fp.one } };
+            const want = map_pair(g2.G2, g2_sswu, g2_isogeny, u);
+            const lanes = map_g2_lanes(L, u) orelse continue;
+            lane_maps += 1;
+            try testing.expect(lanes.is_on_curve() and lanes.eql(want));
+        }
+        try testing.expect(lane_maps >= 22);
     }
 }
 
@@ -939,6 +1013,8 @@ test "map: fp8's variable-time lanes stay behind public inputs" {
     const code = source[0..std.mem.indexOf(u8, source, "\nconst testing = std.testing;").?];
     try testing.expectEqual(1, std.mem.count(u8, code, "map_g1_lanes(fp8.Lanes("));
     try testing.expectEqual(1, std.mem.count(u8, code, "batch.u[2 * batch.count] = "));
+    // And on the two field elements `map_to_g2_jacobian_parts` hashes from a message.
+    try testing.expectEqual(1, std.mem.count(u8, code, "map_g2_lanes(fp8.Lanes("));
     // pairing.zig runs them in the Miller loop's accumulator and the final exponentiation,
     // whose inputs are public points: one comptime choice of each.
     const pairing = @embedFile("pairing.zig");
