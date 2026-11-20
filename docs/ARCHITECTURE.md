@@ -62,7 +62,12 @@ of every crate; cryptography's excludes `curve25519`.
   draws randomness except through it. There are two runtimes behind one interface:
   - **deterministic**: single-threaded, seeded scheduler on stackful fibers, simulated time,
     in-memory storage with fault injection, and an auditor hash of every event, so any run
-    replays exactly from its seed and two runs can be compared;
+    replays exactly from its seed and two runs can be compared. It shuffles each ready batch
+    with commonware's `StdRng` and shuffle, but queues a woken task once, where commonware's
+    executor queues it once per wake. Tests that pin commonware's bytes from a seeded run draw
+    the shuffles that difference removes. stream's conformance draws one after joining its
+    listener task (`src/stream/sake_conformance_test.zig`), where commonware holds the root
+    task twice; removing that draw breaks all four hashes;
   - **production**: real clock, TCP, and files on disk. Its `Runner` owns a `std.Io.Threaded`
     on every platform, since `std.Io.Uring` does not compile in Zig 0.17.1; on Linux,
     `Config.io_uring` moves blob and socket I/O onto zigware's own io_uring rings
