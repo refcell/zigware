@@ -1773,6 +1773,9 @@ pub fn Journal(comptime V: type) type {
         }
 
         /// Decode the frame at `offset` from cached bytes; any miss declines.
+        /// Frames up to this size are read through a stack buffer by `try_read_frame_sync`.
+        const stack_frame_bytes = 512;
+
         fn try_read_frame_sync(self: *const Self, position: u64, offset: u64) ?V {
             const writer = self.data_writer(position);
             var header: [max_prefix_size]u8 = undefined;
@@ -1785,8 +1788,14 @@ pub fn Journal(comptime V: type) type {
                 const payload = header[found.varint_len..item_len];
                 return frame.decode_item(V, self.gpa, payload, cfg, compressed) catch null;
             }
-            const buf = self.gpa.alloc(u8, item_len) catch return null;
-            defer self.gpa.free(buf);
+            // Small frames (most qmdb operations) read into the stack instead of the heap.
+            var stack: [stack_frame_bytes]u8 = undefined;
+            const heap = item_len > stack.len;
+            const buf = if (heap)
+                self.gpa.alloc(u8, item_len) catch return null
+            else
+                stack[0..item_len];
+            defer if (heap) self.gpa.free(buf);
             if (!writer.try_read_sync_into(buf, offset)) return null;
             const payload = buf[found.varint_len..];
             return frame.decode_item(V, self.gpa, payload, cfg, compressed) catch null;

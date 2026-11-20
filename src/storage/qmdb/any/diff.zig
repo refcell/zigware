@@ -15,7 +15,36 @@ const value_mod = @import("../value.zig");
 
 /// The order of two keys: their encoded bytes, lexicographically.
 pub fn order(comptime K: type, a: *const K, b: *const K) std.math.Order {
-    return std.mem.order(u8, value_mod.bytes(K, a), value_mod.bytes(K, b));
+    const x = value_mod.bytes(K, a);
+    const y = value_mod.bytes(K, b);
+    const fixed = comptime fixed_length(K);
+    if (fixed == null) return std.mem.order(u8, x, y);
+    const length = fixed.?;
+    assert(x.len == length and y.len == length);
+    // Big-endian words order as their bytes do, so most keys settle in one compare instead of
+    // `std.mem.order`'s byte loop.
+    const words = length / 8;
+    inline for (0..words) |word| {
+        const p = std.mem.readInt(u64, x[word * 8 ..][0..8], .big);
+        const q = std.mem.readInt(u64, y[word * 8 ..][0..8], .big);
+        if (p != q) return if (p < q) .lt else .gt;
+    }
+    return std.mem.order(u8, x[words * 8 .. length], y[words * 8 .. length]);
+}
+
+/// The encoded length of `K` when every key has the same one: byte arrays and digests.
+fn fixed_length(comptime K: type) ?usize {
+    switch (@typeInfo(K)) {
+        .array => |info| return if (info.child == u8) info.len else null,
+        .@"struct" => {
+            if (!@hasField(K, "bytes")) return null;
+            const Bytes = @FieldType(K, "bytes");
+            if (@typeInfo(Bytes) != .array) return null;
+            if (@sizeOf(K) != @sizeOf(Bytes)) return null;
+            return @typeInfo(Bytes).array.len;
+        },
+        else => return null,
+    }
 }
 
 /// What a batch did to a key.
@@ -124,6 +153,114 @@ pub fn is_sorted(comptime K: type, comptime V: type, entries: []const Pair(K, V)
     return true;
 }
 
+/// The indices of `items` (keys, or items with a `key: K` field) in key order, equal keys in index
+/// order: the order a stable sort by key gives, without moving the items. A stable LSD radix
+/// sort orders slots by each key's first eight bytes (big-endian, zero-padded), skipping
+/// passes whose byte is the same in every key; runs that share a prefix are then sorted by the
+/// whole key. The caller owns the result.
+pub fn key_order(comptime K: type, comptime T: type, gpa: Allocator, items: []const T) ![]u32 {
+    assert(items.len <= std.math.maxInt(u32));
+    const slots = try gpa.alloc(PrefixSlot, items.len * 2);
+    defer gpa.free(slots);
+    var source = slots[0..items.len];
+    var target = slots[items.len..];
+    var counts: [8][256]u32 = @splat(@splat(0));
+    for (source, items, 0..) |*slot, *item, index| {
+        const prefix = key_prefix(K, item_key(K, T, item));
+        slot.* = .{ .prefix = prefix, .index = @intCast(index) };
+        inline for (0..8) |digit| counts[digit][@as(u8, @truncate(prefix >> (digit * 8)))] += 1;
+    }
+    for (&counts, 0..) |*count, digit| {
+        if (items.len == 0) break;
+        const shift: u6 = @intCast(digit * 8);
+        if (count[@as(u8, @truncate(source[0].prefix >> shift))] == items.len) continue;
+        var offset: u32 = 0;
+        for (count) |*bucket| {
+            const size = bucket.*;
+            bucket.* = offset;
+            offset += size;
+        }
+        for (source) |slot| {
+            const bucket = &count[@as(u8, @truncate(slot.prefix >> shift))];
+            target[bucket.*] = slot;
+            bucket.* += 1;
+        }
+        std.mem.swap([]PrefixSlot, &source, &target);
+    }
+    sort_prefix_runs(K, T, items, source);
+    const indices = try gpa.alloc(u32, items.len);
+    for (indices, source) |*index, slot| index.* = slot.index;
+    assert(indices.len == items.len);
+    return indices;
+}
+
+const PrefixSlot = struct { prefix: u64, index: u32 };
+
+/// The key of `item`: the item itself when `T` is `K`, else its `key` field.
+fn item_key(comptime K: type, comptime T: type, item: *const T) *const K {
+    if (T == K) return item;
+    return &item.key;
+}
+
+/// Stably sorts `items` (keys, or items with a `key: K` field) by key through `key_order`.
+pub fn sort_by_key(comptime K: type, comptime T: type, gpa: Allocator, items: []T) !void {
+    if (items.len < 2) return;
+    // Items often arrive in order already (a walk in location order over keys created in key
+    // order), which one linear check settles.
+    for (1..items.len) |at| {
+        if (order(K, item_key(K, T, &items[at - 1]), item_key(K, T, &items[at])) == .gt) break;
+    } else return;
+    const indices = try key_order(K, T, gpa, items);
+    defer gpa.free(indices);
+    const copy = try gpa.dupe(T, items);
+    defer gpa.free(copy);
+    for (items, indices) |*item, index| item.* = copy[index];
+    assert(indices.len == items.len);
+}
+
+/// The first eight bytes of `key`, big-endian and zero-padded, which order as the key does
+/// whenever they differ.
+pub fn key_prefix(comptime K: type, key: *const K) u64 {
+    const bytes = value_mod.bytes(K, key);
+    if (bytes.len >= 8) return std.mem.readInt(u64, bytes[0..8], .big);
+    var head: [8]u8 = @splat(0);
+    @memcpy(head[0..bytes.len], bytes);
+    return std.mem.readInt(u64, &head, .big);
+}
+
+/// Sorts each run of prefix-sorted `slots` that shares a prefix by the whole key, then by
+/// index (the radix passes left equal keys in index order).
+fn sort_prefix_runs(
+    comptime K: type,
+    comptime T: type,
+    items: []const T,
+    slots: []PrefixSlot,
+) void {
+    const Context = struct {
+        items: []const T,
+        fn less(context: @This(), a: PrefixSlot, b: PrefixSlot) bool {
+            const ka = item_key(K, T, &context.items[a.index]);
+            const kb = item_key(K, T, &context.items[b.index]);
+            return switch (order(K, ka, kb)) {
+                .lt => true,
+                .gt => false,
+                .eq => a.index < b.index,
+            };
+        }
+    };
+    var start: usize = 0;
+    while (start < slots.len) {
+        var end = start + 1;
+        while (end < slots.len and slots[end].prefix == slots[start].prefix) end += 1;
+        // Every slot differs (ties fall to the index), so the unstable sort is deterministic.
+        if (end - start > 1) std.sort.pdq(PrefixSlot, slots[start..end], Context{
+            .items = items,
+        }, Context.less);
+        start = end;
+    }
+    assert(start == slots.len);
+}
+
 /// Binary-searches key-sorted `entries` for `key`.
 pub fn lookup_sorted(
     comptime K: type,
@@ -131,18 +268,58 @@ pub fn lookup_sorted(
     entries: []const Pair(K, V),
     key: *const K,
 ) ?*const Entry(V) {
-    var low: usize = 0;
-    var high: usize = entries.len;
-    while (low < high) {
-        const mid = low + (high - low) / 2;
-        switch (order(K, &entries[mid].key, key)) {
-            .lt => low = mid + 1,
-            .gt => high = mid,
-            .eq => return &entries[mid].entry,
-        }
+    const index = find_sorted(K, Pair(K, V), entries, key) orelse return null;
+    return &entries[index].entry;
+}
+
+/// The index of `key` in `items` (keys, or items with a `key: K` field; sorted by key with
+/// unique keys), or null.
+pub fn find_sorted(comptime K: type, comptime T: type, items: []const T, key: *const K) ?usize {
+    const index = lower_bound(K, T, items, key);
+    if (index == items.len) return null;
+    if (order(K, item_key(K, T, &items[index]), key) != .eq) return null;
+    return index;
+}
+
+/// The index of the first of key-sorted `items` at or above `key` (`items.len` if none).
+pub fn lower_bound(comptime K: type, comptime T: type, items: []const T, key: *const K) usize {
+    return bound(K, T, items, key, .lt);
+}
+
+/// The index of the first of key-sorted `items` above `key` (`items.len` if none).
+pub fn upper_bound(comptime K: type, comptime T: type, items: []const T, key: *const K) usize {
+    return bound(K, T, items, key, .eq);
+}
+
+/// The first index past the items ordering at most `skip` against `key`: a branchless lower
+/// bound on the keys' eight-byte prefixes, then a scan of the equal prefixes by whole key, so
+/// random keys settle without the mispredicted branch per step a byte-order binary search takes.
+fn bound(
+    comptime K: type,
+    comptime T: type,
+    items: []const T,
+    key: *const K,
+    comptime skip: std.math.Order,
+) usize {
+    comptime assert(skip != .gt);
+    if (items.len == 0) return 0;
+    const prefix = key_prefix(K, key);
+    var base: usize = 0;
+    var length = items.len;
+    while (length > 1) {
+        const half = length / 2;
+        const below = key_prefix(K, item_key(K, T, &items[base + half])) < prefix;
+        base = if (below) base + half else base;
+        length -= half;
     }
-    assert(low == high);
-    return null;
+    base += @intFromBool(key_prefix(K, item_key(K, T, &items[base])) < prefix);
+    assert(base <= items.len);
+    while (base < items.len and key_prefix(K, item_key(K, T, &items[base])) == prefix) {
+        const relation = order(K, item_key(K, T, &items[base]), key);
+        if (relation == .gt or (skip == .lt and relation == .eq)) break;
+        base += 1;
+    }
+    return base;
 }
 
 /// The first entry for `key` among `diffs`, ordered nearest first.
@@ -341,4 +518,89 @@ test "diff cursors reject an out-of-order query" {
             _ = cursors.resolve(&.{ 0, 1 });
         }
     }.body);
+}
+
+// `key_order`, `sort_by_key`, `find_sorted`, and the word-wise `order` against a byte-order
+// stable sort and a linear scan, on 2-byte keys (below the 8-byte prefix) and 12-byte keys
+// whose first eight bytes are drawn from few values, so runs share a prefix and differ only
+// past it, with duplicate keys whose write order must survive.
+test "diff key order matches a stable byte-order sort" {
+    var prng: std.Random.DefaultPrng = .init(0x5eed_0f_04de);
+    const random = prng.random();
+    try expect_key_order([2]u8, random);
+    try expect_key_order([12]u8, random);
+    try expect_key_order([32]u8, random);
+}
+
+fn expect_key_order(comptime K: type, random: std.Random) !void {
+    const gpa = testing.allocator;
+    const Item = struct { key: K, index: u32 };
+    for (0..200) |round| {
+        const items = try gpa.alloc(Item, random.uintAtMost(usize, 300));
+        defer gpa.free(items);
+        for (items, 0..) |*item, index| {
+            for (&item.key, 0..) |*byte, at| {
+                // Few distinct bytes near the front, so prefixes collide often.
+                const front = random.uintAtMost(u8, @intCast(round % 3 + 1));
+                byte.* = if (at < 9) front else random.int(u8);
+            }
+            if (index > 0 and random.boolean()) {
+                item.key = items[random.uintLessThan(usize, index)].key;
+            }
+            item.index = @intCast(index);
+        }
+        const reference = try gpa.dupe(Item, items);
+        defer gpa.free(reference);
+        std.mem.sort(Item, reference, {}, struct {
+            fn less(_: void, a: Item, b: Item) bool {
+                return std.mem.order(u8, &a.key, &b.key) == .lt;
+            }
+        }.less);
+        const indices = try key_order(K, Item, gpa, items);
+        defer gpa.free(indices);
+        for (reference, indices) |want, got| try testing.expectEqual(want.index, got);
+        const sorted = try gpa.dupe(Item, items);
+        defer gpa.free(sorted);
+        try sort_by_key(K, Item, gpa, sorted);
+        for (reference, sorted) |want, got| try testing.expectEqual(want.index, got.index);
+        try expect_find_sorted(K, Item, reference, random);
+    }
+}
+
+/// `find_sorted`, the bounds, and `order` on `sorted` (duplicates dropped) against linear scans.
+fn expect_find_sorted(
+    comptime K: type,
+    comptime Item: type,
+    sorted: []const Item,
+    random: std.Random,
+) !void {
+    var unique: std.ArrayList(Item) = .empty;
+    defer unique.deinit(testing.allocator);
+    for (sorted) |item| {
+        if (unique.items.len > 0 and std.mem.eql(u8, &unique.getLast().key, &item.key)) continue;
+        try unique.append(testing.allocator, item);
+    }
+    for (0..unique.items.len + 8) |_| {
+        var key: K = undefined;
+        if (unique.items.len > 0 and random.boolean()) {
+            key = unique.items[random.uintLessThan(usize, unique.items.len)].key;
+        } else {
+            for (&key, 0..) |*byte, at| {
+                byte.* = if (at < 9) random.uintAtMost(u8, 2) else random.int(u8);
+            }
+        }
+        var want: ?usize = null;
+        var below: usize = 0;
+        var at_most: usize = 0;
+        for (unique.items, 0..) |item, at| {
+            const relation = std.mem.order(u8, &item.key, &key);
+            try testing.expectEqual(relation, order(K, &item.key, &key));
+            if (relation == .eq) want = at;
+            below += @intFromBool(relation == .lt);
+            at_most += @intFromBool(relation != .gt);
+        }
+        try testing.expectEqual(want, find_sorted(K, Item, unique.items, &key));
+        try testing.expectEqual(below, lower_bound(K, Item, unique.items, &key));
+        try testing.expectEqual(at_most, upper_bound(K, Item, unique.items, &key));
+    }
 }

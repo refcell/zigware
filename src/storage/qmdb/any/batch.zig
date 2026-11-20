@@ -184,16 +184,18 @@ pub fn Unmerkleized(comptime D: type) type {
 
         /// The last write of each key, sorted by key.
         fn sorted_writes(gpa: Allocator, mutations: []const Mutation) ![]Mutation {
-            const sorted = try gpa.dupe(Mutation, mutations);
+            const sorted = try gpa.alloc(Mutation, mutations.len);
             errdefer gpa.free(sorted);
-            // A stable sort keeps each key's writes in order, so the last is the newest.
-            std.mem.sort(Mutation, sorted, {}, less);
+            // Equal keys stay in write order, so the last of each run is the newest.
+            const indices = try diff_mod.key_order(K, Mutation, gpa, mutations);
+            defer gpa.free(indices);
             var count: usize = 0;
-            for (sorted, 0..) |mutation, index| {
-                const last = index + 1 == sorted.len or
-                    diff_mod.order(K, &mutation.key, &sorted[index + 1].key) != .eq;
+            for (indices, 0..) |index, at| {
+                const next = if (at + 1 < indices.len) &mutations[indices[at + 1]].key else null;
+                const last = next == null or
+                    diff_mod.order(K, &mutations[index].key, next.?) != .eq;
                 if (!last) continue;
-                sorted[count] = mutation;
+                sorted[count] = mutations[index];
                 count += 1;
             }
             assert(count <= mutations.len);
@@ -203,10 +205,6 @@ pub fn Unmerkleized(comptime D: type) type {
                 return shrunk;
             }
             return sorted[0..count];
-        }
-
-        fn less(_: void, a: Mutation, b: Mutation) bool {
-            return diff_mod.order(K, &a.key, &b.key) == .lt;
         }
     };
 }
@@ -595,6 +593,41 @@ fn Merkleizer(comptime D: type) type {
             return op;
         }
 
+        /// The operations at ascending `locs` into `out`, borrowed until `deinit`: committed ones
+        /// probed in the page cache in one pass, then the misses read in order (commonware's
+        /// `read_many`), and the rest from the ancestors and `batch_ops`. The probe runs on the
+        /// caller: sharding it across the database's pool, as commonware's
+        /// `read_many_sharded` does, measured 2.5x slower on the merkleize benches.
+        pub fn read_ops(
+            self: *Self,
+            locs: []const u64,
+            batch_ops: []const D.Operation,
+            out: []D.Operation,
+        ) !void {
+            assert(locs.len == out.len);
+            const gpa = self.gpa;
+            const split = std.sort.lowerBound(u64, locs, self.db_state.size, order_u64);
+            for (locs[split..], out[split..]) |loc, *op| {
+                op.* = self.peek_uncommitted(loc, batch_ops);
+            }
+            if (split == 0) return;
+            const found = try gpa.alloc(?D.Operation, split);
+            defer gpa.free(found);
+            self.db.log.try_read_many_sync(locs[0..split], found);
+            var at: usize = 0;
+            errdefer if (comptime D.Operation.owns_memory) for (found[at..]) |*slot| {
+                if (slot.*) |*op| op.deinit(gpa);
+            };
+            if (comptime D.Operation.owns_memory) try self.reads.ensureUnusedCapacity(gpa, split);
+            while (at < split) : (at += 1) {
+                const op = found[at] orelse try self.db.log.read(locs[at]);
+                found[at] = null;
+                if (comptime D.Operation.owns_memory) self.reads.appendAssumeCapacity(op);
+                out[at] = op;
+            }
+            assert(at == split);
+        }
+
         /// The previous locations of the written keys: ancestor diff locations of keys the
         /// ancestors keep active, snapshot candidates of keys they do not touch. Sorted.
         /// Ordered databases also gather the snapshot collision siblings of keys the ancestors
@@ -619,7 +652,7 @@ fn Merkleizer(comptime D: type) type {
                     try locations.append(self.gpa, loc.*);
                 }
             }
-            std.mem.sort(u64, locations.items, {}, std.sort.asc(u64));
+            std.sort.pdq(u64, locations.items, {}, std.sort.asc(u64));
             var count: usize = 0;
             for (locations.items) |loc| {
                 if (count > 0 and locations.items[count - 1] == loc) continue;
@@ -641,8 +674,10 @@ fn Merkleizer(comptime D: type) type {
             @memset(consumed, false);
             const locations = try self.gather_existing_locations(writes);
             defer gpa.free(locations);
-            for (locations) |old_loc| {
-                const op = try self.read_op(old_loc);
+            const ops = try gpa.alloc(D.Operation, locations.len);
+            defer gpa.free(ops);
+            try self.read_ops(locations, &.{}, ops);
+            for (locations, ops) |old_loc, op| {
                 if (op != .update) return error.DataCorrupted; // Candidates are updates.
                 const key = op.update.key;
                 var base_old_loc: ?u64 = old_loc;
@@ -688,17 +723,7 @@ fn Merkleizer(comptime D: type) type {
         }
 
         fn find_write(writes: []const Mutation, key: *const K) ?usize {
-            var low: usize = 0;
-            var high: usize = writes.len;
-            while (low < high) {
-                const mid = low + (high - low) / 2;
-                switch (diff_mod.order(K, &writes[mid].key, key)) {
-                    .lt => low = mid + 1,
-                    .gt => high = mid,
-                    .eq => return mid,
-                }
-            }
-            return null;
+            return diff_mod.find_sorted(K, Mutation, writes, key);
         }
 
         /// How the update of `key` at `loc` moves, or null if it is not its key's active
@@ -723,23 +748,13 @@ fn Merkleizer(comptime D: type) type {
         }
 
         fn lookup_index(diff: []const Pair, key: *const K) ?usize {
-            var low: usize = 0;
-            var high: usize = diff.len;
-            while (low < high) {
-                const mid = low + (high - low) / 2;
-                switch (diff_mod.order(K, &diff[mid].key, key)) {
-                    .lt => low = mid + 1,
-                    .gt => high = mid,
-                    .eq => return mid,
-                }
-            }
-            return null;
+            return diff_mod.find_sorted(K, Pair, diff, key);
         }
 
         /// Walks the floor from the inherited one over the operations below the tip, moving
         /// the active updates it reaches to the tip. Returns the floor it reached.
         fn walk(self: *Self, walked: *Walked(D), policy: anytype) !u64 {
-            std.mem.sort(Pair, walked.diff.items, {}, pair_less);
+            try sort_pairs(self.gpa, walked.diff.items);
             const delta = walked.active_keys_delta;
             const active_keys: i64 = @as(i64, @intCast(self.base_active_keys)) + delta;
             assert(active_keys >= 0);
@@ -749,10 +764,12 @@ fn Merkleizer(comptime D: type) type {
             var w = floor_mod.Walk.init(self.base_floor, next_loc, limits.entries, limits.skips);
             if (active_keys == 0 or w.entries == 0) return w.floor;
             const inactive = walked.superseded.items;
-            std.mem.sort(u64, inactive, {}, std.sort.asc(u64));
+            std.sort.pdq(u64, inactive, {}, std.sort.asc(u64));
             try walked.superseded.append(self.gpa, self.db_state.size - 1);
             var candidates: std.ArrayList(u64) = .empty;
             defer candidates.deinit(self.gpa);
+            var ops: std.ArrayList(D.Operation) = .empty;
+            defer ops.deinit(self.gpa);
             var scan = w.floor;
             while (w.entries > 0) {
                 if (scan >= w.end) {
@@ -761,24 +778,24 @@ fn Merkleizer(comptime D: type) type {
                 }
                 candidates.clearRetainingCapacity();
                 try self.read_round(&scan, w.end, w.entries, walked.superseded.items, &candidates);
-                if (!try self.walk_round(walked, &w, candidates.items, policy)) break;
+                try ops.resize(self.gpa, candidates.items.len);
+                try self.read_ops(candidates.items, walked.ops.items, ops.items);
+                if (!try self.walk_round(walked, &w, candidates.items, ops.items, policy)) break;
             }
             return w.floor;
         }
 
-        /// Decides the round's active candidates; false once the walk ends.
+        /// Decides the round's active candidates, read into `ops`; false once the walk ends.
         fn walk_round(
             self: *Self,
             walked: *Walked(D),
             w: *floor_mod.Walk,
             candidates: []const u64,
+            ops: []const D.Operation,
             policy: anytype,
         ) !bool {
-            for (candidates) |loc| {
-                const op = if (loc < self.db_state.size)
-                    try self.read_op(loc)
-                else
-                    self.peek_uncommitted(loc, walked.ops.items);
+            assert(ops.len == candidates.len);
+            for (candidates, ops) |loc, op| {
                 const key = op.key() orelse continue; // A commit is inactive.
                 const mv = self.classify(walked.diff.items, loc, key) orelse continue;
                 if (op != .update) return error.DataCorrupted; // Active operations are updates.
@@ -878,6 +895,12 @@ fn Merkleizer(comptime D: type) type {
 
         fn order_u64(context: u64, item: u64) std.math.Order {
             return std.math.order(context, item);
+        }
+
+        /// Sorts `pairs` (unique keys) by key.
+        fn sort_pairs(gpa: Allocator, pairs: []Pair) !void {
+            try diff_mod.sort_by_key(K, Pair, gpa, pairs);
+            assert(!std.debug.runtime_safety or diff_mod.is_sorted(K, V, pairs));
         }
 
         fn pair_less(_: void, a: Pair, b: Pair) bool {
@@ -995,7 +1018,7 @@ fn Merkleizer(comptime D: type) type {
             // one linear merge (commonware's `merge_by`), instead of a sort of the whole diff.
             const diff = walked.diff.items;
             const floor_diff = walked.floor_diff.items;
-            std.mem.sortUnstable(Pair, floor_diff, {}, pair_less);
+            try sort_pairs(gpa, floor_diff);
             var d: usize = 0;
             var f: usize = 0;
             for (merged) |*out| {
@@ -1010,7 +1033,7 @@ fn Merkleizer(comptime D: type) type {
                 }
             }
             assert(d == diff.len and f == floor_diff.len);
-            assert(diff_mod.is_sorted(K, V, merged));
+            assert(!std.debug.runtime_safety or diff_mod.is_sorted(K, V, merged));
             if (comptime !codec.owns_memory(V)) return merged;
             var cloned: usize = 0;
             errdefer for (merged[0..cloned]) |*pair| {

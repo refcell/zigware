@@ -52,11 +52,11 @@ pub fn Emitter(comptime D: type) type {
             defer state.deinit(gpa);
             try classify(m, &state, writes);
             try add_translated_neighbors(m, &state);
-            std.mem.sort(Deleted, state.deleted.items, {}, key_less(Deleted));
-            std.mem.sort(Updated, state.updated.items, {}, key_less(Updated));
+            try diff_mod.sort_by_key(K, Deleted, gpa, state.deleted.items);
+            try diff_mod.sort_by_key(K, Updated, gpa, state.updated.items);
             const changes_membership = state.created.items.len + state.deleted.items.len > 0;
             if (changes_membership) try add_ancestor_neighbors(m, &state);
-            finish(&state);
+            try finish(gpa, &state);
             const ops_before = walked.ops.items.len;
             try emit_writes(m, walked, &state);
             if (changes_membership) try rewrite_predecessors(m, walked, &state);
@@ -74,7 +74,11 @@ pub fn Emitter(comptime D: type) type {
         /// The active update at `loc`, or null if an ancestor superseded it (commonware's
         /// `read_live`).
         fn live_update(m: anytype, loc: u64) !?D.Update {
-            const op = try m.read_op(loc);
+            return live(m, loc, try m.read_op(loc));
+        }
+
+        /// `live_update` of `op`, already read from `loc`.
+        fn live(m: anytype, loc: u64, op: D.Operation) !?D.Update {
             if (op != .update) return error.DataCorrupted; // Candidates hold updates.
             if (m.locate(loc, &op.update.key) == null) return null;
             return op.update;
@@ -95,8 +99,11 @@ pub fn Emitter(comptime D: type) type {
             const consumed = try gpa.alloc(bool, writes.len);
             defer gpa.free(consumed);
             @memset(consumed, false);
-            for (locations) |loc| {
-                const update = try live_update(m, loc) orelse continue;
+            const ops = try gpa.alloc(D.Operation, locations.len);
+            defer gpa.free(ops);
+            try m.read_ops(locations, &.{}, ops);
+            for (locations, ops) |loc, op| {
+                const update = try live(m, loc, op) orelse continue;
                 try push_neighbor(gpa, state, update, loc);
                 const index = find_write(writes, &update.key) orelse continue; // A sibling.
                 if (consumed[index]) continue;
@@ -125,17 +132,7 @@ pub fn Emitter(comptime D: type) type {
         }
 
         fn find_write(writes: []const Mutation, key: *const K) ?usize {
-            var low: usize = 0;
-            var high: usize = writes.len;
-            while (low < high) {
-                const mid = low + (high - low) / 2;
-                switch (diff_mod.order(K, &writes[mid].key, key)) {
-                    .lt => low = mid + 1,
-                    .gt => high = mid,
-                    .eq => return mid,
-                }
-            }
-            return null;
+            return diff_mod.find_sorted(K, Mutation, writes, key);
         }
 
         /// Adds the updates under the translated key before each deleted and created key: they
@@ -155,7 +152,7 @@ pub fn Emitter(comptime D: type) type {
                 var values = neighbor.values;
                 while (values.next()) |loc| try locations.append(gpa, loc.*);
             }
-            std.mem.sort(u64, locations.items, {}, std.sort.asc(u64));
+            std.sort.pdq(u64, locations.items, {}, std.sort.asc(u64));
             var previous: ?u64 = null;
             for (locations.items) |loc| {
                 if (previous == loc) continue;
@@ -192,27 +189,13 @@ pub fn Emitter(comptime D: type) type {
         }
 
         fn find(comptime T: type, items: []const T, key: *const K) ?usize {
-            var low: usize = 0;
-            var high: usize = items.len;
-            while (low < high) {
-                const mid = low + (high - low) / 2;
-                switch (diff_mod.order(K, &items[mid].key, key)) {
-                    .lt => low = mid + 1,
-                    .gt => high = mid,
-                    .eq => return mid,
-                }
-            }
-            return null;
+            return diff_mod.find_sorted(K, T, items, key);
         }
 
         /// Sorts the candidates, keeping the last pushed source per predecessor key and dropping
         /// deleted keys (commonware's `finish_next` and `finish_prev`).
-        fn finish(state: *State) void {
-            std.mem.sort(K, state.next.items, {}, struct {
-                fn less(_: void, a: K, b: K) bool {
-                    return diff_mod.order(K, &a, &b) == .lt;
-                }
-            }.less);
+        fn finish(gpa: Allocator, state: *State) !void {
+            try diff_mod.sort_by_key(K, K, gpa, state.next.items);
             var count: usize = 0;
             for (state.next.items) |key| {
                 if (count > 0 and diff_mod.order(K, &state.next.items[count - 1], &key) == .eq) {
@@ -224,7 +207,7 @@ pub fn Emitter(comptime D: type) type {
             }
             state.next.shrinkRetainingCapacity(count);
             // Stable: a key's later pushes carry fresher state, so the last one wins.
-            std.mem.sort(Prev, state.prev.items, {}, key_less(Prev));
+            try diff_mod.sort_by_key(K, Prev, gpa, state.prev.items);
             count = 0;
             for (state.prev.items, 0..) |prev, at| {
                 const last = at + 1 == state.prev.items.len or
@@ -241,12 +224,7 @@ pub fn Emitter(comptime D: type) type {
         fn next_key(state: *const State, key: *const K) K {
             const next = state.next.items;
             assert(next.len > 0); // A written key's successor is always a candidate.
-            var low: usize = 0;
-            var high: usize = next.len;
-            while (low < high) {
-                const mid = low + (high - low) / 2;
-                if (diff_mod.order(K, &next[mid], key) == .gt) high = mid else low = mid + 1;
-            }
+            const low = diff_mod.upper_bound(K, K, next, key);
             return if (low < next.len) next[low] else next[0];
         }
 
@@ -320,12 +298,7 @@ pub fn Emitter(comptime D: type) type {
         fn claim(state: *State, key: *const K) *Prev {
             const prev = state.prev.items;
             assert(prev.len > 0);
-            var low: usize = 0;
-            var high: usize = prev.len;
-            while (low < high) {
-                const mid = low + (high - low) / 2;
-                if (diff_mod.order(K, &prev[mid].key, key) == .lt) low = mid + 1 else high = mid;
-            }
+            const low = diff_mod.lower_bound(K, Prev, prev, key);
             return if (low > 0) &prev[low - 1] else &prev[prev.len - 1];
         }
 
@@ -435,7 +408,7 @@ pub fn Emitter(comptime D: type) type {
                 var values = neighbor.values;
                 while (values.next()) |loc| try locations.append(gpa, loc.*);
             }
-            std.mem.sort(u64, locations.items, {}, std.sort.asc(u64));
+            std.sort.pdq(u64, locations.items, {}, std.sort.asc(u64));
             var previous: ?u64 = null;
             for (locations.items) |loc| {
                 if (previous == loc) continue;
