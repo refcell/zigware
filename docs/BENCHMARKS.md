@@ -1450,6 +1450,50 @@ Totals: 22 faster, 20 tie, 6 slower.
 - **sha512 individual** (1.29×) is the open gap: commonware's `sha2` crate runs its AVX2 message
   schedule; zigware's `sha512_blocks.zig` four-block schedule beats std by 15–20% but not it.
 
+## cryptography: blake3 and bloomfilter (2026-11-20, parallel lane)
+
+ABBA rounds through `etc/scripts/bench-lock.sh` (one CCD slot per pair), bench-compare.sh's
+Criterion settings, commonware a9ffc25f3 built with `-C target-cpu=native`; the ratio is the
+median of per-round zigware/commonware ratios. Raw rounds are in `docs/bench/parallel.tsv`.
+blake3 ran 4 rounds on 9467df21 (load 1.4–8.6, one round 22); bloomfilter ran 2–3 rounds on
+b55d750c (load 2–3), and its rounds are still being extended. blake3: 3 faster, 11 tie,
+2 slower; bloomfilter: 16 faster, 11 tie, 9 slower.
+
+| bench | params | commonware | zigware | median | rounds | verdict |
+|---|---|---|---|---|---|---|
+| `blake3::hash_message` | `msg_len=256`, conc=1 and 8 | 300 ns | 238 ns | 0.79× | 0.79–0.80 | faster |
+| `blake3::hash_message` | `msg_len=4096`, conc=1 and 8 | 1.26 µs | 1.41 µs | 1.12× | 1.11–1.12 | not yet faster: at hardware floor |
+| `blake3::hash_message` | 64 KiB to 16 MiB, conc=1 (5 rows) | | | 0.99–1.02× | ≤1.02 | tie |
+| `blake3::hash_message` | 64 KiB to 512 KiB, conc=8 (4 rows) | | | 1.01–1.04× | 0.26–1.14 | tie |
+| `blake3::hash_message` | `msg_len=1048576 conc=8` | 88.0 µs | 16.7 µs | 0.19× | 0.19–0.20 | faster |
+| `blake3::hash_message` | `msg_len=16777216 conc=8` | 249 µs | 224 µs | 0.90× | 0.79–1.06 | tie |
+| `bloomfilter::{insert,contains}` | `item_size=32`, both hashers (12 rows) | | | 0.81–0.93× | ≤0.95 | faster |
+| `bloomfilter::{insert,contains}` | blake3, `item_size=2048/4096` (12 rows) | | | 1.02–1.11× | | not yet faster: at hardware floor |
+| `bloomfilter::contains` | sha256, `item_size=2048/4096`, positive (4 rows) | | | 0.87–0.91× | ≤0.92 | faster |
+| `bloomfilter::{insert,contains}` | sha256, 2048/4096, other (8 rows) | | | 0.95–0.99× | ≤1.02 | tie |
+
+- **blake3 at 2–4 KiB is at the Zen 5 vector-latency floor.** On this core (Ryzen AI Max+
+  395), every vector integer op has a 2-cycle dependent latency, against 1 cycle for scalar
+  add/ror; a dependent-chain microbench gave about 0.42 ns per op for vpaddd, vpxor, vprold,
+  vpshufb, vpshufd, vpshuflw, and vpternlogd, at xmm and zmm width alike. A chunk is a chain
+  of 16 compressions × 168 dependent ops, so a vector chunk takes at least about 1144 ns
+  however many lanes run. The crate already sits there: its row-form one-chunk hash takes
+  1150 ns, and its 4-chunk `hash4` about 1172 ns. zigware's 4-lane chunk pass alone takes
+  1236 ns, 0.94 of the crate's whole 4 KiB hash (1316 ns in-process), so even with a perfect
+  parent tail the best case is about 0.97× at 2 KiB and 1.02–1.03× at 4 KiB. The bloomfilter
+  blake3 2–4 KiB items hash the same way. A one-chunk message runs one scalar chain at
+  1-cycle latency instead: 1 KiB takes 762 ns against the crate's 1150 ns.
+- **Rejected at 2–4 KiB** (in-process, thread CPU time, pinned): padding a 2–4 chunk batch
+  to 8 or 16 lanes; message words in a stack buffer as memory operands (no change); two
+  interleaved scalar chains (1615 ns for 2 chunks, spill-bound at 855 movs per block); a
+  row-form compress in Zig vectors (one parent 61 against 46 ns, a chunk 2.2–3.1 µs); an
+  all-scalar 4 KiB parent tail (no change). A hand-written minimal 4-chunk path costs the
+  same as `hash_serial`, so routing and plumbing are not the cost.
+- **Rejected for the long rows:** a 17th chunk on the scalar ALUs beside each 16-lane zmm
+  block. 16 chunks take 1255 ns; 16 plus one interleaved scalar chunk take 1900–1940 ns,
+  about the sum of the two, so the scalar chain does not ride on idle pipes. A 32-lane
+  kernel and a policy-free `hash_across` gave no gain either.
+
 ## Appendix: bench coverage
 
 Every Criterion bench in commonware a9ffc25f3 (`benches/` dirs with `criterion_main!`), listed

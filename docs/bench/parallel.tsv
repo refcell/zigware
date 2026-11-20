@@ -1,0 +1,158 @@
+# date: 2026-11-20
+# zigware: 9467df21 (blake3), b55d750c (bloomfilter)
+# commonware: a9ffc25f3
+# method: ABBA rounds, commonware built with RUSTFLAGS=-C target-cpu=native, bench lock per round, criterion settings of bench-compare.sh
+0	cryptography	blake3::hash_message/msg_len=1048576 conc=1	85070.0	84414.0	2.13
+1	cryptography	blake3::hash_message/msg_len=1048576 conc=1	88453.0	88784.0	2.19
+2	cryptography	blake3::hash_message/msg_len=1048576 conc=1	84590.0	84115.0	21.50
+3	cryptography	blake3::hash_message/msg_len=1048576 conc=1	84788.0	84220.0	2.42
+0	cryptography	blake3::hash_message/msg_len=1048576 conc=8	88213.0	16556.0	2.13
+1	cryptography	blake3::hash_message/msg_len=1048576 conc=8	84442.0	16529.0	2.19
+2	cryptography	blake3::hash_message/msg_len=1048576 conc=8	87701.0	16803.0	21.50
+3	cryptography	blake3::hash_message/msg_len=1048576 conc=8	88608.0	16907.0	2.42
+0	cryptography	blake3::hash_message/msg_len=131072 conc=1	11234.0	11352.0	2.13
+1	cryptography	blake3::hash_message/msg_len=131072 conc=1	10583.0	10737.0	2.19
+2	cryptography	blake3::hash_message/msg_len=131072 conc=1	11004.0	11188.0	21.50
+3	cryptography	blake3::hash_message/msg_len=131072 conc=1	11081.0	11153.0	2.42
+0	cryptography	blake3::hash_message/msg_len=131072 conc=8	10690.0	10824.0	2.13
+1	cryptography	blake3::hash_message/msg_len=131072 conc=8	11144.0	11293.0	2.19
+2	cryptography	blake3::hash_message/msg_len=131072 conc=8	11121.0	11288.0	21.50
+3	cryptography	blake3::hash_message/msg_len=131072 conc=8	10702.0	10819.0	2.42
+0	cryptography	blake3::hash_message/msg_len=16777216 conc=1	1428400.0	1436600.0	2.13
+1	cryptography	blake3::hash_message/msg_len=16777216 conc=1	1342400.0	1355300.0	2.19
+2	cryptography	blake3::hash_message/msg_len=16777216 conc=1	1355500.0	1355900.0	21.50
+3	cryptography	blake3::hash_message/msg_len=16777216 conc=1	1350900.0	1357000.0	2.42
+0	cryptography	blake3::hash_message/msg_len=16777216 conc=8	270200.0	221270.0	2.13
+1	cryptography	blake3::hash_message/msg_len=16777216 conc=8	212330.0	226090.0	2.19
+2	cryptography	blake3::hash_message/msg_len=16777216 conc=8	227010.0	222140.0	21.50
+3	cryptography	blake3::hash_message/msg_len=16777216 conc=8	289090.0	227520.0	2.42
+0	cryptography	blake3::hash_message/msg_len=256 conc=1	302.2	240.7	2.13
+1	cryptography	blake3::hash_message/msg_len=256 conc=1	301.3	239.4	2.19
+2	cryptography	blake3::hash_message/msg_len=256 conc=1	299.1	236.0	21.50
+3	cryptography	blake3::hash_message/msg_len=256 conc=1	287.8	226.9	2.42
+0	cryptography	blake3::hash_message/msg_len=256 conc=8	304.9	240.2	2.13
+1	cryptography	blake3::hash_message/msg_len=256 conc=8	301.3	236.8	2.19
+2	cryptography	blake3::hash_message/msg_len=256 conc=8	302.2	238.4	21.50
+3	cryptography	blake3::hash_message/msg_len=256 conc=8	288.7	228.5	2.42
+0	cryptography	blake3::hash_message/msg_len=262144 conc=1	22029.0	22122.0	2.13
+1	cryptography	blake3::hash_message/msg_len=262144 conc=1	22048.0	22336.0	2.19
+2	cryptography	blake3::hash_message/msg_len=262144 conc=1	21871.0	22123.0	21.50
+3	cryptography	blake3::hash_message/msg_len=262144 conc=1	20940.0	21176.0	2.42
+0	cryptography	blake3::hash_message/msg_len=262144 conc=8	22213.0	22564.0	2.13
+1	cryptography	blake3::hash_message/msg_len=262144 conc=8	22981.0	22377.0	2.19
+2	cryptography	blake3::hash_message/msg_len=262144 conc=8	22205.0	22460.0	21.50
+3	cryptography	blake3::hash_message/msg_len=262144 conc=8	21964.0	22147.0	2.42
+0	cryptography	blake3::hash_message/msg_len=4096 conc=1	1237.3	1391.0	2.13
+1	cryptography	blake3::hash_message/msg_len=4096 conc=1	1235.0	1374.1	2.19
+2	cryptography	blake3::hash_message/msg_len=4096 conc=1	1296.2	1450.1	21.50
+3	cryptography	blake3::hash_message/msg_len=4096 conc=1	1285.1	1430.8	2.42
+0	cryptography	blake3::hash_message/msg_len=4096 conc=8	1301.9	1452.5	2.13
+1	cryptography	blake3::hash_message/msg_len=4096 conc=8	1237.1	1384.5	2.19
+2	cryptography	blake3::hash_message/msg_len=4096 conc=8	1284.1	1436.1	21.50
+3	cryptography	blake3::hash_message/msg_len=4096 conc=8	1237.6	1377.7	2.42
+0	cryptography	blake3::hash_message/msg_len=524288 conc=1	41590.0	42055.0	2.13
+1	cryptography	blake3::hash_message/msg_len=524288 conc=1	41918.0	42573.0	2.19
+2	cryptography	blake3::hash_message/msg_len=524288 conc=1	43314.0	43597.0	21.50
+3	cryptography	blake3::hash_message/msg_len=524288 conc=1	41588.0	42236.0	2.42
+0	cryptography	blake3::hash_message/msg_len=524288 conc=8	9765.0	11092.0	2.13
+1	cryptography	blake3::hash_message/msg_len=524288 conc=8	41667.0	42106.0	2.19
+2	cryptography	blake3::hash_message/msg_len=524288 conc=8	41792.0	10919.0	21.50
+3	cryptography	blake3::hash_message/msg_len=524288 conc=8	10050.0	10781.0	2.42
+0	cryptography	blake3::hash_message/msg_len=65536 conc=1	5478.9	5567.7	2.13
+1	cryptography	blake3::hash_message/msg_len=65536 conc=1	5431.0	5507.3	2.19
+2	cryptography	blake3::hash_message/msg_len=65536 conc=1	5417.3	5520.7	21.50
+3	cryptography	blake3::hash_message/msg_len=65536 conc=1	5429.7	5529.1	2.42
+0	cryptography	blake3::hash_message/msg_len=65536 conc=8	5659.0	5767.0	2.13
+1	cryptography	blake3::hash_message/msg_len=65536 conc=8	5408.4	5514.9	2.19
+2	cryptography	blake3::hash_message/msg_len=65536 conc=8	5437.4	5512.2	21.50
+3	cryptography	blake3::hash_message/msg_len=65536 conc=8	5426.1	5522.4	2.42
+0	cryptography	bloomfilter::contains/hasher=blake3 item_size=2048 fp_rate=0.1% query=negative	1180.5	1292.2	2.13
+1	cryptography	bloomfilter::contains/hasher=blake3 item_size=2048 fp_rate=0.1% query=negative	1254.3	1336.4	2.19
+0	cryptography	bloomfilter::contains/hasher=blake3 item_size=2048 fp_rate=0.1% query=positive	1221.4	1290.9	2.13
+1	cryptography	bloomfilter::contains/hasher=blake3 item_size=2048 fp_rate=0.1% query=positive	1270.6	1379.7	2.19
+0	cryptography	bloomfilter::contains/hasher=blake3 item_size=2048 fp_rate=10% query=negative	1178.6	1290.9	2.13
+1	cryptography	bloomfilter::contains/hasher=blake3 item_size=2048 fp_rate=10% query=negative	1215.1	1329.6	2.19
+0	cryptography	bloomfilter::contains/hasher=blake3 item_size=2048 fp_rate=10% query=positive	1216.4	1283.5	2.13
+1	cryptography	bloomfilter::contains/hasher=blake3 item_size=2048 fp_rate=10% query=positive	1283.5	1366.8	2.19
+0	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=0.1% query=negative	98.6	87.1	2.13
+1	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=0.1% query=negative	103.9	93.4	2.19
+0	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=0.1% query=positive	99.9	91.4	2.13
+1	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=0.1% query=positive	102.2	96.9	2.19
+0	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=10% query=negative	98.2	86.4	2.13
+1	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=10% query=negative	104.0	95.3	2.19
+0	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=10% query=positive	87.4	79.5	2.13
+1	cryptography	bloomfilter::contains/hasher=blake3 item_size=32 fp_rate=10% query=positive	89.5	79.7	2.19
+0	cryptography	bloomfilter::contains/hasher=blake3 item_size=4096 fp_rate=0.1% query=negative	1298.9	1395.0	2.13
+1	cryptography	bloomfilter::contains/hasher=blake3 item_size=4096 fp_rate=0.1% query=negative	1372.1	1458.1	2.19
+0	cryptography	bloomfilter::contains/hasher=blake3 item_size=4096 fp_rate=0.1% query=positive	1349.7	1396.5	2.13
+1	cryptography	bloomfilter::contains/hasher=blake3 item_size=4096 fp_rate=0.1% query=positive	1424.2	1483.7	2.19
+0	cryptography	bloomfilter::contains/hasher=blake3 item_size=4096 fp_rate=10% query=negative	1299.0	1396.9	2.13
+1	cryptography	bloomfilter::contains/hasher=blake3 item_size=4096 fp_rate=10% query=negative	1305.2	1395.5	2.19
+0	cryptography	bloomfilter::contains/hasher=blake3 item_size=4096 fp_rate=10% query=positive	1429.5	1455.0	2.13
+1	cryptography	bloomfilter::contains/hasher=blake3 item_size=4096 fp_rate=10% query=positive	1350.3	1383.9	2.19
+0	cryptography	bloomfilter::contains/hasher=sha256 item_size=2048 fp_rate=0.1% query=negative	922.8	907.0	2.13
+1	cryptography	bloomfilter::contains/hasher=sha256 item_size=2048 fp_rate=0.1% query=negative	869.2	853.7	2.19
+2	cryptography	bloomfilter::contains/hasher=sha256 item_size=2048 fp_rate=0.1% query=negative	1034.5	1055.8	21.50
+0	cryptography	bloomfilter::contains/hasher=sha256 item_size=2048 fp_rate=0.1% query=positive	991.2	913.4	2.13
+1	cryptography	bloomfilter::contains/hasher=sha256 item_size=2048 fp_rate=0.1% query=positive	943.1	862.2	2.19
+2	cryptography	bloomfilter::contains/hasher=sha256 item_size=2048 fp_rate=0.1% query=positive	1440.6	1069.4	21.50
+0	cryptography	bloomfilter::contains/hasher=sha256 item_size=2048 fp_rate=10% query=negative	923.1	900.9	2.13
+1	cryptography	bloomfilter::contains/hasher=sha256 item_size=2048 fp_rate=10% query=negative	868.4	852.7	2.19
+2	cryptography	bloomfilter::contains/hasher=sha256 item_size=2048 fp_rate=10% query=negative	911.5	893.4	21.50
+0	cryptography	bloomfilter::contains/hasher=sha256 item_size=2048 fp_rate=10% query=positive	993.1	866.8	2.13
+1	cryptography	bloomfilter::contains/hasher=sha256 item_size=2048 fp_rate=10% query=positive	951.8	834.8	2.19
+2	cryptography	bloomfilter::contains/hasher=sha256 item_size=2048 fp_rate=10% query=positive	1146.6	949.9	21.50
+0	cryptography	bloomfilter::contains/hasher=sha256 item_size=32 fp_rate=0.1% query=negative	52.2	43.8	2.13
+1	cryptography	bloomfilter::contains/hasher=sha256 item_size=32 fp_rate=0.1% query=negative	48.8	42.1	2.19
+2	cryptography	bloomfilter::contains/hasher=sha256 item_size=32 fp_rate=0.1% query=negative	117.0	53.4	21.50
+0	cryptography	bloomfilter::contains/hasher=sha256 item_size=32 fp_rate=0.1% query=positive	56.5	51.5	2.13
+1	cryptography	bloomfilter::contains/hasher=sha256 item_size=32 fp_rate=0.1% query=positive	58.1	51.9	2.19
+2	cryptography	bloomfilter::contains/hasher=sha256 item_size=32 fp_rate=0.1% query=positive	93.1	80.4	21.50
+0	cryptography	bloomfilter::contains/hasher=sha256 item_size=32 fp_rate=10% query=negative	48.0	41.1	2.13
+1	cryptography	bloomfilter::contains/hasher=sha256 item_size=32 fp_rate=10% query=negative	47.9	41.2	2.19
+2	cryptography	bloomfilter::contains/hasher=sha256 item_size=32 fp_rate=10% query=negative	50.4	43.6	21.50
+0	cryptography	bloomfilter::contains/hasher=sha256 item_size=32 fp_rate=10% query=positive	44.2	39.2	2.13
+1	cryptography	bloomfilter::contains/hasher=sha256 item_size=32 fp_rate=10% query=positive	44.1	39.2	2.19
+2	cryptography	bloomfilter::contains/hasher=sha256 item_size=32 fp_rate=10% query=positive	46.5	41.3	21.50
+0	cryptography	bloomfilter::contains/hasher=sha256 item_size=4096 fp_rate=0.1% query=negative	1680.6	1663.7	2.13
+1	cryptography	bloomfilter::contains/hasher=sha256 item_size=4096 fp_rate=0.1% query=negative	1683.1	1663.4	2.19
+2	cryptography	bloomfilter::contains/hasher=sha256 item_size=4096 fp_rate=0.1% query=negative	1792.1	1761.5	21.50
+0	cryptography	bloomfilter::contains/hasher=sha256 item_size=4096 fp_rate=0.1% query=positive	1929.6	1672.2	2.13
+1	cryptography	bloomfilter::contains/hasher=sha256 item_size=4096 fp_rate=0.1% query=positive	1931.2	1671.4	2.19
+2	cryptography	bloomfilter::contains/hasher=sha256 item_size=4096 fp_rate=0.1% query=positive	2227.4	1829.3	21.50
+0	cryptography	bloomfilter::contains/hasher=sha256 item_size=4096 fp_rate=10% query=negative	1677.6	1662.9	2.13
+1	cryptography	bloomfilter::contains/hasher=sha256 item_size=4096 fp_rate=10% query=negative	1677.4	1661.3	2.19
+2	cryptography	bloomfilter::contains/hasher=sha256 item_size=4096 fp_rate=10% query=negative	1802.3	1783.4	21.50
+0	cryptography	bloomfilter::contains/hasher=sha256 item_size=4096 fp_rate=10% query=positive	1951.6	1720.3	2.13
+1	cryptography	bloomfilter::contains/hasher=sha256 item_size=4096 fp_rate=10% query=positive	1901.8	1648.3	2.19
+2	cryptography	bloomfilter::contains/hasher=sha256 item_size=4096 fp_rate=10% query=positive	2105.9	1862.9	21.50
+0	cryptography	bloomfilter::insert/hasher=blake3 item_size=2048 fp_rate=0.1%	1215.6	1310.0	2.13
+1	cryptography	bloomfilter::insert/hasher=blake3 item_size=2048 fp_rate=0.1%	1258.3	1393.6	2.19
+0	cryptography	bloomfilter::insert/hasher=blake3 item_size=2048 fp_rate=10%	1197.5	1306.0	2.13
+1	cryptography	bloomfilter::insert/hasher=blake3 item_size=2048 fp_rate=10%	1258.6	1378.5	2.19
+0	cryptography	bloomfilter::insert/hasher=blake3 item_size=32 fp_rate=0.1%	134.2	109.5	2.13
+1	cryptography	bloomfilter::insert/hasher=blake3 item_size=32 fp_rate=0.1%	130.6	111.0	2.19
+0	cryptography	bloomfilter::insert/hasher=blake3 item_size=32 fp_rate=10%	115.2	97.9	2.13
+1	cryptography	bloomfilter::insert/hasher=blake3 item_size=32 fp_rate=10%	111.3	98.2	2.19
+0	cryptography	bloomfilter::insert/hasher=blake3 item_size=4096 fp_rate=0.1%	1449.4	1411.6	2.13
+1	cryptography	bloomfilter::insert/hasher=blake3 item_size=4096 fp_rate=0.1%	1388.9	1511.0	2.19
+0	cryptography	bloomfilter::insert/hasher=blake3 item_size=4096 fp_rate=10%	1280.7	1409.5	2.13
+1	cryptography	bloomfilter::insert/hasher=blake3 item_size=4096 fp_rate=10%	1324.1	1495.3	2.19
+0	cryptography	bloomfilter::insert/hasher=sha256 item_size=2048 fp_rate=0.1%	965.0	919.9	2.13
+1	cryptography	bloomfilter::insert/hasher=sha256 item_size=2048 fp_rate=0.1%	904.0	871.0	2.19
+2	cryptography	bloomfilter::insert/hasher=sha256 item_size=2048 fp_rate=0.1%	7766.3	1450.9	21.50
+0	cryptography	bloomfilter::insert/hasher=sha256 item_size=2048 fp_rate=10%	908.3	892.6	2.13
+1	cryptography	bloomfilter::insert/hasher=sha256 item_size=2048 fp_rate=10%	878.9	863.4	2.19
+2	cryptography	bloomfilter::insert/hasher=sha256 item_size=2048 fp_rate=10%	1254.8	1014.1	21.50
+0	cryptography	bloomfilter::insert/hasher=sha256 item_size=32 fp_rate=0.1%	83.4	67.4	2.13
+1	cryptography	bloomfilter::insert/hasher=sha256 item_size=32 fp_rate=0.1%	83.1	64.3	2.19
+2	cryptography	bloomfilter::insert/hasher=sha256 item_size=32 fp_rate=0.1%	83.3	67.1	21.50
+0	cryptography	bloomfilter::insert/hasher=sha256 item_size=32 fp_rate=10%	74.0	58.3	2.13
+1	cryptography	bloomfilter::insert/hasher=sha256 item_size=32 fp_rate=10%	71.1	58.1	2.19
+2	cryptography	bloomfilter::insert/hasher=sha256 item_size=32 fp_rate=10%	73.4	60.8	21.50
+0	cryptography	bloomfilter::insert/hasher=sha256 item_size=4096 fp_rate=0.1%	1723.5	1686.5	2.13
+1	cryptography	bloomfilter::insert/hasher=sha256 item_size=4096 fp_rate=0.1%	1727.9	1684.8	2.19
+2	cryptography	bloomfilter::insert/hasher=sha256 item_size=4096 fp_rate=0.1%	2184.9	1773.3	21.50
+0	cryptography	bloomfilter::insert/hasher=sha256 item_size=4096 fp_rate=10%	1745.8	1731.0	2.13
+1	cryptography	bloomfilter::insert/hasher=sha256 item_size=4096 fp_rate=10%	1717.8	1673.8	2.19
+2	cryptography	bloomfilter::insert/hasher=sha256 item_size=4096 fp_rate=10%	2043.6	1865.0	21.50
