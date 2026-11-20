@@ -262,7 +262,11 @@ pub fn Cache(comptime V: type) type {
             while (position > 0 and items[position - 1] >= section_index) position -= 1;
             if (position < items.len and items[position] == section_index) return;
             self.pending.insertAssumeCapacity(position, section_index);
-            assert(std.sort.isSorted(u64, self.pending.items, {}, std.sort.asc(u64)));
+            const pending = self.pending.items;
+            // O(1): the scan above leaves smaller keys before `position` and larger after.
+            assert(pending[position] == section_index);
+            assert(position == 0 or pending[position - 1] < section_index);
+            assert(position + 1 == pending.len or pending[position + 1] > section_index);
         }
 
         /// Sync every pending write.

@@ -475,7 +475,10 @@ pub fn Ordinal(comptime V: type) type {
             while (position > 0 and items[position - 1] >= section) position -= 1;
             if (position < items.len and items[position] == section) return;
             pending.insertAssumeCapacity(position, section);
-            assert(std.sort.isSorted(u64, pending.items, {}, std.sort.asc(u64)));
+            // O(1): the scan above leaves smaller keys before `position` and larger after.
+            assert(pending.items[position] == section);
+            assert(position == 0 or pending.items[position - 1] < section);
+            assert(position + 1 == pending.items.len or pending.items[position + 1] > section);
         }
 
         /// The value at `index`, or null. A stored record that fails its checksum or does not

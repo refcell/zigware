@@ -150,7 +150,7 @@ pub const Entry = struct {
             .added = added,
             .crc = compute_crc(epoch, section, position, added),
         };
-        assert(entry.is_valid());
+        if (std.debug.runtime_safety) assert(entry.is_valid()); // Recomputes the CRC.
         return entry;
     }
 

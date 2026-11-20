@@ -382,7 +382,10 @@ pub fn Freezer(comptime K: type, comptime V: type) type {
             while (position > 0 and items[position - 1] >= section) position -= 1;
             if (position < items.len and items[position] == section) return;
             list.insertAssumeCapacity(position, section);
-            assert(std.sort.isSorted(u64, list.items, {}, std.sort.asc(u64)));
+            // O(1): the scan above leaves smaller keys before `position` and larger after.
+            assert(list.items[position] == section);
+            assert(position == 0 or list.items[position - 1] < section);
+            assert(position + 1 == list.items.len or list.items[position + 1] > section);
         }
 
         /// The first record matching `key` and its section, reading key records only.
