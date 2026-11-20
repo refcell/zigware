@@ -239,7 +239,10 @@ pub const Bitmap = struct {
     pub const Iterator = struct {
         entries: []const Entry,
         position: usize,
-        current: ?Container.Iterator,
+        /// Starts as an empty array iterator, so `next` needs no null check per value.
+        current: Container.Iterator = .{ .array = .{ .values = &.{}, .position = 0 } },
+        /// The current container's key, shifted: each value is `base | index`.
+        base: u64 = 0,
         start: u64,
         /// The last position to report (inclusive, so `maxInt(u64)` can be included).
         last: u64,
@@ -247,14 +250,12 @@ pub const Bitmap = struct {
         pub fn next(it: *Iterator) ?u64 {
             // Each pass consumes a value or a container: bounded by both.
             while (true) {
-                if (it.current) |*values| {
-                    if (values.next()) |index| {
-                        return combine(it.entries[it.position - 1].key, index);
-                    }
-                }
+                if (it.current.next()) |index| return it.base | index;
                 if (it.position == it.entries.len) return null;
                 it.position += 1;
-                it.current = it.open(&it.entries[it.position - 1]);
+                const entry = &it.entries[it.position - 1];
+                it.current = it.open(entry);
+                it.base = combine(entry.key, 0);
             }
         }
 
@@ -276,7 +277,7 @@ pub const Bitmap = struct {
     pub fn iter_range(self: *const Bitmap, start: u64, end: u64) Iterator {
         if (start >= end) {
             const none = self.containers.items[0..0];
-            return .{ .entries = none, .position = 0, .current = null, .start = 0, .last = 0 };
+            return .{ .entries = none, .position = 0, .start = 0, .last = 0 };
         }
         return self.iter_inclusive(start, end - 1);
     }
@@ -290,7 +291,6 @@ pub const Bitmap = struct {
         return .{
             .entries = entries,
             .position = 0,
-            .current = null,
             .start = start,
             .last = last,
         };
