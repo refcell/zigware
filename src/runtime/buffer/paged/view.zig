@@ -84,17 +84,29 @@ pub const View = struct {
         const gpa = self.cache_ref.gpa;
         var missed = try std.DynamicBitSetUnmanaged.initEmpty(gpa, ranges.len);
         defer missed.deinit(gpa);
-        // Like commonware, every range tries the cache before any blob read, so the count
-        // does not depend on pages an earlier miss brought in.
-        var served: usize = 0;
+        // Like commonware, every range tries the tail, then the cache under one lock, before
+        // any blob read, so the count does not depend on pages an earlier miss brought in.
+        const pending = try gpa.alloc(CacheRef.Pending, ranges.len);
+        defer gpa.free(pending);
+        var pending_count: usize = 0;
         var start: usize = 0;
         for (ranges, 0..) |range, index| {
             const slot = buf[start..][0..range.len];
             start += range.len;
-            if (self.try_read_sync_into(slot, range.offset)) served += 1 else missed.set(index);
+            const below = self.copy_tail_overlap(slot, range.offset);
+            if (below == 0) continue;
+            pending[pending_count] = .{
+                .buf = slot[0..below],
+                .offset = range.offset,
+                .index = index,
+            };
+            pending_count += 1;
         }
-        assert(start == buf.len and served <= ranges.len);
-        if (served == ranges.len) return served;
+        assert(start == buf.len);
+        const left = self.cache_ref.read_cached_many(self.id, pending[0..pending_count]);
+        for (pending[0..left]) |range| missed.set(range.index);
+        const served = ranges.len - left;
+        if (left == 0) return served;
         // One page buffer serves every run; no run spans more pages than the missed ranges.
         const physical: usize = @intCast(@as(u64, self.cache_ref.page_size) +
             paged.checksum_size);

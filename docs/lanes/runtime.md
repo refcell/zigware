@@ -283,7 +283,7 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | tokio/runtime.rs | 21 | 9 | 0 | 12 |
 | utils/abort.rs | 11 | 2 | 0 | 9 |
 | utils/buffer/mod.rs | 46 | 40 | 0 | 6 |
-| utils/buffer/paged/cache.rs | 49 | 28 | 0 | 21 |
+| utils/buffer/paged/cache.rs | 49 | 32 | 0 | 17 |
 | utils/buffer/paged/mod.rs | 17 | 17 | 0 | 0 |
 | utils/buffer/paged/read.rs | 17 | 6 | 0 | 11 |
 | utils/buffer/paged/sealed.rs | 26 | 25 | 0 | 1 |
@@ -294,7 +294,7 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | utils/handle.rs | 19 | 10 | 0 | 9 |
 | utils/mod.rs | 3 | 0 | 0 | 3 |
 | utils/supervision.rs | 9 | 4 | 0 | 5 |
-| Total | 526 | 402 | 0 | 124 |
+| Total | 526 | 406 | 0 | 120 |
 
 Open (none are in runtime/src/telemetry/, the runtime-telemetry lane's directory):
 - [x] `deterministic.rs:1742` `test_logical_open_releases_retained_mutations`: unsynced fragments of
@@ -345,6 +345,12 @@ Open (none are in runtime/src/telemetry/, the runtime-telemetry lane's directory
   `:3572` `test_page_fetch_error_removes_entry_for_all_waiters`,
   `:3658` `test_cancelled_stale_waiter_preserves_new_fetch`: shared in-flight page reads
   (`CacheRef.share_reads`, opt-in), in paged/shared_reads_test.zig over a gated blob
+- [x] `utils/buffer/paged/cache.rs:3866` `test_read_cached_many_across_chunks`,
+  `:3926` `test_read_cached_many_stale_hint_after_eviction`,
+  `:3957` `test_read_cached_many_cross_blob_hint_collision`,
+  `:3999` `test_read_cached_many_sparse_page_number_keeps_hints_fixed` (and `:4022`
+  `test_read_cached_many_evicted_page_is_a_miss`): page-cache slot hints and
+  `CacheRef.read_cached_many`, which `View.read_ranges_into` probes under one lock
 - [x] `utils/buffer/paged/writer.rs:1981` `test_recoverable_prefix_len_batches_reads`:
   `Writer.recoverable_prefix_len_scan` reads up to its budget of whole pages per blob read
 - [x] `utils/buffer/paged/tip.rs:466` `test_page_geometry_handles_one_and_non_power_of_two`: tip
@@ -364,8 +370,8 @@ each checked with a planted bug;
 `test_replay_preserves_tail_during_partial_page_rewrite` was already in
 paged/partial_rewrite_test.zig (91149b1d). The rest stay: panic recovery or propagation, Rust
 future, waker, `Drop`, and borrow semantics, `IoBuf` chunk ownership, and features zigware does
-not have (the `external` mode, accept on the ring, slot hints, chained tip allocations; shared
-in-flight page reads and the `recoverable_prefix_len` scan budget have since landed).
+not have (the `external` mode, accept on the ring, chained tip allocations; shared in-flight
+page reads, the `recoverable_prefix_len` scan budget, and slot hints have since landed).
 
 Not portable:
 - `deterministic.rs` `test_retired_write_owner_releases_other_blob`,
@@ -431,11 +437,6 @@ Not portable:
   counterpart
 - `utils/buffer/mod.rs` `test_read_structure_single_vs_chunked`: storage-journal.md: `IoBuf`
   ownership/chunk structure (reads copy into caller buffers)
-- `utils/buffer/paged/cache.rs` `test_read_cached_many_across_chunks`,
-  `test_read_cached_many_stale_hint_after_eviction`,
-  `test_read_cached_many_cross_blob_hint_collision`,
-  `test_read_cached_many_sparse_page_number_keeps_hints_fixed`: Rust cache's slot-hint and
-  resolution-chunk internals; zigware's page cache has no slot hints
 - `utils/buffer/paged/cache.rs` `test_joining_many_pages_selects_all_before_driving`,
   `test_read_joins_unpolled_batch_under_eviction`, `test_read_joining_batch_outlives_its_starter`,
   `test_joined_read_finishes_before_its_batch`, `test_batch_read_polled_once_per_completion`,

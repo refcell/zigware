@@ -15,6 +15,12 @@
 //! as a new fetch the others join, so a cancel never fails other readers. Without `share_reads`,
 //! or with every slot taken, a miss reads alone.
 //!
+//! Like commonware's, lookups first try `hints`, a direct-mapped array from `hint_index` to the
+//! `Slots` slot a page was last cached in: one array load instead of a hash probe chain. Hints
+//! are best-effort: `Slots.get_at` resolves a slot only while it still holds the page's key, so
+//! hints staled by eviction, clearing, or collisions miss and fall back to `Slots.get`. They
+//! need no upkeep on eviction, and their memory is fixed at init.
+//!
 //! Like commonware's, one cache may be shared by blobs that tasks on different threads use
 //! (on `std.Io.Threaded`, a sync engine's fetch task reads a source while the caller writes
 //! its destination), so every operation holds `lock`. A critical section copies at most a
@@ -71,6 +77,9 @@ pub const CacheRef = struct {
     pages: []u8,
     /// Which page each slot holds, under Clock2Q+ replacement.
     slots: Slots,
+    /// `Slots` slot hints by `hint_index`, `hint_none` until set. A power of two (so the index
+    /// wraps with a mask) of at least twice the capacity, so a full cache rarely collides.
+    hints: []usize,
     /// Held by every operation; see the file comment.
     lock: std.atomic.Value(bool) = .init(false),
     /// Set by `share_reads`: what joiners wait with. Null keeps every miss a private read.
@@ -81,6 +90,15 @@ pub const CacheRef = struct {
 
     /// The most page fetches shared at once.
     pub const fetch_slots_max = 64;
+
+    const hint_none = std.math.maxInt(usize);
+
+    /// Ranges `read_cached_many` resolves before copying any of them (commonware's
+    /// `RESOLVE_CHUNK`): long enough to overlap several lookups' memory latency.
+    const resolve_chunk = 32;
+
+    /// A range `read_cached_many` reads: `buf` at logical `offset`, and the caller's `index`.
+    pub const Pending = struct { buf: []u8, offset: u64, index: usize };
 
     fn acquire(self: *CacheRef) void {
         while (self.lock.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
@@ -115,13 +133,22 @@ pub const CacheRef = struct {
         var numbering: Numbering = .{};
         slots.prefill(&numbering);
         assert(numbering.next == capacity);
-        return .{ .gpa = gpa, .page_size = page_size, .pages = pages, .slots = slots };
+        const hints = try gpa.alloc(usize, std.math.ceilPowerOfTwoAssert(usize, 2 * capacity));
+        @memset(hints, hint_none);
+        return .{
+            .gpa = gpa,
+            .page_size = page_size,
+            .pages = pages,
+            .slots = slots,
+            .hints = hints,
+        };
     }
 
     pub fn deinit(self: *CacheRef) void {
         for (self.fetch_slots) |*fetch| assert(fetch.state == .free);
         self.gpa.free(self.fetch_slots);
         self.gpa.free(self.fetch_pages);
+        self.gpa.free(self.hints);
         self.slots.deinit(self.gpa);
         self.gpa.free(self.pages);
         self.* = undefined;
@@ -291,9 +318,62 @@ pub const CacheRef = struct {
         return self.find_page(blob_id, page);
     }
 
+    /// The hint entry for `(blob_id, page)`: the page number offset by a per-blob salt, so a
+    /// blob's consecutive pages take consecutive entries and blobs' ranges spread apart.
+    pub fn hint_index(self: *const CacheRef, blob_id: u64, page: u64) usize {
+        const salted = page +% blob_id *% utils.GOLDEN_RATIO;
+        return @intCast(salted & (self.hints.len - 1));
+    }
+
     fn find_page(self: *CacheRef, blob_id: u64, page: u64) ?[]const u8 {
-        const slot = self.slots.get(.{ .blob_id = blob_id, .page = page }) orelse return null;
+        const key: Key = .{ .blob_id = blob_id, .page = page };
+        const hinted = self.hints[self.hint_index(blob_id, page)];
+        const slot = self.slots.get_at(hinted, key) orelse self.slots.get(key) orelse return null;
         return self.slot_bytes(slot.*);
+    }
+
+    /// Copy the cached bytes of each of `pending`'s ranges into its `buf`, under one lock
+    /// (commonware's `read_cached_many`). Returns how many ranges are left unread; they move
+    /// to the front of `pending` in order, each past its cached prefix (already copied).
+    pub fn read_cached_many(self: *CacheRef, blob_id: u64, pending: []Pending) usize {
+        self.acquire();
+        defer self.release();
+        var left: usize = 0;
+        var start: usize = 0;
+        while (start < pending.len) : (start += resolve_chunk) {
+            const chunk = pending[start..@min(pending.len, start + resolve_chunk)];
+            // Resolve the chunk's first pages before copying any, so the independent lookups
+            // overlap; consecutive ranges on one page share its lookup.
+            var sources: [resolve_chunk]?[]const u8 = undefined;
+            var previous: ?struct { u64, ?[]const u8 } = null;
+            for (chunk, sources[0..chunk.len]) |range, *source| {
+                const page, const in_page = self.offset_to_page(range.offset);
+                const bytes = if (previous != null and previous.?[0] == page)
+                    previous.?[1]
+                else
+                    self.find_page(blob_id, page);
+                previous = .{ page, bytes };
+                const count_first = @min(range.buf.len, self.page_size - in_page);
+                source.* = if (bytes) |b| b[@intCast(in_page)..][0..count_first] else null;
+            }
+            for (chunk, sources[0..chunk.len]) |range, source| {
+                var done: usize = 0;
+                if (source) |bytes| {
+                    @memcpy(range.buf[0..bytes.len], bytes);
+                    done = bytes.len;
+                    done += self.copy_cached(blob_id, range.buf[done..], range.offset + done);
+                }
+                if (done == range.buf.len) continue;
+                pending[left] = .{
+                    .buf = range.buf[done..],
+                    .offset = range.offset + done,
+                    .index = range.index,
+                };
+                left += 1;
+            }
+        }
+        assert(left <= pending.len);
+        return left;
     }
 
     /// Copy cached bytes starting at `offset` into `buf`, stopping at the first missing page.
@@ -301,6 +381,10 @@ pub const CacheRef = struct {
     pub fn read_cached(self: *CacheRef, blob_id: u64, buf: []u8, offset: u64) usize {
         self.acquire();
         defer self.release();
+        return self.copy_cached(blob_id, buf, offset);
+    }
+
+    fn copy_cached(self: *CacheRef, blob_id: u64, buf: []u8, offset: u64) usize {
         var done: usize = 0;
         while (done < buf.len) {
             const page, const in_page = self.offset_to_page(offset + done);
@@ -334,6 +418,7 @@ pub const CacheRef = struct {
         const resident = self.slots.get_or_insert_mut(key, no_growth);
         assert(resident.value.* == resident.slot);
         @memcpy(self.slot_bytes(resident.value.*), page);
+        self.hints[self.hint_index(key.blob_id, key.page)] = resident.slot;
         assert(self.slots.len() <= self.slots.capacity);
     }
 
@@ -460,4 +545,152 @@ test "cache pages at the highest aligned offsets" {
         try testing.expectEqual(@as(usize, 13), small.read_cached(0, &page_buf, offset));
         try testing.expectEqualSlices(u8, two[0..13], &page_buf);
     }
+}
+
+/// Runs `read_cached_many` over `bufs` at `offsets`; returns the unread ranges' offsets.
+fn read_many(
+    cache_ref: *CacheRef,
+    blob_id: u64,
+    bufs: []const []u8,
+    offsets: []const u64,
+    pending: []CacheRef.Pending,
+) []const CacheRef.Pending {
+    for (bufs, offsets, pending[0..bufs.len], 0..) |buf, offset, *range, index| {
+        range.* = .{ .buf = buf, .offset = offset, .index = index };
+    }
+    return pending[0..cache_ref.read_cached_many(blob_id, pending[0..bufs.len])];
+}
+
+// commonware `test_read_cached_many_across_chunks`.
+test "read_cached_many across resolve chunks" {
+    const per_page = 5;
+    comptime assert(CacheRef.resolve_chunk % per_page != 0);
+    const pages = CacheRef.resolve_chunk + 1;
+    const ranges_count = pages * per_page;
+    comptime assert(ranges_count > 3 * CacheRef.resolve_chunk);
+    comptime assert(ranges_count % CacheRef.resolve_chunk != 0);
+    for ([_]u16{ 1024, 100 }) |width| {
+        var cache_ref = try CacheRef.init(testing.allocator, width, 64);
+        defer cache_ref.deinit();
+        const blob_id = cache_ref.next_id();
+        var page_bytes: [1024]u8 = undefined;
+        // Cache every page but each third one.
+        for (0..pages) |page| {
+            if (page % 3 == 1) continue;
+            for (page_bytes[0..width], 0..) |*byte, at| byte.* = @truncate(page * 7 + at);
+            _ = cache_ref.cache(blob_id, page_bytes[0..width], page * width);
+        }
+        // Five short ranges from each page: some pages' ranges straddle a chunk boundary, and
+        // the last chunk is short.
+        const len = width / (2 * per_page);
+        var storage: [ranges_count * 1024 / (2 * per_page)]u8 = @splat(0);
+        var bufs: [ranges_count][]u8 = undefined;
+        var offsets: [ranges_count]u64 = undefined;
+        for (&bufs, &offsets, 0..) |*buf, *offset, index| {
+            buf.* = storage[index * len ..][0..len];
+            offset.* = index / per_page * width + index % per_page * 2 * len;
+        }
+        var pending: [ranges_count]CacheRef.Pending = undefined;
+        const unread = read_many(&cache_ref, blob_id, &bufs, &offsets, &pending);
+        var expected_unread: usize = 0;
+        for (bufs, offsets, 0..) |buf, offset, index| {
+            const page = offset / width;
+            if (page % 3 == 1) {
+                try testing.expectEqual(index, unread[expected_unread].index);
+                try testing.expectEqual(offset, unread[expected_unread].offset);
+                expected_unread += 1;
+                for (buf) |byte| try testing.expectEqual(0, byte);
+                continue;
+            }
+            for (buf, offset % width..) |byte, at| {
+                try testing.expectEqual(@as(u8, @truncate(page * 7 + at)), byte);
+            }
+        }
+        try testing.expectEqual(expected_unread, unread.len);
+    }
+}
+
+// commonware `test_read_cached_many_stale_hint_after_eviction`.
+test "a stale hint after eviction reads as a miss" {
+    // Page 0 is evicted and its slot reused for page 2, so page 0's hint names a slot holding
+    // page 2's key.
+    var cache_ref = try CacheRef.init(testing.allocator, 4, 2);
+    defer cache_ref.deinit();
+    const blob_id = cache_ref.next_id();
+    for (0..3) |page| {
+        const bytes: [4]u8 = @splat(@intCast(page + 1));
+        _ = cache_ref.cache(blob_id, &bytes, page * 4);
+    }
+    var storage: [3][4]u8 = @splat(@splat(0));
+    const bufs: [3][]u8 = .{ &storage[0], &storage[1], &storage[2] };
+    var pending: [3]CacheRef.Pending = undefined;
+    const unread = read_many(&cache_ref, blob_id, &bufs, &.{ 0, 4, 8 }, &pending);
+    try testing.expectEqual(1, unread.len);
+    try testing.expectEqual(0, unread[0].offset);
+    try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0 }, &storage[0]);
+    try testing.expectEqualSlices(u8, &.{ 2, 2, 2, 2 }, &storage[1]);
+    try testing.expectEqualSlices(u8, &.{ 3, 3, 3, 3 }, &storage[2]);
+}
+
+// commonware `test_read_cached_many_cross_blob_hint_collision`.
+test "blobs sharing a hint read their own pages" {
+    var cache_ref = try CacheRef.init(testing.allocator, 4, 4);
+    defer cache_ref.deinit();
+    const blob_a = cache_ref.next_id();
+    const blob_b = cache_ref.next_id();
+    const page_a: u64 = 5;
+    // Solve hint_index(blob_b, page_b) == hint_index(blob_a, page_a) for page_b.
+    const mask: u64 = cache_ref.hints.len - 1;
+    const page_b = (page_a +% blob_a *% utils.GOLDEN_RATIO -% blob_b *% utils.GOLDEN_RATIO) & mask;
+    try testing.expectEqual(
+        cache_ref.hint_index(blob_a, page_a),
+        cache_ref.hint_index(blob_b, page_b),
+    );
+    _ = cache_ref.cache(blob_a, &.{ 0xaa, 0xaa, 0xaa, 0xaa }, page_a * 4);
+    _ = cache_ref.cache(blob_b, &.{ 0xbb, 0xbb, 0xbb, 0xbb }, page_b * 4);
+    for ([_]u64{ blob_a, blob_b }, [_]u64{ page_a, page_b }, [_]u8{ 0xaa, 0xbb }) |blob, page, b| {
+        var buf: [4]u8 = @splat(0);
+        var pending: [1]CacheRef.Pending = undefined;
+        const unread = read_many(&cache_ref, blob, &.{&buf}, &.{page * 4}, &pending);
+        try testing.expectEqual(0, unread.len);
+        try testing.expectEqualSlices(u8, &.{ b, b, b, b }, &buf);
+    }
+}
+
+// commonware `test_read_cached_many_sparse_page_number_keeps_hints_fixed`.
+test "a sparse page number keeps hints fixed" {
+    var cache_ref = try CacheRef.init(testing.allocator, 4, 2);
+    defer cache_ref.deinit();
+    const blob_id = cache_ref.next_id();
+    const hints = cache_ref.hints.len;
+    const offset = (std.math.maxInt(u64) / 4 - 1) * 4;
+    _ = cache_ref.cache(blob_id, &.{ 0x5a, 0x5a, 0x5a, 0x5a }, offset);
+    try testing.expectEqual(hints, cache_ref.hints.len);
+    var buf: [4]u8 = @splat(0);
+    var pending: [1]CacheRef.Pending = undefined;
+    try testing.expectEqual(0, read_many(&cache_ref, blob_id, &.{&buf}, &.{offset}, &pending).len);
+    try testing.expectEqualSlices(u8, &.{ 0x5a, 0x5a, 0x5a, 0x5a }, &buf);
+}
+
+// commonware `test_read_cached_many_evicted_page_is_a_miss`.
+test "a reused slot serves its new page through the hint" {
+    var cache_ref = try CacheRef.init(testing.allocator, 4, 1);
+    defer cache_ref.deinit();
+    const blob_id = cache_ref.next_id();
+    const Read = struct {
+        fn page(cache: *CacheRef, blob: u64, number: u64) ?[4]u8 {
+            var buf: [4]u8 = @splat(0);
+            var pending: [1]CacheRef.Pending = undefined;
+            const unread = read_many(cache, blob, &.{&buf}, &.{number * 4}, &pending);
+            return if (unread.len == 0) buf else null;
+        }
+    };
+    _ = cache_ref.cache(blob_id, &.{ 1, 1, 1, 1 }, 0);
+    try testing.expectEqual([4]u8{ 1, 1, 1, 1 }, Read.page(&cache_ref, blob_id, 0).?);
+    _ = cache_ref.cache(blob_id, &.{ 2, 2, 2, 2 }, 4);
+    try testing.expectEqual(null, Read.page(&cache_ref, blob_id, 0));
+    try testing.expectEqual([4]u8{ 2, 2, 2, 2 }, Read.page(&cache_ref, blob_id, 1).?);
+    _ = cache_ref.cache(blob_id, &.{ 0xcc, 0xcc, 0xcc, 0xcc }, 0);
+    try testing.expectEqual([4]u8{ 0xcc, 0xcc, 0xcc, 0xcc }, Read.page(&cache_ref, blob_id, 0).?);
+    try testing.expectEqual(null, Read.page(&cache_ref, blob_id, 1));
 }
