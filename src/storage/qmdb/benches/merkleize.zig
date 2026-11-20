@@ -13,6 +13,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const bench = @import("bench");
 const runtime = @import("runtime");
+const parallel = @import("parallel");
 const common = @import("common.zig");
 
 const metrics = runtime.telemetry.metrics;
@@ -119,11 +120,17 @@ const Options = struct {
     chained: bool,
     seed_sync: bool,
     clear_cache: bool,
+    /// The databases' strategy (commonware's `ctx.strategy(THREADS)`).
+    strategy: parallel.Rayon,
 };
 
 pub fn run(runner: *bench.Runner) !void {
-    try bench_merkleize(runner);
-    try bench_merkleize_churned(runner);
+    // Commonware's merkleize databases run on a pool of `THREADS` (8) threads.
+    const pool = try parallel.ThreadPool.create(runner.allocator, runner.io, .{ .threads = 8 });
+    defer pool.destroy();
+    const strategy = parallel.Rayon.init(pool);
+    try bench_merkleize(runner, strategy);
+    try bench_merkleize_churned(runner, strategy);
 }
 
 /// Commonware's `main_num_keys`; smoke inputs shrink the case for debug builds.
@@ -135,7 +142,7 @@ fn main_num_keys(inputs: bench.Inputs, seed_sync: bool) []const u64 {
     };
 }
 
-fn bench_merkleize(runner: *bench.Runner) !void {
+fn bench_merkleize(runner: *bench.Runner, strategy: parallel.Rayon) !void {
     for ([_]bool{ false, true }) |chained| {
         for ([_]bool{ false, true }) |seed_sync| {
             const clear_options: []const bool = if (!chained and seed_sync)
@@ -149,6 +156,7 @@ fn bench_merkleize(runner: *bench.Runner) !void {
                         .chained = chained,
                         .seed_sync = seed_sync,
                         .clear_cache = clear_cache,
+                        .strategy = strategy,
                     };
                     inline for (variants) |V| try run_merkleize(V, runner, options);
                 }
@@ -166,7 +174,7 @@ fn run_merkleize(comptime V: type, runner: *bench.Runner, options: Options) !voi
         .with_param("cc", options.clear_cache);
     if (!runner.matches(benchmark.name())) return;
     var workload: MerkleizeWorkload(V.Db) = .{
-        .meter = .init(runner, large_page_cache_pages),
+        .meter = .init(runner, large_page_cache_pages, options.strategy),
         .options = options,
     };
     try runner.run(benchmark, &workload);
@@ -181,16 +189,22 @@ fn Metered(comptime D: type) type {
         gpa: Allocator,
         disk: Disk,
         page_cache_pages: u32,
+        strategy: parallel.Rayon,
         registry: metrics.Registry = undefined,
         meter: metered.Storage = undefined,
         session: Session(D) = undefined,
 
-        fn init(runner: *const bench.Runner, page_cache_pages: u32) Self {
+        fn init(
+            runner: *const bench.Runner,
+            page_cache_pages: u32,
+            strategy: parallel.Rayon,
+        ) Self {
             assert(page_cache_pages > 0);
             return .{
                 .gpa = runner.allocator,
                 .disk = .init(runner),
                 .page_cache_pages = page_cache_pages,
+                .strategy = strategy,
             };
         }
 
@@ -206,6 +220,7 @@ fn Metered(comptime D: type) type {
             try self.session.open(self.gpa, &self.disk, .{
                 .items_per_blob = merkleize_items_per_blob,
                 .page_cache_pages = self.page_cache_pages,
+                .strategy = self.strategy,
             });
             assert(self.session.db.bounds().end > 0);
             return &self.session.db;
@@ -295,7 +310,7 @@ fn MerkleizeWorkload(comptime D: type) type {
     };
 }
 
-fn bench_merkleize_churned(runner: *bench.Runner) !void {
+fn bench_merkleize_churned(runner: *bench.Runner, strategy: parallel.Rayon) !void {
     const keys: []const u64 = switch (runner.inputs) {
         .smoke => &.{200},
         .standard => &.{10_000},
@@ -306,13 +321,18 @@ fn bench_merkleize_churned(runner: *bench.Runner) !void {
         // floor walk this case measures.
         inline for (variants) |V| {
             if (comptime std.mem.startsWith(u8, V.name, "any::")) {
-                try run_churned(V, runner, num_keys);
+                try run_churned(V, runner, num_keys, strategy);
             }
         }
     }
 }
 
-fn run_churned(comptime V: type, runner: *bench.Runner, num_keys: u64) !void {
+fn run_churned(
+    comptime V: type,
+    runner: *bench.Runner,
+    num_keys: u64,
+    strategy: parallel.Rayon,
+) !void {
     const benchmark = bench.Benchmark.init("qmdb::merkleize")
         .with_param("variant", V.name)
         .with_param("keys", num_keys)
@@ -320,7 +340,7 @@ fn run_churned(comptime V: type, runner: *bench.Runner, num_keys: u64) !void {
         .with_param("cache_pages", small_page_cache_pages);
     if (!runner.matches(benchmark.name())) return;
     var workload: ChurnedWorkload(V.Db) = .{
-        .meter = .init(runner, small_page_cache_pages),
+        .meter = .init(runner, small_page_cache_pages, strategy),
         .num_keys = num_keys,
     };
     try runner.run(benchmark, &workload);

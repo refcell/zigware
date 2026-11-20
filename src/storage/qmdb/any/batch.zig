@@ -991,9 +991,25 @@ fn Merkleizer(comptime D: type) type {
             const total = walked.diff.items.len + walked.floor_diff.items.len;
             const merged = try gpa.alloc(Pair, total);
             errdefer gpa.free(merged);
-            @memcpy(merged[0..walked.diff.items.len], walked.diff.items);
-            @memcpy(merged[walked.diff.items.len..], walked.floor_diff.items);
-            std.mem.sort(Pair, merged, {}, pair_less);
+            // `walk` key-sorted the diff, so only the walk's few new entries need a sort before
+            // one linear merge (commonware's `merge_by`), instead of a sort of the whole diff.
+            const diff = walked.diff.items;
+            const floor_diff = walked.floor_diff.items;
+            std.mem.sortUnstable(Pair, floor_diff, {}, pair_less);
+            var d: usize = 0;
+            var f: usize = 0;
+            for (merged) |*out| {
+                const take_floor = d == diff.len or
+                    (f < floor_diff.len and pair_less({}, floor_diff[f], diff[d]));
+                if (take_floor) {
+                    out.* = floor_diff[f];
+                    f += 1;
+                } else {
+                    out.* = diff[d];
+                    d += 1;
+                }
+            }
+            assert(d == diff.len and f == floor_diff.len);
             assert(diff_mod.is_sorted(K, V, merged));
             if (comptime !codec.owns_memory(V)) return merged;
             var cloned: usize = 0;
