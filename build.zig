@@ -218,7 +218,7 @@ fn add_test_rest(b: *std.Build, test_step: *std.Build.Step) void {
     add_test_except(b, test_step, "test-rest", rest, &.{ "consensus", "glue", "storage" });
     const others = "Run every unit test except consensus, glue, and cryptography";
     add_test_except(b, test_step, "test-others", others, &.{ "consensus", "glue", "cryptography" });
-    // macOS runs storage in a job of its own: alone it takes about 26 minutes there.
+    // macOS runs storage in jobs of its own: alone it takes about 26 minutes there.
     const light = "Run every unit test except consensus, glue, cryptography, and storage";
     const heavy = &.{ "consensus", "glue", "cryptography", "storage" };
     add_test_except(b, test_step, "test-light", light, heavy);

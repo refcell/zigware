@@ -14,15 +14,23 @@ concurrency:
 jobs:
   test:
     # One job running every package hit the 60-minute limit on every run. On a 6-core Mac,
-    # storage alone takes about 26 minutes, consensus 10, glue 6, cryptography 5, and the
-    # rest (test-light) a few, so they split into four jobs. All run Debug; the Linux jobs
-    # cover ReleaseSafe.
+    # storage alone takes about 26 minutes, consensus 10, glue 6, cryptography 5, and the rest
+    # (test-light) a few, so they split into jobs. Storage's RSS grows with its run time, to
+    # 7 GB, the runner's whole memory, so it splits three ways (etc/scripts/storage-filters.sh).
+    # All run Debug; the Linux jobs cover ReleaseSafe.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - job: storage
+          - job: storage-qmdb-sync
             steps: test-storage
+            storage: qmdb-sync
+          - job: storage-qmdb
+            steps: test-storage
+            storage: qmdb
+          - job: storage-rest
+            steps: test-storage
+            storage: rest
           - job: consensus
             steps: test-consensus
           - job: glue-cryptography
@@ -39,4 +47,18 @@ jobs:
           sh etc/scripts/install-zig.sh "$HOME/zig"
           echo "$HOME/zig" >> "$GITHUB_PATH"
       - name: test
-        run: zig build ${{ matrix.steps }} --summary all
+        env:
+          STORAGE: ${{ matrix.storage }}
+        run: |
+          set -eu
+          filters=""
+          if [ -n "$STORAGE" ]; then
+            # Assigned first: a failure inside a `for` list would not stop the step.
+            shard=$(sh etc/scripts/storage-filters.sh "$STORAGE")
+            [ -n "$shard" ] || { echo "no filters for storage shard $STORAGE" >&2; exit 1; }
+            for filter in $shard; do
+              filters="$filters -Dtest-filter=$filter"
+            done
+          fi
+          # A hung test fails with its name instead of running into the job's timeout.
+          zig build ${{ matrix.steps }} $filters --test-timeout 10m --summary all
