@@ -4,61 +4,9 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
-/// Rust `rand_chacha` 0.10 `ChaCha8Rng::from_seed`, which commonware's Reed-Solomon tests use to
-/// generate shards. Same buffering as `cryptography.ChaCha20Rng`: a 64-bit block counter, stream
-/// zero, words four blocks at a time, and whole words consumed by `fill_bytes`.
-pub const ChaCha8Rng = struct {
-    const ChaCha = std.crypto.stream.chacha.ChaCha8With64BitNonce;
-    const buffer_words = 64;
-    const buffer_blocks = 4;
-
-    key: [32]u8,
-    block_counter: u64,
-    words: [buffer_words]u32,
-    /// Next word to return; `buffer_words` means the buffer is exhausted.
-    index: usize,
-
-    pub fn init_key(key: [32]u8) ChaCha8Rng {
-        return .{ .key = key, .block_counter = 0, .words = undefined, .index = buffer_words };
-    }
-
-    fn generate(rng: *ChaCha8Rng) void {
-        assert(rng.index == buffer_words);
-        var bytes: [buffer_words * 4]u8 = undefined;
-        ChaCha.stream(&bytes, rng.block_counter, rng.key, @splat(0));
-        for (&rng.words, 0..) |*word, i| {
-            word.* = std.mem.readInt(u32, bytes[i * 4 ..][0..4], .little);
-        }
-        rng.block_counter +%= buffer_blocks;
-        rng.index = 0;
-    }
-
-    pub fn next_u32(rng: *ChaCha8Rng) u32 {
-        assert(rng.index <= buffer_words);
-        if (rng.index == buffer_words) rng.generate();
-        const value = rng.words[rng.index];
-        rng.index += 1;
-        return value;
-    }
-
-    pub fn next_u64(rng: *ChaCha8Rng) u64 {
-        const low = rng.next_u32();
-        const high = rng.next_u32();
-        return (@as(u64, high) << 32) | low;
-    }
-
-    pub fn fill_bytes(rng: *ChaCha8Rng, dest: []u8) void {
-        var written: usize = 0;
-        while (written < dest.len) {
-            var bytes: [4]u8 = undefined;
-            std.mem.writeInt(u32, &bytes, rng.next_u32(), .little);
-            const take = @min(bytes.len, dest.len - written);
-            @memcpy(dest[written..][0..take], bytes[0..take]);
-            written += take;
-        }
-        assert(written == dest.len);
-    }
-};
+/// Rust `rand_chacha` 0.10 `ChaCha8Rng`, which commonware's Reed-Solomon tests use to
+/// generate shards.
+pub const ChaCha8Rng = @import("utils").rng.ChaCha8Rng;
 
 /// `original_count` shards of `shard_bytes` random bytes from `ChaCha8Rng` seeded `[seed; 32]`.
 /// Free with `free_original`.
