@@ -38,7 +38,7 @@ pub const Disk = struct {
     directory: [64]u8 = undefined,
     directory_len: usize = 0,
     backend: union {
-        production: runtime.production.storage.Storage,
+        production: runtime.production.storage.WithRing,
         memory: runtime.storage.memory.Storage,
     } = undefined,
     opened: bool = false,
@@ -61,7 +61,8 @@ pub const Disk = struct {
         });
         disk.directory_len = path.len;
         const root = try Io.Dir.cwd().createDirPathOpen(disk.io, path, .{});
-        disk.backend = .{ .production = try .init(disk.io, gpa, root, .{}) };
+        disk.backend = .{ .production = .{} };
+        try disk.backend.production.init(disk.io, gpa, root, bench.io_uring);
         disk.opened = true;
         assert(disk.directory_len > 0);
     }
@@ -69,7 +70,7 @@ pub const Disk = struct {
     pub fn storage(disk: *Disk) runtime.storage.Storage {
         assert(disk.opened);
         if (disk.memory) return disk.backend.memory.storage();
-        return disk.backend.production.storage();
+        return disk.backend.production.storage.storage();
     }
 
     pub fn close(disk: *Disk) void {

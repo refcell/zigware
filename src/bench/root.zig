@@ -36,6 +36,13 @@ pub const tracker = @import("tracker/root.zig");
 /// Environment variable naming a JSONL file for custom benchmark metrics.
 pub const metrics_path_env = "COMMONWARE_BENCH_METRICS_PATH";
 
+/// Environment variable that, set to `1`, runs the storage benches' production storage on
+/// zigware's io_uring ring (`runtime.production.storage.WithRing`).
+pub const io_uring_env = "ZIGWARE_BENCH_IOURING";
+
+/// Set from `io_uring_env` by the harness before any benchmark runs.
+pub var io_uring: bool = false;
+
 /// Environment variable that selects `Inputs.full` when set to `1`.
 pub const full_env = "COMMONWARE_BENCH_FULL";
 

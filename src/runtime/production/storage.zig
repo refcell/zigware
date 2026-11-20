@@ -34,6 +34,37 @@ const Dir = Io.Dir;
 const File = Io.File;
 const Error = iface.Error;
 
+/// Production storage that owns its io_uring ring when asked for one: what a bench or tool
+/// without a `production.Runner` (which owns the ring otherwise) opens. It must not move once
+/// initialized, since the storage points at the ring.
+pub const WithRing = struct {
+    ring: ring_mod.Ring = undefined,
+    ring_active: bool = false,
+    storage: Storage = undefined,
+
+    /// Opens storage over `root` (taking ownership of it), on its own ring if `io_uring`.
+    pub fn init(self: *WithRing, io: Io, gpa: Allocator, root: Dir, io_uring: bool) Error!void {
+        self.* = .{};
+        if (io_uring) {
+            self.ring.init(io, .{}) catch {
+                root.close(io);
+                return error.Io;
+            };
+            self.ring_active = true;
+        }
+        errdefer if (self.ring_active) self.ring.deinit();
+        const ring: ?*ring_mod.Ring = if (io_uring) &self.ring else null;
+        self.storage = try Storage.init(io, gpa, root, .{ .ring = ring });
+        assert(self.ring_active == io_uring);
+    }
+
+    pub fn deinit(self: *WithRing) void {
+        self.storage.deinit();
+        if (self.ring_active) self.ring.deinit();
+        self.* = undefined;
+    }
+};
+
 /// Name of the hold file at the storage root. Partition names cannot contain `.`.
 pub const hold_name = ".hold";
 

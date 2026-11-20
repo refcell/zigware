@@ -83,6 +83,10 @@ pub fn main(init: std.process.Init) !void {
         try metrics_writer.seekTo(try file.length(io));
     }
 
+    if (init.environ_map.get(bench.io_uring_env)) |value| {
+        bench.io_uring = std.mem.eql(u8, value, "1");
+    }
+
     var heap: allocator.Heap = if (measured_heap) .init(io, .default) else undefined;
     defer if (measured_heap) heap.deinit();
     const gpa = if (measured_heap) heap.allocator() else init.gpa;
