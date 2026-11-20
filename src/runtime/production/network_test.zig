@@ -26,6 +26,7 @@ test "tcp network passes the stress suite (stress_concurrent_streams, slow)" {
 const builtin = @import("builtin");
 const net = Io.net;
 const Address = network.Address;
+const Error = network.Error;
 const any_port: Address = .{ .ip4 = .loopback(0) };
 
 fn accept_and_recv(listener: *Network.Listener, out: []u8) !Network.Accepted {
@@ -447,4 +448,48 @@ test "a sink closed while canceled leaves the cancel for the task's next wait" {
     }
     var task = try testing.io.concurrent(close_with_cancel_pending, .{&pair.accepted.sink});
     try testing.expectError(error.Canceled, task.cancel(testing.io));
+}
+
+fn accept_pending(listener: *Network.Listener) Error!void {
+    var accepted = try listener.accept();
+    accepted.deinit();
+}
+
+// commonware `test_cancel_accept_before_service_preserves_next_connection`.
+test "a canceled io_uring accept keeps the next connection" {
+    try init_test_ring();
+    defer test_ring.deinit();
+    const io = testing.io;
+    var tcp = new_ring_network(io);
+    defer tcp.deinit();
+    const listener = try tcp.bind(any_port);
+    defer listener.deinit();
+    // An accept canceled with nothing to accept must not take the next connection.
+    var pending = try io.concurrent(accept_pending, .{listener});
+    try io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expectError(error.Canceled, pending.cancel(io));
+    var connection = try tcp.dial(listener.local_addr());
+    defer connection.deinit();
+    var accepted = try listener.accept();
+    defer accepted.deinit();
+    // The ring's accept reports the dialer's address.
+    const local = local_address(connection.sink.shared.stream.socket.handle);
+    try testing.expect(local.eql(&accepted.address));
+    try connection.sink.send(&.{"kept"});
+    var out: [4]u8 = undefined;
+    try accepted.stream.recv(&out);
+    try testing.expectEqualStrings("kept", &out);
+}
+
+/// The local address of the connected socket `fd`.
+fn local_address(fd: std.posix.fd_t) Address {
+    var storage: std.posix.sockaddr.in = undefined;
+    var length: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.in);
+    std.debug.assert(std.posix.errno(std.posix.system.getsockname(
+        fd,
+        @ptrCast(&storage),
+        &length,
+    )) == .SUCCESS);
+    const bytes: *const [4]u8 = @ptrCast(&storage.addr);
+    return .{ .ip4 = .{ .bytes = bytes.*, .port = std.mem.bigToNative(u16, storage.port) } };
 }

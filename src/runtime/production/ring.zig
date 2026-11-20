@@ -45,6 +45,8 @@ pub const Operation = union(enum) {
     fsync: struct { fd: posix.fd_t },
     recv: struct { fd: posix.fd_t, buffer: []u8 },
     sendmsg: struct { fd: posix.fd_t, msg: *const posix.msghdr_const },
+    /// Accepts one connection as a blocking, close-on-exec socket, writing the peer's address.
+    accept: struct { fd: posix.fd_t, addr: *posix.sockaddr, addrlen: *posix.socklen_t },
 };
 
 const user_data_operation: u64 = 1;
@@ -235,6 +237,7 @@ const LinuxWorker = struct {
             .fsync => |o| sqe.prep_fsync(o.fd, 0),
             .recv => |o| sqe.prep_recv(o.fd, o.buffer, 0),
             .sendmsg => |o| sqe.prep_sendmsg(o.fd, o.msg, linux.MSG.NOSIGNAL),
+            .accept => |o| sqe.prep_accept(o.fd, o.addr, o.addrlen, linux.SOCK.CLOEXEC),
         }
         sqe.user_data = user_data_operation;
         assert(worker.uring.sq.sqe_tail -% worker.uring.sq.sqe_head == 1);

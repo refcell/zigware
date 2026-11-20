@@ -300,7 +300,7 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | mocks.rs | 20 | 19 | 0 | 1 |
 | network/audited.rs | 5 | 4 | 0 | 1 |
 | network/deterministic.rs | 2 | 2 | 0 | 0 |
-| network/iouring.rs | 14 | 9 | 0 | 5 |
+| network/iouring.rs | 14 | 10 | 0 | 4 |
 | network/metered.rs | 3 | 3 | 0 | 0 |
 | network/tokio.rs | 7 | 7 | 0 | 0 |
 | process/metered.rs | 2 | 1 | 0 | 1 |
@@ -321,7 +321,7 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | utils/handle.rs | 19 | 10 | 0 | 9 |
 | utils/mod.rs | 3 | 0 | 0 | 3 |
 | utils/supervision.rs | 9 | 4 | 0 | 5 |
-| Total | 526 | 411 | 0 | 115 |
+| Total | 526 | 412 | 0 | 114 |
 
 Open (none are in runtime/src/telemetry/, the runtime-telemetry lane's directory):
 - [x] `deterministic.rs:1742` `test_logical_open_releases_retained_mutations`: unsynced fragments of
@@ -330,6 +330,9 @@ Open (none are in runtime/src/telemetry/, the runtime-telemetry lane's directory
   (auditor set)
 - [x] `network/audited.rs:252` `test_stress_trait`: stress suite over the audited deterministic
   network (slow)
+- [x] `network/iouring.rs:631` `test_cancel_accept_before_service_preserves_next_connection`:
+  `Listener.accept` runs on the ring when the network has one; a canceled accept leaves the
+  next connection, which reports the dialer's address
 - [x] `network/iouring.rs:608` `test_queued_accept_and_empty_operations_without_worker`: io_uring
   network: empty sends, recv(0), peek on fresh accept succeed
 - [x] `network/iouring.rs:810` `test_unbuffered_mode`: io_uring network with read_buffer_size 0
@@ -400,10 +403,10 @@ Re-audit (runtime lane, 2026-11-19), 144 to 136: `test_alarm_min_heap` (determin
 each checked with a planted bug;
 `test_replay_preserves_tail_during_partial_page_rewrite` was already in
 paged/partial_rewrite_test.zig (91149b1d). The rest stay: panic recovery or propagation, Rust
-future, waker, `Drop`, and borrow semantics, `IoBuf` chunk ownership, and features zigware does
-not have (accept on the ring; the `external` mode, shared in-flight page reads, the
-`recoverable_prefix_len` scan budget, slot hints, and a zero-copy flush in place of chained tip
-allocations have since landed).
+future, waker, `Drop`, and borrow semantics, and `IoBuf` chunk ownership. The features this
+re-audit listed as missing have since landed: accept on the ring, the `external` mode, shared
+in-flight page reads, the `recoverable_prefix_len` scan budget, slot hints, and a zero-copy flush
+in place of chained tip allocations.
 
 Not portable:
 - `deterministic.rs` `test_retired_write_owner_releases_other_blob`,
@@ -434,8 +437,6 @@ Not portable:
 - `network/iouring.rs` `test_pending_network_operations_observe_worker_closure`,
   `test_carried_receive_deadline_completes_without_rescheduling`: polls futures by hand (manual
   waker, retained across worker shutdown)
-- `network/iouring.rs` `test_cancel_accept_before_service_preserves_next_connection`: zigware's
-  io_uring backend runs only send/recv on the ring, not accept
 - `network/iouring.rs` `test_submit_recv_returns_bytes_for_this_call`: tests commonware's internal
   `submit_recv` prefix-buffer API, absent in zigware
 - `process/metered.rs` `test_allocator_metrics_skipped_without_mimalloc`: mimalloc allocator

@@ -288,6 +288,36 @@ fn ring_perform(
     };
 }
 
+fn ring_worker(ring: ?*ring_mod.Ring) ?*ring_mod.Worker {
+    return (ring orelse return null).worker();
+}
+
+/// Accepts one connection through the ring (commonware `network::iouring` accepts on its
+/// ring), resubmitting after an interrupt or a connection aborted before it was accepted.
+fn ring_accept(worker: *ring_mod.Worker, fd: posix.fd_t) Error!net.Stream {
+    var storage: SocketAddress = undefined;
+    // Bounded: each SQE accepts, fails, or retries a transient error the kernel reports.
+    while (true) {
+        var length: posix.socklen_t = @sizeOf(SocketAddress);
+        const operation: ring_mod.Operation = .{
+            .accept = .{ .fd = fd, .addr = &storage.any, .addrlen = &length },
+        };
+        const result = try ring_perform(worker, operation, .none);
+        switch (request_mod.CqeResult.from_raw(result)) {
+            .retry => continue,
+            .failure => |code| switch (code) {
+                .CONNABORTED, .PROTO => continue,
+                else => return error.Closed,
+            },
+            .count => |accepted| {
+                const handle: posix.fd_t = @intCast(accepted);
+                assert(length <= @sizeOf(SocketAddress));
+                return .{ .socket = .{ .handle = handle, .address = address_from(&storage) } };
+            },
+        }
+    }
+}
+
 /// Splits a connected socket into its two halves, applying the socket options.
 fn split(network_: *const Network, stream: net.Stream) Error!Halves {
     const gpa = network_.gpa;
@@ -385,10 +415,13 @@ pub const Network = struct {
         /// Waits for the next connection.
         pub fn accept(listener: *Listener) Error!Accepted {
             const net_ = listener.network;
-            const stream = listener.server.accept(net_.io) catch |err| return switch (err) {
-                error.Canceled => error.Canceled,
-                else => error.Closed,
-            };
+            const stream = if (ring_worker(net_.config.ring)) |worker|
+                try ring_accept(worker, listener.server.socket.handle)
+            else
+                listener.server.accept(net_.io) catch |err| return switch (err) {
+                    error.Canceled => error.Canceled,
+                    else => error.Closed,
+                };
             const address = stream.socket.address;
             const halves = try split(net_, stream);
             assert(!halves.sink.closed and !halves.stream.poisoned);
