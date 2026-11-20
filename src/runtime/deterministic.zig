@@ -340,6 +340,9 @@ const Group = struct {
     members: std.DoublyLinkedList = .{},
     count: u32 = 0,
     awaiter: ?*Task = null,
+    /// Set once the group is canceled: members it starts later begin canceled, as in
+    /// `std.Io.Threaded`.
+    canceled: bool = false,
     /// In `Runner.groups`, so groups never awaited are freed when `start` returns.
     node: std.DoublyLinkedList.Node = .{},
 };
@@ -1202,6 +1205,7 @@ pub const Runner = struct {
         ) catch return error.ConcurrencyUnavailable;
         group.members.append(&task.group_node);
         group.count += 1;
+        if (group.canceled) task.cancel_requested = true;
         io_group.token.raw = group;
     }
 
@@ -1244,6 +1248,7 @@ pub const Runner = struct {
     /// Cancel every member of `group` and wait, uncancelably, for all of them to finish.
     fn wait_group_canceled(runner: *Runner, group: *Group) void {
         assert(group.awaiter == runner.current.?);
+        group.canceled = true;
         var node = group.members.first;
         while (node) |n| : (node = n.next) {
             runner.request_cancel(@alignCast(@fieldParentPtr("group_node", n)));
@@ -1645,6 +1650,35 @@ test "a group's last member may finish after its canceled awaiter is ready" {
         defer runner.deinit();
         try (try runner.start(Root.run, .{runner.io()}));
     }
+}
+
+test "a member a canceled group starts later begins canceled" {
+    // The first member is past its cancelation point when the group is canceled and then
+    // starts a second; the cancel must reach the second too, or the group never finishes.
+    const Root = struct {
+        fn forever(io: Io) Io.Cancelable!void {
+            while (true) try io.sleep(.fromSeconds(1), .awake);
+        }
+        fn first(io: Io, group: *Io.Group, event: *Io.Event) void {
+            event.waitUncancelable(io);
+            group.concurrent(io, forever, .{io}) catch unreachable; // Proof: below max_tasks.
+        }
+        fn release(io: Io, event: *Io.Event) Io.Cancelable!void {
+            try io.sleep(.fromMilliseconds(5), .awake);
+            event.set(io);
+        }
+        fn run(io: Io) !void {
+            var event: Io.Event = .unset;
+            var group: Io.Group = .init;
+            try group.concurrent(io, first, .{ io, &group, &event });
+            var releaser = try io.concurrent(release, .{ io, &event });
+            group.cancel(io);
+            try releaser.await(io);
+        }
+    };
+    var runner = try test_runner(.{ .timeout_ns = 10 * std.time.ns_per_s });
+    defer runner.deinit();
+    try (try runner.start(Root.run, .{runner.io()}));
 }
 
 test "groups await all members and propagate cancelation" {
