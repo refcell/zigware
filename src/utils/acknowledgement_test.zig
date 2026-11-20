@@ -102,8 +102,9 @@ fn fuzz_acknowledgement(_: void, generator: *rng.FuzzRng) !void {
 
     const acknowledged = rng.range_at_most(generator, usize, 0, clones);
     for (handles, 0..) |*handle, index| {
-        // Every handle must be released before the outcome is final.
-        if (index + 1 < clones) try expect_pending_or_canceled(&pair.waiter);
+        // Every handle must be released before the outcome is final: at least this one is
+        // still live, so the waiter is not done.
+        try expect_pending_or_canceled(&pair.waiter);
         if (index < acknowledged) handle.acknowledge() else handle.deinit();
     }
     if (acknowledged == clones) {

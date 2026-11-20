@@ -232,6 +232,28 @@ test "hostname: codec" {
 
 /// Fuzz (commonware utils/fuzz): decoding never panics; anything decoded re-encodes to the
 /// same bytes, and anything `init` accepts round-trips.
+/// RFC 1123 hostname rules, scanned one byte at a time: 1 to 253 bytes of dot-separated
+/// labels, each 1 to 63 ASCII letters, digits, or hyphens, not starting or ending with one.
+fn model_valid(text: []const u8) bool {
+    if (text.len == 0 or text.len > 253) return false;
+    var label_len: usize = 0;
+    var previous: u8 = '.';
+    for (text) |char| {
+        if (char == '.') {
+            if (label_len == 0 or previous == '-') return false;
+            label_len = 0;
+        } else {
+            const letter = (char >= 'a' and char <= 'z') or (char >= 'A' and char <= 'Z');
+            if (!letter and !(char >= '0' and char <= '9') and char != '-') return false;
+            if (char == '-' and label_len == 0) return false;
+            label_len += 1;
+            if (label_len > 63) return false;
+        }
+        previous = char;
+    }
+    return label_len > 0 and previous != '-';
+}
+
 fn fuzz_hostname(_: void, generator: *rng.FuzzRng) !void {
     var input: [300]u8 = undefined;
     const len = rng.range_at_most(generator, usize, 0, input.len);
@@ -239,12 +261,14 @@ fn fuzz_hostname(_: void, generator: *rng.FuzzRng) !void {
     for (input[0..len]) |*byte| {
         byte.* = alphabet[rng.range_less_than(generator, usize, 0, alphabet.len)];
     }
+    const valid = model_valid(input[0..len]);
     if (Hostname.init(input[0..len])) |hostname| {
+        try testing.expect(valid);
         try testing.expectEqualStrings(input[0..len], hostname.as_str());
         var buffer: [Hostname.max_encode_size]u8 = undefined;
         const encoded = codec.encode_to(Hostname, hostname, &buffer);
         try testing.expect(hostname.eql(try codec.decode(Hostname, testing.allocator, encoded)));
-    } else |_| {}
+    } else |_| try testing.expect(!valid);
     const decoded = codec.decode(Hostname, testing.allocator, input[0..len]) catch return;
     var buffer: [Hostname.max_encode_size]u8 = undefined;
     try testing.expectEqualSlices(u8, input[0..len], codec.encode_to(Hostname, decoded, &buffer));

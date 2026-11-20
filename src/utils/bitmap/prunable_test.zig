@@ -571,6 +571,9 @@ fn fuzz_chunk_size(comptime N: usize, generator: *rng.FuzzRng) !void {
     defer decoded.deinit(gpa);
     try testing.expectEqual(bits.len(), decoded.len());
     try testing.expectEqual(bits.pruned_chunks(), decoded.pruned_chunks());
+    for (bits.pruned_bits()..bits.len()) |bit| {
+        try testing.expectEqual(bits.get_bit(bit), decoded.get_bit(bit));
+    }
 }
 
 fn fuzz_operation(
