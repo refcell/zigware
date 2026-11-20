@@ -184,6 +184,12 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   `invariants.minifuzz` lands.
 
 ## Backlog
+- Paused (2026-11-20, optimization stop). Where it stopped:
+  - secp256r1 verify: in-process 0.92x of the asm field after 0f9e7a68; the 8-round
+    bench-compare verdict on 0f9e7a68 was never run. Next would be a precomputed G table.
+  - consensus-compare: the 8-round `BENCH_WHOLE=1 LOG_LATENCY=1` log run (9292c95c) never
+    started; no verdict yet. Flood RSS check (smp_allocator cross-thread frees) not started.
+  - macOS: 0a377e91 (real-socket test on a traceless allocator) awaits a macOS light run.
 - [x] types.rs, sizing.rs, lib.rs traits (`Sender`, `Receiver`, `Blocker`, `Manager`,
   `Recipients`, channels) as comptime interfaces; Ingress/Address conformance; decode fuzz.
 - [x] Rate limiter: `Quota` and governor's keyed GCRA (`rate_limit.zig`).
