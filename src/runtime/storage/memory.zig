@@ -56,6 +56,18 @@ const Partition = struct {
     }
 };
 
+/// Zero-extend `content` to `end` bytes, growing its capacity as `Vec::resize` does: to at
+/// least twice the old capacity. `ArrayList` grows by half, which copies a blob appended to
+/// sequentially twice as often (each copy into freshly faulted pages).
+fn zero_extend(content: *std.ArrayList(u8), gpa: Allocator, end: usize) Allocator.Error!void {
+    assert(end > content.items.len);
+    if (end > content.capacity) {
+        try content.ensureTotalCapacityPrecise(gpa, @max(end, content.capacity *| 2, 8));
+    }
+    content.appendNTimesAssumeCapacity(0, end - content.items.len);
+    assert(content.items.len == end);
+}
+
 /// Index of the first item whose name is not less than `name`.
 fn lower_bound(comptime T: type, items: []const T, name: []const u8) usize {
     var low: usize = 0;
@@ -376,7 +388,7 @@ pub const Storage = struct {
             if (!keep) continue;
             const position = start + index;
             if (position >= content.items.len) {
-                try content.appendNTimes(self.gpa, 0, position + 1 - content.items.len);
+                try zero_extend(content, self.gpa, position + 1);
             }
             content.items[position] = byte;
         }
@@ -392,7 +404,7 @@ pub const Storage = struct {
         const entry = self.entry_of_generation(generation) orelse return;
         const content = &entry.content;
         if (end > content.items.len) {
-            try content.appendNTimes(self.gpa, 0, end - content.items.len);
+            try zero_extend(content, self.gpa, end);
         } else {
             content.shrinkRetainingCapacity(end);
         }
@@ -587,7 +599,7 @@ pub const Blob = struct {
         self.storage.lock();
         defer self.storage.unlock();
         if (end > self.content.items.len) {
-            try self.content.appendNTimes(self.storage.gpa, 0, end - self.content.items.len);
+            try zero_extend(&self.content, self.storage.gpa, end);
         }
         var position = start;
         for (chunks) |chunk| {
@@ -605,7 +617,7 @@ pub const Blob = struct {
         const entry = try self.current();
         const durable = &entry.content;
         if (end > durable.items.len) {
-            try durable.appendNTimes(self.storage.gpa, 0, end - durable.items.len);
+            try zero_extend(durable, self.storage.gpa, end);
         }
         @memcpy(durable.items[start..end], self.content.items[start..end]);
     }
@@ -624,7 +636,7 @@ pub const Blob = struct {
         self.storage.lock();
         defer self.storage.unlock();
         if (end > self.content.items.len) {
-            try self.content.appendNTimes(self.storage.gpa, 0, end - self.content.items.len);
+            try zero_extend(&self.content, self.storage.gpa, end);
         } else {
             self.content.shrinkRetainingCapacity(end);
         }
