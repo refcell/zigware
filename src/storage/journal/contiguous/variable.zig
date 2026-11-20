@@ -815,15 +815,26 @@ pub fn Recovery(comptime V: type) type {
     };
 }
 
+/// commonware's `PREPARED_SPARE_LIMIT`: a compressed batch reserves each item's compression
+/// bound, so a prepared buffer is shrunk only when over this many bytes, and at least three
+/// times its length, are unused. Shrinking otherwise copies the whole batch for nothing (a
+/// 32 MiB random batch spent a third of its time on that copy).
+const prepared_spare_limit: usize = 64 * 1024;
+
 /// Items encoded for a deferred append (`prepare_append`, then `append_prepared`).
 pub const PreparedAppend = struct {
     encoded: []u8,
+    /// The buffer `encoded` starts: compressed batches keep their spare capacity unless
+    /// `prepared_spare_limit` compacts it.
+    allocation: []u8,
     /// Byte offset of each item's frame in `encoded`.
     starts: []usize,
     compressed: bool,
 
     pub fn deinit(self: *PreparedAppend, gpa: Allocator) void {
-        gpa.free(self.encoded);
+        assert(self.encoded.len <= self.allocation.len);
+        assert(self.encoded.len == 0 or self.encoded.ptr == self.allocation.ptr);
+        gpa.free(self.allocation);
         gpa.free(self.starts);
         self.* = undefined;
     }
@@ -862,7 +873,7 @@ fn prepare_uncompressed(
     }
     assert(index == count);
     assert(writer.end == total);
-    return .{ .encoded = encoded, .starts = starts, .compressed = false };
+    return .{ .encoded = encoded, .allocation = encoded, .starts = starts, .compressed = false };
 }
 
 /// Encode every item of `nested` as a frame, recording each frame's start.
@@ -1062,12 +1073,20 @@ pub fn Journal(comptime V: type) type {
             var starts: std.ArrayList(usize) = .empty;
             defer starts.deinit(self.gpa);
             try encode_items(V, self.gpa, self.compression, nested, &out, &starts);
-            const encoded = try out.toOwnedSlice(self.gpa);
-            errdefer self.gpa.free(encoded);
+            const len = out.items.len;
+            const spare = out.capacity - len;
+            if (spare > prepared_spare_limit and len <= out.capacity / 4) {
+                out.shrinkAndFree(self.gpa, len);
+            }
+            const allocation = out.allocatedSlice();
+            out = .empty;
+            errdefer self.gpa.free(allocation);
+            assert(allocation.len >= len);
             return .{
-                .encoded = encoded,
+                .encoded = allocation[0..len],
+                .allocation = allocation,
                 .starts = try starts.toOwnedSlice(self.gpa),
-                .compressed = self.compression != null,
+                .compressed = true,
             };
         }
 

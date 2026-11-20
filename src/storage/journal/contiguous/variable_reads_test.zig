@@ -606,8 +606,9 @@ test "variable: replay read options reach history and tip" {
 
 // A prepared compressed append encodes exactly the frames `encode_frame_into` would, with
 // each item's start recorded: a highly compressible large record, many small random records,
-// and small records followed by a large one. commonware's spare-capacity bound has no
-// counterpart: zigware's prepared buffers are exact-size owned slices.
+// and small records followed by a large one. Like commonware's, each batch leaves at most
+// `PREPARED_SPARE_LIMIT` (64 KiB) or three times its length unused; the random records keep
+// their geometric spare instead of being copied into an exact buffer.
 test "variable: prepared compressed appends match their frames" {
     const Test = Harness(Bytes, "prepared-compressed-capacity");
     var h = try Test.init(.{ .items_per_section = 1024, .compression = 3, .page_size = 64 });
@@ -639,5 +640,9 @@ test "variable: prepared compressed appends match their frames" {
         }
         try testing.expectEqualSlices(u8, expected.items, prepared.encoded);
         try testing.expect(prepared.compressed);
+        const len = prepared.encoded.len;
+        const spare = prepared.allocation.len - len;
+        try testing.expect(spare <= @max(64 * 1024, len * 3));
+        if (batch.len == small.len) try testing.expect(spare > 0);
     }
 }
