@@ -307,9 +307,11 @@ pub fn key(value: u8) MockKey {
 /// Runs `body` on a deterministic runtime that fails after `timeout_s` simulated seconds.
 pub fn run(timeout_s: ?u64, comptime body: fn (Io) anyerror!void) !void {
     const timeout_ns: ?u64 = if (timeout_s) |seconds| seconds * std.time.ns_per_s else null;
-    var runner = try runtime.deterministic.Runner.init(gpa, .{ .timeout_ns = timeout_ns });
-    defer runner.deinit();
-    try try runner.start(body, .{runner.io()});
+    try runtime.deterministic.soak(gpa, .{ .timeout_ns = timeout_ns }, {}, struct {
+        fn round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start(body, .{runner.io()});
+        }
+    }.round);
 }
 
 pub fn fetch(mailbox: anytype, value: u8) !void {
@@ -1201,12 +1203,15 @@ fn clean_shutdown(io: Io) !void {
 
 test "clean shutdown" {
     for (0..25) |seed| {
-        var runner = try runtime.deterministic.Runner.init(gpa, .{
+        const config: runtime.deterministic.Config = .{
             .seed = seed,
             .timeout_ns = 30 * std.time.ns_per_s,
-        });
-        defer runner.deinit();
-        try try runner.start(clean_shutdown, .{runner.io()});
+        };
+        try runtime.deterministic.soak(gpa, config, {}, struct {
+            fn round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+                try try runner.start(clean_shutdown, .{runner.io()});
+            }
+        }.round);
     }
 }
 
@@ -1273,19 +1278,17 @@ fn dst_expect_kept(setup: *Setup, consumer: Consumer) !void {
 
 test "dst: lossy links deliver every retained fetch exactly once" {
     for (0..16) |seed| {
-        var runner = try runtime.deterministic.Runner.init(gpa, .{
+        const config: runtime.deterministic.Config = .{
             .seed = seed,
             .timeout_ns = 120 * std.time.ns_per_s,
-        });
-        defer runner.deinit();
-        const retain_delay_ms = (seed * 37) % 200;
-        runner.start(dst_case, .{ runner.io(), retain_delay_ms }) catch |err| {
-            std.debug.print("dst: seed {d} failed: {t}\n", .{ seed, err });
-            return err;
-        } catch |err| {
-            std.debug.print("dst: seed {d} failed: {t}\n", .{ seed, err });
-            return err;
         };
+        // `soak` prints a failing round's seed and its replay flag.
+        const retain_delay_ms: u64 = (seed * 37) % 200;
+        try runtime.deterministic.soak(gpa, config, retain_delay_ms, struct {
+            fn round(delay_ms: u64, runner: *runtime.deterministic.Runner) anyerror!void {
+                try try runner.start(dst_case, .{ runner.io(), delay_ms });
+            }
+        }.round);
     }
 }
 

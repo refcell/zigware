@@ -651,9 +651,11 @@ test "unrestricted metadata dominates duplicate fetches" {
 test "mailbox discards queued fetches on close" {
     const actor = @import("actor");
     const runtime = @import("runtime");
-    var runner = try runtime.deterministic.Runner.init(testing.allocator, .{});
-    defer runner.deinit();
     const Root = struct {
+        fn round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start(run, .{runner.io()});
+        }
+
         fn run(io: std.Io) !void {
             const gpa = testing.allocator;
             var pair = try actor.mailbox.new(TestMessage, gpa, io, 1);
@@ -672,7 +674,7 @@ test "mailbox discards queued fetches on close" {
             pair.receiver.deinit(); // the leak checker proves both were freed
         }
     };
-    try try runner.start(Root.run, .{runner.io()});
+    try runtime.deterministic.soak(testing.allocator, .{}, {}, Root.round);
 }
 
 /// A naive model of the overflow: queued retains and fetches in first-push order, each with

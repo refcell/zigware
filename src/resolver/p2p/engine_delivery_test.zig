@@ -609,11 +609,15 @@ test "cancellation preserves submitted verdict" {
     const outcomes = [_]Outcome{ complete, partial, .unresolved, .invalid, .ignored };
     for ([_]bool{ false, true }) |previously_accepted| {
         for (outcomes) |outcome| {
-            var runner = try runtime.deterministic.Runner.init(gpa, .{
-                .timeout_ns = 10 * std.time.ns_per_s,
-            });
-            defer runner.deinit();
-            try try runner.start(cancellation_case, .{ runner.io(), previously_accepted, outcome });
+            const Case = struct { previously_accepted: bool, outcome: Outcome };
+            const config: runtime.deterministic.Config = .{ .timeout_ns = 10 * std.time.ns_per_s };
+            const case: Case = .{ .previously_accepted = previously_accepted, .outcome = outcome };
+            try runtime.deterministic.soak(gpa, config, case, struct {
+                fn round(c: Case, runner: *runtime.deterministic.Runner) anyerror!void {
+                    const args = .{ runner.io(), c.previously_accepted, c.outcome };
+                    try try runner.start(cancellation_case, args);
+                }
+            }.round);
         }
     }
 }
@@ -1140,11 +1144,12 @@ fn validation_case(io: Io, outcome: Outcome) !void {
 
 test "fetch during validation reuses response after success" {
     for ([_]Outcome{ complete, partial, .unresolved }) |outcome| {
-        var runner = try runtime.deterministic.Runner.init(gpa, .{
-            .timeout_ns = 10 * std.time.ns_per_s,
-        });
-        defer runner.deinit();
-        try try runner.start(validation_case, .{ runner.io(), outcome });
+        const config: runtime.deterministic.Config = .{ .timeout_ns = 10 * std.time.ns_per_s };
+        try runtime.deterministic.soak(gpa, config, outcome, struct {
+            fn round(o: Outcome, runner: *runtime.deterministic.Runner) anyerror!void {
+                try try runner.start(validation_case, .{ runner.io(), o });
+            }
+        }.round);
     }
 }
 

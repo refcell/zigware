@@ -359,9 +359,12 @@ fn stale_response_after_requester_restart(
 fn run_deterministic(comptime function: anytype) !void {
     const timeout_ns = 120 * std.time.ns_per_s;
     const config: runtime.deterministic.Config = .{ .seed = 0, .timeout_ns = timeout_ns };
-    var runner = try runtime.deterministic.Runner.init(gpa, config);
-    defer runner.deinit();
-    try (try runner.start(function, .{ runner.io(), runner.network(), runner.metrics() }));
+    try runtime.deterministic.soak(gpa, config, {}, struct {
+        fn round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            const args = .{ runner.io(), runner.network(), runner.metrics() };
+            try (try runner.start(function, args));
+        }
+    }.round);
 }
 
 test "stale response after requester restart is ignored" {

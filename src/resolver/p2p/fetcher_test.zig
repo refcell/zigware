@@ -72,9 +72,11 @@ pub fn run(comptime body: fn (Env) anyerror!void) !void {
 }
 
 pub fn run_with(config: runtime.deterministic.Config, comptime body: fn (Env) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, config);
-    defer runner.deinit();
-    try try runner.start(struct {
+    try runtime.deterministic.soak(gpa, config, {}, struct {
+        fn round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start(go, .{runner.io()});
+        }
+
         fn go(io: Io) !void {
             var registry = metrics.Registry.init(gpa);
             defer registry.deinit();
@@ -83,7 +85,7 @@ pub fn run_with(config: runtime.deterministic.Config, comptime body: fn (Env) an
             defer fetcher.deinit();
             try body(.{ .io = io, .scope = &scope, .fetcher = &fetcher });
         }
-    }.go, .{runner.io()});
+    }.round);
 }
 
 /// Registers a request and its timeout for tests that bypass sending.

@@ -26,9 +26,11 @@ const config: opaque_resolver.Config = .{
 const complete: Outcome = .{ .resolved = .complete };
 
 fn run(comptime body: fn (Io) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(testing.allocator, .{});
-    defer runner.deinit();
-    try try runner.start(body, .{runner.io()});
+    try runtime.deterministic.soak(testing.allocator, .{}, {}, struct {
+        fn round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start(body, .{runner.io()});
+        }
+    }.round);
 }
 
 fn sleep_ms(io: Io, ms: u64) !void {

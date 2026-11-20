@@ -27,9 +27,11 @@ fn delivery(k: MockKey) resolver.Delivery(MockKey, void) {
 }
 
 fn run(comptime body: fn (Io) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try try runner.start(body, .{runner.io()});
+    try runtime.deterministic.soak(gpa, .{}, {}, struct {
+        fn round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
+            try try runner.start(body, .{runner.io()});
+        }
+    }.round);
 }
 
 /// A fetch-duration histogram and the inflight state under test.
