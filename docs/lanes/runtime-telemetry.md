@@ -207,6 +207,12 @@ the registry API first and report it.
 - 2026-11-16: io_uring: one worker ring per thread; runtime benches; io_uring stays opt-in.
 - 2026-11-16: traces: `Subscriber`, `Event`, and `Context.tracer` over the runner's subscriber.
 - 2026-11-16: `runtime.resolver`: `Context.resolve` on both runners, deterministic DNS table.
+- 2026-11-20: optimization paused (coordinator). Stopped here: `BENCH_SET=runtime` on
+  3b89af83 was stopped after 1 row. The previous run (a27c514e, 3 of 4 rounds) showed
+  `iobuf::decode_fixed` (bench artifact, fixed in 105de48f) and `buffer_paged::append`
+  deterministic chunk=1024/4096 at 1.23x/1.42x (memory blobs now double, 3b89af83; its
+  verdict is unmeasured). Next on resume: rerun `BENCH_SET=runtime` and check those rows.
+  All four nightly soak jobs passed at N=10.
 
 ## Test audit (2026-11-19, against main)
 
