@@ -365,9 +365,28 @@ const Block = struct {
         assert(block.state.min_match == 4 or block.state.min_match == 5);
         const repeat = block.offset_1 > 0;
         if (block.state.min_match == 4) {
-            return if (repeat) block.search_mls(4, true) else block.search_mls(4, false);
+            return if (repeat) block.search_logs(4, true) else block.search_logs(4, false);
         }
-        return if (repeat) block.search_mls(5, true) else block.search_mls(5, false);
+        return if (repeat) block.search_logs(5, true) else block.search_logs(5, false);
+    }
+
+    /// `search_mls` with the table logs as constants where level 3 uses them: the short
+    /// table one log below the long one, for every frame but those of 128 to 256 KiB. The
+    /// shifts then take no registers, which keeps the loop's state out of the stack.
+    fn search_logs(block: *Block, comptime min_match: u6, comptime repeat: bool) Found {
+        const long_log = block.state.long_log;
+        if (block.state.short_log + 1 == long_log) {
+            switch (long_log) {
+                inline 7...15 => |log| if (min_match == 4) {
+                    return block.search_mls(min_match, repeat, log);
+                },
+                inline 16...17 => |log| if (min_match == 5) {
+                    return block.search_mls(min_match, repeat, log);
+                },
+                else => {},
+            }
+        }
+        return block.search_mls(min_match, repeat, null);
     }
 
     /// `search` for one `min_match`, with or without a repeat offset to check. Like libzstd
@@ -376,12 +395,18 @@ const Block = struct {
     /// every position. Positions are window indexes read through `window` (libzstd's
     /// `base`), and each position's 8 bytes are read once for both hashes and the repeat
     /// check, so the loop's state fits in registers.
-    fn search_mls(block: *Block, comptime min_match: u6, comptime repeat: bool) Found {
+    fn search_mls(
+        block: *Block,
+        comptime min_match: u6,
+        comptime repeat: bool,
+        comptime logs: ?u6,
+    ) Found {
         const state = block.state;
         const long = state.long;
         const short = state.short;
-        const long_log = state.long_log;
-        const short_log = state.short_log;
+        const long_log = if (logs) |log| log else state.long_log;
+        const short_log = if (logs) |log| log - 1 else state.short_log;
+        assert(long_log == state.long_log and short_log == state.short_log);
         const lowest = block.prefix_lowest_index;
         const base = block.base;
         assert(lowest >= base);
