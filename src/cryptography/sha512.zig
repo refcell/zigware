@@ -1,7 +1,8 @@
 //! SHA-512 implementation of the hasher interface (commonware `cryptography/src/sha512.rs`).
 //!
-//! Backed by `std.crypto.hash.sha2.Sha512`, and `hash_many` hashes eight messages at once on
-//! AVX-512F (`sha512_x8.zig`), as commonware does. Digests encode as their 64 raw bytes.
+//! Streams through `std.crypto.hash.sha2.Sha512` with whole blocks compressed by
+//! `sha512_blocks.zig`, and `hash_many` hashes eight messages at once on AVX-512F
+//! (`sha512_x8.zig`), as commonware does. Digests encode as their 64 raw bytes.
 
 const std = @import("std");
 const parallel = @import("parallel");
@@ -10,7 +11,57 @@ const assert = std.debug.assert;
 const hasher = @import("hasher.zig");
 const digest = @import("digest.zig");
 
-pub const Core = std.crypto.hash.sha2.Sha512;
+const StdSha512 = std.crypto.hash.sha2.Sha512;
+const blocks = @import("sha512_blocks.zig");
+
+/// std's streaming SHA-512 state, with whole blocks compressed four schedules at a time and a
+/// one-part message hashed without the streaming buffer.
+pub const Core = struct {
+    inner: StdSha512,
+
+    pub const digest_length = StdSha512.digest_length;
+    pub const block_length = StdSha512.block_length;
+    pub const Options = StdSha512.Options;
+
+    comptime {
+        assert(block_length == blocks.block_length);
+    }
+
+    pub fn init(options: Options) Core {
+        return .{ .inner = StdSha512.init(options) };
+    }
+
+    pub fn update(self: *Core, bytes: []const u8) void {
+        var rest = bytes;
+        if (self.inner.buf_len != 0) {
+            // Top up the buffered block; std compresses it once it is full.
+            const take = @min(block_length - self.inner.buf_len, rest.len);
+            self.inner.update(rest[0..take]);
+            rest = rest[take..];
+        }
+        const whole = rest.len - rest.len % block_length;
+        if (whole > 0) {
+            assert(self.inner.buf_len == 0);
+            blocks.compress(&self.inner.s, rest[0..whole]);
+            self.inner.total_len += whole;
+            rest = rest[whole..];
+        }
+        assert(rest.len < block_length);
+        self.inner.update(rest);
+    }
+
+    pub fn final(self: *Core, out: *[StdSha512.digest_length]u8) void {
+        self.inner.final(out);
+    }
+
+    /// Hashes the concatenation of `parts` into `out`; one part skips the streaming state.
+    pub fn hash_parts(parts: []const []const u8, out: *[StdSha512.digest_length]u8) void {
+        if (parts.len == 1) return blocks.digest_message(parts[0], out);
+        var core = init(.{});
+        for (parts) |part| core.update(part);
+        core.final(out);
+    }
+};
 
 const digest_length = 64;
 
@@ -67,6 +118,27 @@ test "sha512 known answers and reset" {
     }
 }
 
+test "sha512 one-shot and streaming match std across block groups" {
+    // Every length through five blocks (the padding boundaries and the four-block groups), then
+    // longer ones, as one aligned part, one unaligned part, and three parts.
+    var data: [4200]u8 = undefined;
+    message_bytes(&data, 7);
+    var prng = std.Random.DefaultPrng.init(0x5ad512);
+    for (0..700) |i| {
+        const len = if (i < 641) i else prng.random().uintAtMost(usize, data.len - 1);
+        var expected: [digest_length]u8 = undefined;
+        StdSha512.hash(data[0..len], &expected, .{});
+        try testing.expectEqualSlices(u8, &expected, &Sha512.hash(&.{data[0..len]}).bytes);
+        var shifted: [digest_length]u8 = undefined;
+        StdSha512.hash(data[1..][0..len], &shifted, .{});
+        try testing.expectEqualSlices(u8, &shifted, &Sha512.hash(&.{data[1..][0..len]}).bytes);
+        const a = prng.random().uintAtMost(usize, len);
+        const b = a + prng.random().uintAtMost(usize, len - a);
+        const parts = [_][]const u8{ data[0..a], data[a..b], data[b..len] };
+        try testing.expectEqualSlices(u8, &expected, &Sha512.hash(&parts).bytes);
+    }
+}
+
 /// A `length`-byte message whose bytes depend on `seed`.
 fn message_bytes(out: []u8, seed: usize) void {
     for (out, 0..) |*byte, i| byte.* = @truncate((i *% 31) ^ (seed *% 0x9e37));
@@ -87,7 +159,7 @@ test "sha512 hash_many with equal and mixed lengths" {
             Sha512.hash_many(messages[0..count], digests[0..count], parallel.sequential);
             for (messages[0..count], digests[0..count]) |message, d| {
                 var reference: Digest = undefined;
-                Core.hash(message, &reference.bytes, .{});
+                StdSha512.hash(message, &reference.bytes, .{});
                 try testing.expect(d.eql(reference));
             }
         }
@@ -127,16 +199,16 @@ test "sha512 padded blocks give the digest" {
     var data: [400]u8 = undefined;
     for (&data, 0..) |*byte, i| byte.* = @truncate(i * 7);
     for (0..data.len + 1) |len| {
-        var state = Core.init(.{});
+        var state = StdSha512.init(.{});
         for (0..x8.block_count(len)) |index| {
-            var bytes: [Core.block_length]u8 = undefined;
+            var bytes: [StdSha512.block_length]u8 = undefined;
             x8.block(data[0..len], index, &bytes);
             state.update(&bytes);
         }
         var got: [digest_length]u8 = undefined;
         for (state.s, 0..) |word, j| std.mem.writeInt(u64, got[j * 8 ..][0..8], word, .big);
         var expected: [digest_length]u8 = undefined;
-        Core.hash(data[0..len], &expected, .{});
+        StdSha512.hash(data[0..len], &expected, .{});
         try testing.expectEqualSlices(u8, &expected, &got);
     }
 }
@@ -163,7 +235,7 @@ test "sha512 hash_many with one long lane among short ones" {
         Sha512.hash_many(&messages, &digests, parallel.sequential);
         for (messages, digests) |message, d| {
             var expected: Digest = undefined;
-            Core.hash(message, &expected.bytes, .{});
+            StdSha512.hash(message, &expected.bytes, .{});
             try testing.expect(d.eql(expected));
         }
     }

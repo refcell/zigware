@@ -555,3 +555,11 @@ hold whole units of lanes" over coding's lane-aware `hash_batches`, and `sha512/
   registers, then the tail pads on the stack, skipping std's streaming buffer. 256 B went from
   175 to 152 ns on this desktop; long messages stay compression-bound. A planted padding
   boundary, bit length, or pad byte fails the std comparison tests.
+- 2026-11-20: SHA-512 streams whole blocks through `sha512_blocks.zig`: four blocks' message
+  schedules run together in `@Vector(4, u64)` lanes, and each round adds `h + W + K` and `Ch`
+  before `Sigma1(e)`, so less sits on the `e` dependency chain. A one-part message skips the
+  streaming buffer. Standalone, against std: 1 KiB 1.86 -> 1.60 us, 16 KiB 26.4 -> 21.3 us,
+  256 KiB 0.39 -> 0.33 ms. A runtime count of rounds per group kept the state out of registers
+  and ran 1.5x slower than std, so each group size has its own unrolled copy. Planted bugs in a
+  rotation, the padding boundary, the e update, the streamed length, a schedule rotation, and
+  the lane order fail the std comparison tests.
