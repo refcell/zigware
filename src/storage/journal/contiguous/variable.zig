@@ -829,6 +829,42 @@ pub const PreparedAppend = struct {
     }
 };
 
+/// Uncompressed frames have sizes known before encoding, so `nested` is sized first and then
+/// encoded into one exact allocation: no growth copies, and no shrink when it is handed over.
+fn prepare_uncompressed(
+    comptime V: type,
+    gpa: Allocator,
+    nested: []const []const V,
+) Error!PreparedAppend {
+    const Uncompressed = frame.UncompressedFrame(V);
+    var count: usize = 0;
+    var total: usize = 0;
+    for (nested) |items| {
+        for (items) |item| {
+            const len = (try Uncompressed.init(item)).frame_len;
+            total = std.math.add(usize, total, len) catch return error.OffsetOverflow;
+        }
+        count += items.len;
+    }
+    const encoded = try gpa.alloc(u8, total);
+    errdefer gpa.free(encoded);
+    const starts = try gpa.alloc(usize, count);
+    var writer = codec.Writer.init(encoded);
+    var index: usize = 0;
+    for (nested) |items| {
+        for (items) |item| {
+            starts[index] = writer.end;
+            index += 1;
+            // Sized above, so the frame is representable.
+            const item_frame = Uncompressed.init(item) catch unreachable;
+            item_frame.write(&writer);
+        }
+    }
+    assert(index == count);
+    assert(writer.end == total);
+    return .{ .encoded = encoded, .starts = starts, .compressed = false };
+}
+
 /// Encode every item of `nested` as a frame, recording each frame's start.
 fn encode_items(
     comptime V: type,
@@ -1016,6 +1052,7 @@ pub fn Journal(comptime V: type) type {
 
         /// Encode `nested` for a later `append_prepared`.
         pub fn prepare_append(self: *const Self, nested: []const []const V) Error!PreparedAppend {
+            if (self.compression == null) return prepare_uncompressed(V, self.gpa, nested);
             var out: std.ArrayList(u8) = .empty;
             defer out.deinit(self.gpa);
             var starts: std.ArrayList(usize) = .empty;
