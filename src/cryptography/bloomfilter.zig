@@ -152,39 +152,50 @@ pub fn BloomFilter(comptime H: type) type {
             return self.bits.len();
         }
 
-        /// The bit indices of `item`, written to `out` (one per hasher).
-        fn indices(self: *const Self, item: []const u8, out: []u64) void {
-            assert(out.len == self.hashers);
+        /// The bit indices of an item, one per hasher, made as they are read (commonware's
+        /// iterator), so a query stops at its first clear bit.
+        const Indices = struct {
+            h1: u64,
+            h2: u64,
+            mask: u64,
+            hasher: u64 = 0,
+            hashers: u64,
+
+            fn next(it: *Indices) ?u64 {
+                assert(it.hasher <= it.hashers);
+                if (it.hasher == it.hashers) return null;
+                const index = (it.h1 +% it.hasher *% it.h2) & it.mask;
+                it.hasher += 1;
+                return index;
+            }
+        };
+
+        fn indices(self: *const Self, item: []const u8) Indices {
+            assert(self.hashers > 0);
             const length = self.bits.len();
             assert(std.math.isPowerOfTwo(length));
             const digest = H.hash(&.{item});
             const h1 = std.mem.readInt(u64, digest.bytes[0..8], .big);
             // An odd `h2` keeps the hashers from all landing on `h1`.
             const h2 = std.mem.readInt(u64, digest.bytes[8..16], .big) | 1;
-            const mask = length - 1;
-            for (out, 0..) |*index, hasher| {
-                index.* = (h1 +% @as(u64, hasher) *% h2) & mask;
-            }
+            return .{ .h1 = h1, .h2 = h2, .mask = length - 1, .hashers = self.hashers };
         }
 
         /// Inserts `item`.
         pub fn insert(self: *Self, item: []const u8) void {
-            var buffer: [std.math.maxInt(u8)]u64 = undefined;
-            const out = buffer[0..self.hashers];
-            self.indices(item, out);
+            var it = self.indices(item);
             // Check the bits, not `contains`: rehashing `item` would double the cost of an insert.
-            for (out) |index| {
+            while (it.next()) |index| {
                 self.bits.set(index, true);
                 assert(self.bits.get(index));
             }
+            assert(it.hasher == self.hashers);
         }
 
         /// Whether `item` is possibly in the filter: false means it certainly is not.
         pub fn contains(self: *const Self, item: []const u8) bool {
-            var buffer: [std.math.maxInt(u8)]u64 = undefined;
-            const out = buffer[0..self.hashers];
-            self.indices(item, out);
-            for (out) |index| {
+            var it = self.indices(item);
+            while (it.next()) |index| {
                 if (!self.bits.get(index)) return false;
             }
             return true;
