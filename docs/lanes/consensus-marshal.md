@@ -354,8 +354,8 @@ line, with where its Zig counterpart lives. Counts:
 `mocks/harness.rs` has no tests of its own: all 31 generic scenario functions are ported
 (`mocks/scenarios.zig`, `scenarios_queries.zig`, `scenarios_recoverable.zig`) and run through
 the standard wrappers above. `conformance.rs`'s StandardStorageConformance workload is in
-`marshal/conformance.zig` (hash unreachable, see Log); CodingStorageConformance is the
-coding lane's. Commonware has no marshal fuzz targets; AGENTS.md's fuzz bodies
+`marshal/conformance.zig` (hash unreachable, see Log), and so is CodingStorageConformance,
+the same workload over `CodingHarness` (same gap). Commonware has no marshal fuzz targets; AGENTS.md's fuzz bodies
 (seeded and `std.testing.fuzz`, each with a planted bug caught) cover the resolver `Key`
 codec, `Annotation` order, standard `decode_block`, `DispatchGate`, `PendingAcks`, `Staged`,
 the mailbox overflow policy, and the ancestor stream. Commonware's `should_panic` tests are

@@ -125,6 +125,7 @@ fn random_u64(ctx: Ctx) u64 {
 const testing = std.testing;
 const conformance = @import("conformance");
 const StandardStorage = Storage(harness.StandardHarness);
+const CodingStorage = Storage(@import("coding/harness.zig").CodingHarness);
 
 test "standard storage conformance is deterministic per seed" {
     for (0..3) |seed| {
@@ -155,5 +156,40 @@ test "standard storage conformance hash against commonware" {
     const entry = (try conformance.find(file, name)).?;
     try testing.expectEqual(@as(u64, 32), entry.n_cases);
     const actual = try conformance.compute_hash(StandardStorage, testing.allocator, 32);
+    try testing.expect(!std.mem.eql(u8, entry.hash, &actual));
+}
+
+test "coding storage conformance is deterministic per seed" {
+    for (0..3) |seed| {
+        const first = try CodingStorage.commit(testing.allocator, seed);
+        defer testing.allocator.free(first);
+        const second = try CodingStorage.commit(testing.allocator, seed);
+        defer testing.allocator.free(second);
+        try testing.expectEqualSlices(u8, first, second);
+        try testing.expectEqual(@as(usize, 4), first.len);
+    }
+}
+
+test "coding storage conformance differs across seeds and from standard" {
+    const zero = try CodingStorage.commit(testing.allocator, 0);
+    defer testing.allocator.free(zero);
+    const one = try CodingStorage.commit(testing.allocator, 1);
+    defer testing.allocator.free(one);
+    try testing.expect(!std.mem.eql(u8, zero, one));
+    // The coding variant stores coded blocks, so its audit differs from the standard one.
+    const standard = try StandardStorage.commit(testing.allocator, 0);
+    defer testing.allocator.free(standard);
+    try testing.expect(!std.mem.eql(u8, zero, standard));
+}
+
+// The coding workload draws from the same runtime RNG stream as the standard one, so its
+// 32-case hash diverges from commonware's for the same reason (see the file comment).
+test "coding storage conformance hash against commonware" {
+    if (harness.fast_schemes) return error.SkipZigTest;
+    const file = @embedFile("../conformance.toml");
+    const name = "commonware_consensus::marshal::conformance::CodingStorageConformance";
+    const entry = (try conformance.find(file, name)).?;
+    try testing.expectEqual(@as(u64, 32), entry.n_cases);
+    const actual = try conformance.compute_hash(CodingStorage, testing.allocator, 32);
     try testing.expect(!std.mem.eql(u8, entry.hash, &actual));
 }
