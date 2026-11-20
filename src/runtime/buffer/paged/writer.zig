@@ -106,6 +106,10 @@ pub const Writer = struct {
     buffer: Buffer,
     /// Physical pages staged for one write: the buffer's full pages plus a partial page.
     scratch: []u8,
+    /// One flush's write as chunks: each full page's logical bytes, straight from the buffer,
+    /// then its CRC record from `scratch`, and the copied partial page last. Like commonware's
+    /// chained tip, a flush hands full pages to the blob without copying them.
+    chunks: [][]const u8,
     /// One physical page for reads.
     page_scratch: []u8,
     failed: bool = false,
@@ -168,6 +172,8 @@ pub const Writer = struct {
         );
         errdefer buffer.deinit(gpa);
         const scratch = try gpa.alloc(u8, (adjusted / page_size_value + 1) * physical);
+        errdefer gpa.free(scratch);
+        const chunks = try gpa.alloc([]const u8, 2 * (adjusted / page_size_value + 1) + 1);
         return .{
             .gpa = gpa,
             .blob = blob,
@@ -180,6 +186,7 @@ pub const Writer = struct {
             .cache_ref = cache_ref,
             .buffer = buffer,
             .scratch = scratch,
+            .chunks = chunks,
             .page_scratch = page_scratch,
         };
     }
@@ -209,6 +216,7 @@ pub const Writer = struct {
         self.blob.close();
         self.buffer.deinit(self.gpa);
         self.gpa.free(self.scratch);
+        self.gpa.free(self.chunks);
         self.gpa.free(self.page_scratch);
         self.* = undefined;
     }
@@ -350,7 +358,7 @@ pub const Writer = struct {
         const full = self.buffer.data[0..full_len];
         const partial = self.buffer.data[full_len..self.buffer.len];
         const built = self.to_physical_pages(full, partial, write_partial_page);
-        assert(built.len > 0);
+        assert(built.chunks > 0);
         // Cache full pages before publishing the new state so reads never see stale bytes.
         if (pages > 0) assert(self.cache_ref.cache(self.id, full, cache_offset) == 0);
 
@@ -359,31 +367,39 @@ pub const Writer = struct {
         self.partial_page_state = built.partial;
         // A new tip page has no durable contents to preserve yet.
         if (pages > 0) self.durable_page_state = null;
+
+        // The chunks point into the buffer, so its full pages are consumed only after the
+        // write, whether or not it fails.
+        const chunks = self.chunks[0..built.chunks];
+        self.sync_state.write_chunks(self.blob, write_offset, chunks, durable, options) catch |err|
+            {
+                self.buffer.consume_full_pages();
+                return err;
+            };
         self.buffer.consume_full_pages();
         assert(self.current_page * page_size_value == self.buffer.offset);
-
-        const pages_out = self.scratch[0..built.len];
-        try self.sync_state.write_at_options(self.blob, write_offset, pages_out, durable, options);
         if (durable) self.durable_page_state = self.partial_page_state;
         return durable;
     }
 
-    /// Stage physical pages for `full` pages and, if dirty and requested, the partial page.
+    /// Stage `chunks` for `full` pages and, if dirty and requested, the partial page.
     fn to_physical_pages(
         self: *Self,
         full: []const u8,
         partial: []const u8,
         include_partial_page: bool,
-    ) struct { len: usize, partial: ?ActiveChecksum } {
+    ) struct { chunks: usize, partial: ?ActiveChecksum } {
         const page_size_value = self.page_size();
         const pages = full.len / page_size_value;
         const durable = self.durable_page_state;
-        var len: usize = 0;
-        if (pages > 0) len = self.append_full_pages(full, durable, self.scratch);
-        if (!include_partial_page) return .{ .len = len, .partial = null };
+        var chunks: usize = 0;
+        if (pages > 0) chunks = self.full_page_chunks(full, durable);
+        if (!include_partial_page) return .{ .chunks = chunks, .partial = null };
         if (!partial_page_dirty(pages, partial.len, self.partial_page_state)) {
-            return .{ .len = len, .partial = null };
+            return .{ .chunks = chunks, .partial = null };
         }
+        // The CRC records take the front of `scratch`; the partial page follows them.
+        const len = pages * checksum_size;
         // Only a rewrite of the same page preserves its durable checksum.
         const old = if (pages == 0) durable else null;
         const crc = Crc32.checksum(partial);
@@ -394,7 +410,29 @@ pub const Writer = struct {
         @memcpy(page[0..partial.len], partial);
         @memset(page[partial.len..page_size_value], 0);
         page[page_size_value..][0..checksum_size].* = record.to_bytes();
-        return .{ .len = len + page.len, .partial = active };
+        self.chunks[chunks] = page;
+        return .{ .chunks = chunks + 1, .partial = active };
+    }
+
+    /// Stage whole logical pages of `data` (in the buffer) as chunks: each page's bytes, then
+    /// its CRC record, kept at the front of `scratch`. The first page preserves `old` in its
+    /// original slot when present. Returns the chunks staged.
+    fn full_page_chunks(self: *Self, data: []const u8, old: ?ActiveChecksum) usize {
+        const page_size_value = self.page_size();
+        assert(data.len % page_size_value == 0 and data.len > 0);
+        const pages = data.len / page_size_value;
+        assert(2 * pages < self.chunks.len);
+        for (0..pages) |page| {
+            const logical = data[page * page_size_value ..][0..page_size_value];
+            const crc = Crc32.checksum(logical);
+            const previous = if (page == 0) old else null;
+            const record, _ = paged.build_crc_record(@intCast(page_size_value), crc, previous);
+            const bytes = self.scratch[page * checksum_size ..][0..checksum_size];
+            bytes.* = record.to_bytes();
+            self.chunks[2 * page] = logical;
+            self.chunks[2 * page + 1] = bytes;
+        }
+        return 2 * pages;
     }
 
     /// Write whole logical pages in on-disk format into `out`. The first page preserves
@@ -474,6 +512,7 @@ pub const Writer = struct {
         self.sync_state.deinit();
         self.buffer.deinit(self.gpa);
         self.gpa.free(self.scratch);
+        self.gpa.free(self.chunks);
         self.gpa.free(self.page_scratch);
         self.* = undefined;
         return .{ .sealed = sealed, .completion = completion };

@@ -238,6 +238,12 @@ time, files, and network: build on it rather than around it where it fits.
   canceled, its followers still get one read. A canceled zigware read ends with its task (no
   late completion), so its fetch resolves as abandoned and a follower reads the page again:
   `test_followers_keep_single_flight_after_first_fetcher_cancellation` sees two reads, not one.
+- Chained tip allocations are not ported as such. Their purpose, handing full pages to I/O
+  without copying, is: the paged flush writes each page's tip slice and its CRC record as
+  chunks, and production storage writes chunks with `pwritev` (resuming short writes; the
+  io_uring path still writes chunk by chunk). The audit digest hashes a write's bytes, not
+  its chunking, so no digest moved. journal::fixed_append items=100000, 5 alternating pairs at
+  load 70-100: before 7.06-12.3 ms (median 9.11), after 6.29-6.59 ms (median 6.41).
 - Shared reads are on by default, as commonware's page cache always has `page_fetches`. The
   waiting needs an `Io`, which `CacheRef.init` does not take (131 callers across lanes), so
   blobs report their backend's (`Blob.io`, forwarded by every storage wrapper) and
@@ -384,8 +390,9 @@ each checked with a planted bug;
 `test_replay_preserves_tail_during_partial_page_rewrite` was already in
 paged/partial_rewrite_test.zig (91149b1d). The rest stay: panic recovery or propagation, Rust
 future, waker, `Drop`, and borrow semantics, `IoBuf` chunk ownership, and features zigware does
-not have (the `external` mode, accept on the ring, chained tip allocations; shared in-flight
-page reads, the `recoverable_prefix_len` scan budget, and slot hints have since landed).
+not have (the `external` mode, accept on the ring; shared in-flight page reads, the
+`recoverable_prefix_len` scan budget, slot hints, and a zero-copy flush in place of chained tip
+allocations have since landed).
 
 Not portable:
 - `deterministic.rs` `test_retired_write_owner_releases_other_blob`,
@@ -485,7 +492,10 @@ Not portable:
   `test_typed_append_crosses_allocations_and_pages`, `test_zero_size_typed_append_stays_detached`,
   `test_drain_reuses_independent_partial_page`,
   `test_drain_keeps_chunks_and_detaches_mutable_suffix`, `test_replace_detaches_prior_owners`:
-  storage-journal.md: tip is one contiguous allocation, not chained zero-copy chunks
+  `IoBuf` pointer and ownership checks of the chained tip. zigware keeps one tip allocation and
+  gets the same zero-copy flush another way: the flush writes each full page straight from
+  the tip, then its CRC record, as chunks of one vectored write (writer_test.zig "a flush
+  hands the buffer's full pages to the blob without copying them")
 - `utils/buffer/paged/writer.rs` `test_cancelled_recovery_read_cannot_repopulate_after_truncate`:
   a dropped Rust read completes later and could publish stale bytes; a canceled zigware read ends
   at the cancel with `error.Canceled`, so no late completion exists (a planted "cache the bytes of
@@ -493,8 +503,8 @@ Not portable:
 - `utils/buffer/paged/writer.rs` `test_append_variable_value_encodes_in_place`,
   `test_to_physical_pages_preserves_chunk_owners`: storage-journal.md: `IoBuf` ownership/chunk
   structure (reads copy into caller buffers)
-- `utils/buffer/paged/writer.rs` `test_sync_preserves_partial_tip_allocation`: storage-journal.md:
-  tip is one contiguous allocation, not chained zero-copy chunks
+- `utils/buffer/paged/writer.rs` `test_sync_preserves_partial_tip_allocation`: checks the
+  partial tip `IoBufMut` survives a sync; zigware's one tip allocation is never replaced
 - `utils/buffer/tip.rs` `test_tip_slice_uses_resolved_bounds`,
   `test_tip_writable_copies_when_slice_is_live`: storage-journal.md: `IoBuf` ownership/chunk
   structure (reads copy into caller buffers)

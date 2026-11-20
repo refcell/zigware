@@ -905,3 +905,70 @@ test "a canceled remove or scan fails with Canceled, not absence or an I/O error
     defer names.deinit(gpa);
     try testing.expect(names.contains("blob"));
 }
+
+test "a write of more chunks than one vectored write carries reads back in order" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try open_storage(&tmp, "vectored");
+    defer storage.deinit();
+    const opened = try storage.storage().open("vectored", "blob");
+    defer opened.blob.close();
+    // 150 chunks of 0 to 12 bytes: more than two 64-iovec windows, with empty chunks at the
+    // front, inside, and on window boundaries.
+    var bytes: [150 * 12]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| byte.* = @truncate(index *% 31 +% 7);
+    var chunks: [150][]const u8 = undefined;
+    var start: usize = 0;
+    for (&chunks, 0..) |*chunk, index| {
+        const len = (index * 7) % 13;
+        chunk.* = bytes[start..][0..len];
+        start += len;
+    }
+    try opened.blob.write_at_vectored(5, &chunks, .{});
+    const read = try gpa.alloc(u8, start);
+    defer gpa.free(read);
+    try opened.blob.read_at(5, read);
+    try testing.expectEqualSlices(u8, bytes[0..start], read);
+}
+
+test "a vectored write resumes after short writes at and inside chunk boundaries" {
+    // Writes into `out` and stops short: each call writes at most `quota` bytes, so writes
+    // end inside chunks and exactly on their boundaries.
+    const Short = struct {
+        out: []u8,
+        start: u64,
+        quota: usize,
+        calls: usize = 0,
+
+        pub fn write(self: *@This(), window: []const []const u8, position: u64) !usize {
+            self.calls += 1;
+            var at: usize = @intCast(position - self.start);
+            var left = self.quota;
+            for (window) |chunk| {
+                const take = @min(left, chunk.len);
+                @memcpy(self.out[at..][0..take], chunk[0..take]);
+                at += take;
+                left -= take;
+                if (left == 0) break;
+            }
+            return self.quota - left;
+        }
+    };
+    var bytes: [97]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| byte.* = @truncate(index *% 13 +% 1);
+    // Chunks of 0..9 bytes; quotas below, at, and above the chunk sizes.
+    var chunks: [20][]const u8 = undefined;
+    var start: usize = 0;
+    for (&chunks, 0..) |*chunk, index| {
+        const len = @min((index * 5) % 10, bytes.len - start);
+        chunk.* = bytes[start..][0..len];
+        start += len;
+    }
+    for ([_]usize{ 1, 3, 5, 9, 64 }) |quota| {
+        var out: [97]u8 = @splat(0);
+        var short: Short = .{ .out = &out, .start = 40, .quota = quota };
+        try file_storage.write_all_vectored(&short, &chunks, 40);
+        try testing.expectEqualSlices(u8, bytes[0..start], out[0..start]);
+        try testing.expect(short.calls >= (start + quota - 1) / quota);
+    }
+}

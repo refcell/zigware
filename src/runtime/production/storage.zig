@@ -504,6 +504,66 @@ fn file_write(storage: *const Storage, file: File, bytes: []const u8, offset: u6
     }
 }
 
+/// Most chunks one vectored write passes the kernel (Linux's `UIO_MAXIOV` is 1024).
+const write_iovecs_max = 64;
+
+/// Write `chunks` as one byte sequence at `offset` with positional vectored writes (commonware
+/// writes a buffer's chunks with one `pwritev`). `std.Io.Threaded` retries `EINTR` itself.
+fn file_write_vectored(
+    storage: *const Storage,
+    file: File,
+    chunks: []const []const u8,
+    offset: u64,
+) Error!void {
+    const Positional = struct {
+        storage: *const Storage,
+        file: File,
+
+        pub fn write(self: @This(), window: []const []const u8, position: u64) Error!usize {
+            return self.file.writePositional(self.storage.io, window, position) catch |err|
+                or_canceled(err, error.WriteFailed);
+        }
+    };
+    return write_all_vectored(Positional{ .storage = storage, .file = file }, chunks, offset);
+}
+
+/// Write every byte of `chunks` at `offset` through `writer.write(window, position)`, which
+/// may write any prefix of its window, resuming after each short write.
+pub fn write_all_vectored(writer: anytype, chunks: []const []const u8, offset: u64) Error!void {
+    var window: [write_iovecs_max][]const u8 = undefined;
+    var index: usize = 0;
+    var skip: usize = 0; // Bytes of `chunks[index]` already written.
+    var position = offset;
+    // Bounded: every write makes progress or fails.
+    while (true) {
+        while (index < chunks.len and chunks[index].len == skip) : (skip = 0) index += 1;
+        if (index == chunks.len) return;
+        var count: usize = 0;
+        var window_len: usize = 0;
+        while (count < window.len and index + count < chunks.len) : (count += 1) {
+            const chunk = chunks[index + count];
+            window[count] = if (count == 0) chunk[skip..] else chunk;
+            window_len += window[count].len;
+        }
+        const written = try writer.write(window[0..count], position);
+        if (written == 0) return error.WriteFailed;
+        assert(written <= window_len);
+        position += written;
+        // Advance past the written bytes.
+        var left = written;
+        while (left > 0) {
+            assert(index < chunks.len);
+            const step = @min(left, chunks[index].len - skip);
+            left -= step;
+            skip += step;
+            if (skip == chunks[index].len) {
+                index += 1;
+                skip = 0;
+            }
+        }
+    }
+}
+
 fn file_sync(storage: *const Storage, file: File) Error!void {
     const worker = ring_worker(storage) orelse
         return file.sync(storage.io) catch |err| or_canceled(err, error.BlobSyncFailed);
@@ -719,7 +779,10 @@ pub const Blob = struct {
         if (position + total > std.math.maxInt(i64)) return error.OffsetOverflow;
         {
             defer self.mutated();
-            for (chunks) |chunk| {
+            if (ring_worker(self.storage) == null) {
+                try file_write_vectored(self.storage, self.file, chunks, position);
+                position += total;
+            } else for (chunks) |chunk| {
                 if (chunk.len == 0) continue;
                 try file_write(self.storage, self.file, chunk, position);
                 position += chunk.len;

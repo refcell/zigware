@@ -2022,3 +2022,82 @@ test "a batched recoverable_prefix_len stops at a corrupt page inside a batch" {
         try testing.expectEqual(4 * page_size, len);
     }
 }
+
+/// Records where each write's chunks point, then writes them to `inner`.
+const ChunkRecorder = struct {
+    inner: Blob,
+    chunks: [8][]const u8 = undefined,
+    count: usize = 0,
+
+    const vtable: Blob.VTable = .{
+        .read_at = read_at,
+        .write_at = write_at,
+        .resize = resize,
+        .sync = sync,
+        .close = close,
+    };
+
+    fn blob(self: *ChunkRecorder) Blob {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn from(ptr: *anyopaque) *ChunkRecorder {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn read_at(ptr: *anyopaque, offset: u64, buf: []u8, options: ReadOptions) Error!void {
+        return from(ptr).inner.read_at_options(offset, buf, options);
+    }
+
+    fn write_at(
+        ptr: *anyopaque,
+        offset: u64,
+        chunks: []const []const u8,
+        options: WriteOptions,
+    ) Error!void {
+        const self = from(ptr);
+        self.count = @min(chunks.len, self.chunks.len);
+        @memcpy(self.chunks[0..self.count], chunks[0..self.count]);
+        return self.inner.write_at_vectored(offset, chunks, options);
+    }
+
+    fn resize(ptr: *anyopaque, length: u64) Error!void {
+        return from(ptr).inner.resize(length);
+    }
+
+    fn sync(ptr: *anyopaque) Error!void {
+        return from(ptr).inner.sync();
+    }
+
+    fn close(ptr: *anyopaque) void {
+        from(ptr).inner.close();
+    }
+};
+
+test "a flush hands the buffer's full pages to the blob without copying them" {
+    // commonware chains tip allocations so full pages reach I/O without a copy; zigware's
+    // flush writes each page straight from its one buffer, then that page's CRC record.
+    var storage = Storage.init(gpa);
+    defer storage.deinit();
+    var cache_ref = try CacheRef.init(gpa, page_size, 8);
+    defer cache_ref.deinit();
+    const opened = try storage.open(partition, "zero_copy");
+    var recorder: ChunkRecorder = .{ .inner = opened.blob };
+    var w = try W.init(gpa, recorder.blob(), opened.len, buffer_size, &cache_ref);
+    defer w.deinit();
+    var data: [2 * page_size]u8 = undefined;
+    for (&data, 0..) |*byte, index| byte.* = @truncate(index *% 7 +% 3);
+    _ = try w.append(&data);
+    try w.sync();
+    try testing.expectEqual(4, recorder.count);
+    const buffer = w.buffer.data;
+    for (0..2) |page| {
+        const logical = recorder.chunks[2 * page];
+        try testing.expectEqual(page_size, logical.len);
+        try testing.expectEqual(buffer.ptr + page * page_size, logical.ptr);
+        try testing.expectEqual(12, recorder.chunks[2 * page + 1].len);
+    }
+    var read: [2 * page_size]u8 = undefined;
+    try w.read_into(&read, 0);
+    try testing.expectEqualSlices(u8, &data, &read);
+}

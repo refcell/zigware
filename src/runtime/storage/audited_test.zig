@@ -217,3 +217,27 @@ test "start_sync records a deterministic audit event (test_audited_start_sync)" 
     try (try blob2.start_sync()).wait_release();
     try testing.expectEqualSlices(u8, &first.auditor.state(), &second.auditor.state());
 }
+
+test "a write audits its bytes, not how they are chunked" {
+    // The paged writer's flush writes each page and its CRC record as separate chunks; the
+    // digest must match one contiguous write of the same bytes. A write of other bytes
+    // differs.
+    const splits = [_][]const []const u8{
+        &.{"pagebytes+crc"},
+        &.{ "page", "bytes", "+crc" },
+        &.{ "", "pagebytes", "", "+crc", "" },
+        &.{"pagebytes+crd"},
+    };
+    var states: [splits.len][8]u8 = undefined;
+    for (splits, &states) |chunks, *state| {
+        var h: Harness = undefined;
+        h.init();
+        defer h.deinit();
+        const blob = (try h.storage.storage().open("partition", "blob")).blob;
+        try blob.write_at_vectored(3, chunks, .{});
+        state.* = h.auditor.state();
+    }
+    try testing.expectEqualSlices(u8, &states[0], &states[1]);
+    try testing.expectEqualSlices(u8, &states[0], &states[2]);
+    try testing.expect(!std.mem.eql(u8, &states[0], &states[3]));
+}

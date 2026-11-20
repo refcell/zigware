@@ -83,10 +83,22 @@ pub const SyncState = union(enum) {
         durable: bool,
         options: WriteOptions,
     ) !void {
+        return self.write_chunks(blob, offset, &.{bytes}, durable, options);
+    }
+
+    /// `write_at_options` of `chunks` written as one byte sequence.
+    pub fn write_chunks(
+        self: *SyncState,
+        blob: Blob,
+        offset: u64,
+        chunks: []const []const u8,
+        durable: bool,
+        options: WriteOptions,
+    ) !void {
         assert(!options.sync);
         try self.wait_for_pending();
         assert(self.* != .pending);
-        try blob.write_at(offset, bytes, options);
+        try blob.write_at_vectored(offset, chunks, options);
         if (!durable) {
             self.* = .dirty;
             return;
