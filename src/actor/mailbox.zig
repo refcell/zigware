@@ -465,13 +465,20 @@ fn State(comptime T: type) type {
             assert(activity >= overflow_mutation);
         }
 
-        /// Publish whether overflow holds messages (overflow lock held).
+        /// Publish whether overflow holds messages (overflow lock held). Only the lock holder
+        /// changes the bit, so it is read exactly here, and a publish that would not change it
+        /// (every rejected or dropped message) skips the read-modify-write.
         fn publish(state: *Self) void {
-            if (overflow_is_empty(T, &state.overflow)) {
-                _ = state.activity.fetchAnd(~overflow_has_messages, .monotonic);
-            } else {
+            const has_messages = !overflow_is_empty(T, &state.overflow);
+            const published = state.activity.load(.monotonic) & overflow_has_messages != 0;
+            if (has_messages == published) return;
+            if (has_messages) {
                 _ = state.activity.fetchOr(overflow_has_messages, .monotonic);
+            } else {
+                _ = state.activity.fetchAnd(~overflow_has_messages, .monotonic);
             }
+            const now_published = state.activity.load(.monotonic) & overflow_has_messages != 0;
+            assert(now_published == has_messages);
         }
 
         /// Release one handle, freeing the state with the last.
