@@ -686,12 +686,14 @@ iteration on smoke inputs) repeat to about 0.1%. A variant with 59 suspect asser
 | bls12381 field, curve and map checks (34 sites), 8 bench groups | | | 0.06 to 0.42% |
 | bloomfilter, clearing (`close` `is_canonical`), buffer_paged, runtime memory `eql` | | | 0 |
 
-The storage and utils differences sit in each bench process's setup, which runs every bench's
-fixtures before the name filter (no storage bench calls `Runner.matches`), so they are the
-costs of the append and insert paths those fixtures drive. The parallel, allocator and bench
-lanes have no expensive assert: every condition there is O(1) except `Arena.init`'s
-`free_count`, which runs once per arena after an O(slices) setup loop. 9f4eeba4's new Heap
-asserts are O(1) too.
+The storage and utils differences sit in fixtures that the merkle, bmt, archive, freezer,
+ordinal, rmap and utils bitmap benches build before checking `Runner.matches` (qmdb and index
+check it first), so they are the costs of the append and insert paths those fixtures drive. A
+filtered `bench-storage --bench` that matches nothing spends 2.1B instructions there, under a
+second; apply_batch's minutes per run are its own untimed per-sample seeding, as
+commonware's. The parallel, allocator and bench lanes have no expensive assert: every
+condition there is O(1) except `Arena.init`'s `free_count`, which runs once per arena after an
+O(slices) setup loop. 9f4eeba4's new Heap asserts are O(1) too.
 
 Reported to their owners, with an O(1) replacement each:
 
