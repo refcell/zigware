@@ -262,7 +262,9 @@ fn connectivity_at(
     var nodes: [peers_max]TransportNode(@TypeOf(transport)) = undefined;
     try start_nodes(io, transport, scope, base, max_message_size, keys[0..n], nodes[0..n]);
     defer stop_nodes(io, nodes[0..n]);
+    defer production_phase.store(.stopping, .monotonic);
     if (probe_listeners) try wait_listening(io, transport, base, n);
+    production_phase.store(.exchanging, .monotonic);
     var heard: [peers_max][peers_max]bool = @splat(@splat(false));
     var rounds: u32 = 0;
     while (!all_heard(&heard, n)) : (rounds += 1) {
@@ -280,6 +282,7 @@ fn connectivity_at(
         }
         try io.sleep(.fromMilliseconds(10), .real);
     }
+    production_phase.store(.checking, .monotonic);
     const text = try scope.encode(gpa);
     defer gpa.free(text);
     errdefer std.debug.print("connectivity metrics failed:\n{s}\n", .{text});
@@ -428,18 +431,23 @@ pub fn free_base_port(io: Io, transport: *production.network.Network, count: u16
     return error.TestNoFreePorts;
 }
 
-/// Waits up to 10 s for each of the `count` ports from `base` to accept. A node whose bind
-/// lost its port to another process never does: `error.TestPortLost` asks for a retry.
+/// Waits up to `listen_wait_s` in all for each of the `count` ports from `base` to accept. A
+/// node whose bind lost its port to another process never does, and on a loaded host a dial
+/// can take its whole connect timeout: either way `error.TestPortLost` asks for a retry.
 pub fn wait_listening(io: Io, transport: anytype, base: u16, count: usize) !void {
+    production_phase.store(.probing, .monotonic);
+    const deadline_ns = now_ns(io) + listen_wait_s * std.time.ns_per_s;
     for (0..count) |index| {
         const port = base + @as(u16, @intCast(index));
         const address = network_mod.to_address(local_socket(port));
-        var tries: u32 = 0;
-        while (true) : (tries += 1) {
+        while (true) {
             var connection = transport.dial(address) catch |err| {
                 if (err == error.Canceled) return err;
-                if (tries >= 1_000) {
-                    std.debug.print("port {d} never accepted; another process took it\n", .{port});
+                if (now_ns(io) >= deadline_ns) {
+                    std.debug.print("port {d} did not accept within {d} s\n", .{
+                        port,
+                        listen_wait_s,
+                    });
                     return error.TestPortLost;
                 }
                 try io.sleep(.fromMilliseconds(10), .real);
@@ -451,8 +459,38 @@ pub fn wait_listening(io: Io, transport: anytype, base: u16, count: usize) !void
     }
 }
 
-/// Runs `function(io, network, metrics)` on a fresh production runner, up to three times
-/// while an attempt reports `error.TestPortLost`.
+const listen_wait_s = 30;
+
+/// What a real-socket run is doing, for `watchdog`'s report.
+const Phase = enum(u8) { starting, probing, exchanging, checking, stopping };
+var production_phase: std.atomic.Value(Phase) = .init(.starting);
+
+/// Real-socket runs finish in well under a minute; past this one is stuck. It stays under the
+/// test step's 10-minute limit so the failure names the phase.
+const watchdog_s = 300;
+
+/// Panics, naming the phase, once a run has taken `watchdog_s` (it runs on its own thread).
+fn watchdog(io: Io) void {
+    io.sleep(.fromSeconds(watchdog_s), .awake) catch return; // Canceled: the run finished.
+    const phase = production_phase.load(.monotonic);
+    std.debug.panic("real-socket run stuck for {d} s while {s}", .{ watchdog_s, @tagName(phase) });
+}
+
+fn Watched(comptime function: anytype) type {
+    const Args = std.meta.ArgsTuple(@TypeOf(function));
+    return struct {
+        fn run(io: Io, transport: *production.network.Network, scope: metrics.Scope) !void {
+            production_phase.store(.starting, .monotonic);
+            var guard = try io.concurrent(watchdog, .{io});
+            defer guard.cancel(io);
+            const args: Args = .{ io, transport, scope };
+            return @call(.auto, function, args);
+        }
+    };
+}
+
+/// Runs `function(io, network, metrics)` on a fresh production runner, under `watchdog`, up to
+/// three times while an attempt reports `error.TestPortLost`.
 pub fn run_production(comptime function: anytype) !void {
     var attempt: u32 = 1;
     while (true) : (attempt += 1) {
@@ -466,7 +504,7 @@ pub fn run_production(comptime function: anytype) !void {
         try runner.init(gpa, .{ .storage_directory = directory });
         defer runner.deinit();
         const args = .{ runner.io(), runner.network(), runner.metrics() };
-        runner.start(function, args) catch |err| {
+        runner.start(Watched(function).run, args) catch |err| {
             if (err != error.TestPortLost or attempt == 3) return err;
             std.debug.print("attempt {d} lost a port; retrying on fresh ports\n", .{attempt});
             continue;
