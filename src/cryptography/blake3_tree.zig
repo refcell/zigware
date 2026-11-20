@@ -152,18 +152,19 @@ fn lane_cvs(comptime n: usize, cv: [8]Vec(n), out: *[n]Cv) void {
     }
 }
 
-/// Transposes the 16 rows of a 16-by-16 matrix of words into its columns, swapping the
+/// Transposes the `n` rows of an `n`-by-`n` matrix of words into its columns, swapping the
 /// off-diagonal blocks of each power-of-two size in turn (one two-source permute per row and
 /// stage, as the BLAKE3 reference's AVX-512 transpose).
-inline fn transpose16(rows: *[16]Vec(16)) void {
-    inline for (.{ 8, 4, 2, 1 }) |s| {
-        comptime var low: [16]i32 = undefined;
-        comptime var high: [16]i32 = undefined;
-        inline for (0..16) |j| {
+inline fn transpose(comptime n: usize, rows: *[n]Vec(n)) void {
+    comptime var s = n / 2;
+    inline while (s >= 1) : (s /= 2) {
+        comptime var low: [n]i32 = undefined;
+        comptime var high: [n]i32 = undefined;
+        inline for (0..n) |j| {
             low[j] = if (j & s == 0) j else ~@as(i32, j - s);
             high[j] = if (j & s == 0) j + s else ~@as(i32, j);
         }
-        inline for (0..16) |i| {
+        inline for (0..n) |i| {
             if (i & s == 0) {
                 const a = rows[i];
                 const b = rows[i + s];
@@ -174,36 +175,31 @@ inline fn transpose16(rows: *[16]Vec(16)) void {
     }
 }
 
-/// The 16 little-endian words of each 64-byte block at `blocks`, one block per lane. One
-/// vector load per block: copying a `[64]u8` instead lowers to byte loads.
-inline fn load_transposed(blocks: *const [16][*]const u8) [16]Vec(16) {
-    var m: [16]Vec(16) = undefined;
-    inline for (&m, blocks) |*row, block| {
-        row.* = @as(*align(1) const Vec(16), @ptrCast(block)).*;
-        if (native_endian == .big) row.* = @byteSwap(row.*);
+/// The 16 little-endian words of each 64-byte block at `blocks`, one block per lane: each
+/// block loads as `16 / n` vectors of `n` words, and each group of `n` words transposes. Vector
+/// loads, as copying a `[64]u8` instead lowers to byte loads, and gathering words one at a
+/// time costs more than the transposes (4 KiB: 4 lanes).
+inline fn load_transposed(comptime n: usize, blocks: *const [n][*]const u8) [16]Vec(n) {
+    comptime assert(std.math.isPowerOfTwo(n) and n <= 16);
+    var m: [16]Vec(n) = undefined;
+    inline for (0..16 / n) |group| {
+        var rows: [n]Vec(n) = undefined;
+        inline for (&rows, blocks) |*row, block| {
+            row.* = @as(*align(1) const Vec(n), @ptrCast(block + group * n * 4)).*;
+            if (native_endian == .big) row.* = @byteSwap(row.*);
+        }
+        transpose(n, &rows);
+        m[group * n ..][0..n].* = rows;
     }
-    transpose16(&m);
     return m;
 }
 
 /// The message words of block `block` of each of the `n` chunks at `chunks`, one per lane.
 inline fn chunk_words(comptime n: usize, chunks: *const [n][*]const u8, block: usize) [16]Vec(n) {
     assert(block < blocks_per_chunk);
-    var m: [16]Vec(n) = undefined;
-    if (n == 16) {
-        var blocks: [16][*]const u8 = undefined;
-        inline for (&blocks, chunks) |*b, chunk| b.* = chunk + block * block_len;
-        return load_transposed(&blocks);
-    }
-    var rows: [n][16]u32 = undefined;
-    for (&rows, chunks) |*row, chunk| {
-        const bytes = chunk + block * block_len;
-        for (row, 0..) |*word, w| word.* = read_word(bytes[4 * w ..][0..4]);
-    }
-    for (&m, 0..) |*word, w| {
-        inline for (0..n) |lane| word[lane] = rows[lane][w];
-    }
-    return m;
+    var blocks: [n][*]const u8 = undefined;
+    inline for (&blocks, chunks) |*b, chunk| b.* = chunk + block * block_len;
+    return load_transposed(n, &blocks);
 }
 
 /// The chaining values, in vector form, of the `n` whole chunks at `chunks`, the first at chunk
@@ -651,8 +647,13 @@ fn hash_rest(parts: []const []const u8, len: usize, offset: usize, rest: *Rest) 
         done += run;
     }
     if (held) |pair| rest.push(collapse(lanes, pair.top), pair.start);
-    if (transposed and whole - done > 4) {
-        rest_runs_transposed(&cursor, first, whole, done, partial > 0, rest);
+    if (whole - done >= 2) {
+        const width = std.math.ceilPowerOfTwoAssert(usize, whole - done);
+        inline for (widths) |n| {
+            if (n >= 2 and n == width) {
+                rest_runs_vector(n, &cursor, first, whole, done, partial > 0, rest);
+            }
+        }
         done = whole;
     }
     if (done < whole) {
@@ -683,11 +684,13 @@ fn hash_rest(parts: []const []const u8, len: usize, offset: usize, rest: *Rest) 
     rest.last = last_chunk_cv(cursor.take(partial, &scratch), rest.last_counter);
 }
 
-/// The runs of a rest's last `whole - done` whole chunks, 5 to `lanes` of them, from one
-/// padded 16-lane batch merged in vector form: level `l` of the merge holds every aligned run
-/// of `2^l` chunks, so each run's chaining value is one lane of one level, and no level
-/// gathers its words one at a time (16 KiB: two runs of 8 in 230 ns instead of 470).
-fn rest_runs_transposed(
+/// The runs of a rest's last `whole - done` whole chunks, 2 to `lanes` of them, from one batch
+/// padded to the width `n` that covers them and merged in vector form: level `l` of the merge
+/// holds every aligned run of `2^l` chunks, so each run's chaining value is one lane of one
+/// level, and the runs' parents share compressions instead of each gathering its own (4 KiB:
+/// the two 2-chunk runs merge in one 2-lane compression).
+fn rest_runs_vector(
+    comptime n: usize,
     cursor: *Cursor,
     first: u64,
     whole: usize,
@@ -695,30 +698,26 @@ fn rest_runs_transposed(
     partial: bool,
     rest: *Rest,
 ) void {
-    comptime assert(transposed and lanes == 16);
+    comptime assert(std.math.isPowerOfTwo(n) and n >= 2 and n <= lanes);
     const count = whole - done_before;
-    assert(count > 4 and count <= lanes);
+    assert(count > n / 2 and count <= n);
     const start = first + done_before;
-    assert(start % lanes == 0);
-    var scratch: [lanes][chunk_len]u8 = undefined;
-    var chunks: [lanes][*]const u8 = undefined;
+    assert(start % n == 0);
+    var scratch: [n][chunk_len]u8 = undefined;
+    var chunks: [n][*]const u8 = undefined;
     for (chunks[0..count], scratch[0..count]) |*chunk, *buffer| {
         chunk.* = cursor.take(chunk_len, buffer).ptr;
     }
     for (chunks[count..]) |*chunk| chunk.* = chunks[count - 1];
-    // Levels 0 to 3 hold runs of 1 to 8 chunks; padded lanes' nodes are never read.
-    var levels: [4][lanes]Cv = undefined;
-    const level0 = chunk_nodes(16, &chunks, start);
-    lane_cvs(16, level0, &levels[0]);
-    const level1 = parents_of(16, level0);
-    lane_cvs(8, level1, levels[1][0..8]);
-    const level2 = parents_of(8, level1);
-    lane_cvs(4, level2, levels[2][0..4]);
-    lane_cvs(2, parents_of(4, level2), levels[3][0..2]);
+    // Padded lanes' nodes are never read: a run covering one is never pushed.
+    var levels: [std.math.log2_int(usize, n) + 1][n]Cv = undefined;
+    // The first run is the largest; levels above it would be compressions no run reads.
+    const top = std.math.log2_int(usize, next_run(first, whole, done_before, partial));
+    store_levels(n, chunk_nodes(n, &chunks, start), &levels, 0, top);
     var done = done_before;
     while (done < whole) {
         const run = next_run(first, whole, done, partial);
-        assert(run < lanes);
+        assert(run <= n);
         const offset = done - done_before;
         assert(offset % run == 0);
         const level = std.math.log2_int(usize, run);
@@ -726,6 +725,20 @@ fn rest_runs_transposed(
         done += run;
     }
     assert(done == whole);
+}
+
+/// Stores the `w` nodes `nodes` as level `level` of `levels`, then their parents above them,
+/// up to level `top`. Recursion over the comptime width unrolls at compile time.
+inline fn store_levels(
+    comptime w: usize,
+    nodes: [8]Vec(w),
+    levels: anytype,
+    comptime level: usize,
+    top: usize,
+) void {
+    assert(level <= top);
+    lane_cvs(w, nodes, levels[level][0..w]);
+    if (w > 1 and level < top) store_levels(w / 2, parents_of(w, nodes), levels, level + 1, top);
 }
 
 /// Item `index` of a round: subtree `index`, or, at index `whole`, the rest, which it writes
