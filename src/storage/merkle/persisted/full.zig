@@ -429,7 +429,9 @@ pub fn Merkle(comptime F: type, comptime Digest: type) type {
             const effective_prune_pos = @max(metadata_prune_pos, aligned);
             const retained_size = F.to_nearest_size(journal.size());
             if (effective_prune_pos > retained_size) return error.MissingNode;
-            assert(F.is_valid_size(retained_size));
+            assert(retained_size <= journal.size());
+            // Valid by construction; checking costs O(height), so only in safe builds.
+            if (std.debug.runtime_safety) assert(F.is_valid_size(retained_size));
             return .{ .retained_size = retained_size, .effective_prune_pos = effective_prune_pos };
         }
 

@@ -381,7 +381,7 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
                 try self.unhashed[height].append(gpa, self.size());
                 self.appended.appendAssumeCapacity(std.mem.zeroes(Digest));
             }
-            assert(F.is_valid_size(self.size()));
+            assert(self.size() == F.location_to_position(location + 1));
         }
 
         /// Adds leaves whose digests are already computed, in order.

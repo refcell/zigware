@@ -63,7 +63,9 @@ pub const Family = struct {
         n = (size + std.math.log2_int(u64, n + 1)) / 2;
         const candidate = location_to_position(n + 1);
         const result = if (candidate <= size) candidate else location_to_position(n);
-        assert(result <= size and is_valid_size(result));
+        assert(result <= size);
+        // Valid by construction; checking costs O(height), so only in safe builds.
+        if (std.debug.runtime_safety) assert(is_valid_size(result));
         return result;
     }
 

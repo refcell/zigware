@@ -133,7 +133,7 @@ pub fn Mem(comptime F: type, comptime Digest: type) type {
                 const right = self.node(children.right);
                 self.nodes.appendAssumeCapacity(hasher.node_digest(position, &left, &right));
             }
-            assert(F.is_valid_size(self.size()));
+            assert(self.size() == F.location_to_position(location + 1));
             assert(self.leaves() == location + 1);
         }
 

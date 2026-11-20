@@ -77,7 +77,9 @@ pub const Family = struct {
             if (location_to_position(middle) <= size) low = middle else high = middle - 1;
         }
         const result = location_to_position(low);
-        assert(result <= size and is_valid_size(result));
+        assert(result <= size);
+        // Valid by construction; checking costs O(height), so only in safe builds.
+        if (std.debug.runtime_safety) assert(is_valid_size(result));
         return result;
     }
 

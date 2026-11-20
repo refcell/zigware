@@ -666,6 +666,20 @@ benches ran on tmpfs, so per-run ratios swing: `merkle::append` mmr ran 0.91×, 
 - **Proof generation** (`merkle::proof`, `range_proof`, `bmt::proof`, `bmt::multi_proof`) is
   0.37× to 0.98×. Before 5c5d48cd, `bmt::proof` (about 40 ns) and `bmt::multi_proof` read
   1.8× and 2.9×: the clock read per iteration dominated.
+- **`merkle::append` and `add_many`, re-run (2026-11-20).** On main at 10c383dd, after
+  crypto's MMR shape kernels (569941c9: commonware's `hash_40`, `hash_72`, and their pairs)
+  and the thread-cached `allocator.Heap` (9f4eeba4), bench-compare.sh, best of three, load
+  40 to 79:
+
+  | bench | parameters | commonware | zigware | zigware / commonware |
+  |---|---|---|---|---|
+  | `merkle::append` | `n=100000 family=mmr` | 20.8 ms | 14.5 ms | 0.70× (was 1.54×) |
+  | `merkle::append` | `n=100000 family=mmb` | 14.6 ms | 9.82 ms | 0.67× (was 1.07×) |
+  | `merkle::add_many` | `items=65536 workers=1 family=mmr` | 11.5 ms | 8.59 ms | 0.75× (was 1.28×) |
+  | `merkle::add_many` | `items=65536 workers=8 family=mmb` | 6.23 ms | 4.47 ms | 0.72× (was 0.83×) |
+
+  Commonware's medians ran higher than in the table above (append mmr 16.4 → 20.8 ms) at
+  this load, so the ratios flatter zigware somewhat; both families are now ahead.
 
 ## secp256r1: signature verification (2026-11-20, p2p lane)
 
