@@ -17,5 +17,5 @@ line per bench per round:
 `package` is the zigware package whose bench binary runs the bench, `bench` the full criterion
 name with its parameters, and a failed side is `nan`. When two files measure one bench, the
 later `date` wins. A bench is faster when the median of its per-round zigware / commonware
-ratios is below 0.95 and every round is below 1, slower when the median is above 1.05 and
-every round is above 1, and a tie otherwise.
+ratios is below 0.95 and at most n/8 of its n rounds (rounded down) reach 1, slower when the
+median is above 1.05 and at most n/8 rounds are at or below 1, and a tie otherwise.

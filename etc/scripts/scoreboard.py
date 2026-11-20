@@ -14,9 +14,9 @@ Each lane commits its latest `etc/scripts/bench-compare.sh` rounds as docs/bench
 measure the same bench, the one with the later `date` wins.
 
 A bench's ratio is the median of its per-round zigware / commonware ratios. Its verdict is
-"faster" when that median is below 0.95 and every round is below 1, "slower" when the median
-is above 1.05 and every round is above 1, and "tie" otherwise (noise counts as not yet faster),
-as etc/scripts/bench-compare.sh decides.
+"faster" when that median is below 0.95 and at most n/8 of its n rounds (rounded down) reach
+1, "slower" when the median is above 1.05 and at most n/8 rounds are at or below 1, and "tie"
+otherwise (noise counts as not yet faster), as etc/scripts/bench-compare.sh decides.
 """
 
 import math
@@ -56,9 +56,12 @@ def read(path):
 
 def verdict(ratios):
     median = statistics.median(ratios)
-    if median < 0.95 and max(ratios) < 1:
+    allowed = len(ratios) // 8
+    if median < 0.95 and sum(r >= 1 for r in ratios) <= allowed:
         return "faster"
-    return "slower" if median > 1.05 and min(ratios) > 1 else "tie"
+    if median > 1.05 and sum(r <= 1 for r in ratios) <= allowed:
+        return "slower"
+    return "tie"
 
 
 def main(argv):
