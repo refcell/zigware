@@ -300,6 +300,13 @@ inline fn collapse(comptime n: usize, nodes: [8]Vec(n)) Cv {
         lane_cvs(1, nodes, &out);
         return out[0];
     }
+    return collapse(n / 2, parents_of(n, nodes));
+}
+
+/// The `n / 2` parents, in vector form, of the `n` sibling nodes `nodes`: lane `i` is the
+/// parent of nodes `2i` and `2i + 1`.
+inline fn parents_of(comptime n: usize, nodes: [8]Vec(n)) [8]Vec(n / 2) {
+    comptime assert(std.math.isPowerOfTwo(n) and n >= 2);
     const half = n / 2;
     comptime var low: [half]i32 = undefined;
     inline for (&low, 0..) |*index, lane| index.* = lane;
@@ -311,7 +318,7 @@ inline fn collapse(comptime n: usize, nodes: [8]Vec(n)) Cv {
         left[w] = @shuffle(u32, nodes[w], nodes[w], low);
         right[w] = @shuffle(u32, nodes[w], nodes[w], high);
     }
-    return collapse(half, parent_nodes(half, left, right));
+    return parent_nodes(half, left, right);
 }
 
 /// The chaining value of the aligned run of `chunks` whole chunks read from `cursor`, the
@@ -320,6 +327,11 @@ inline fn collapse(comptime n: usize, nodes: [8]Vec(n)) Cv {
 /// pending batch of every level its index completes, so every merge but the top `lanes`
 /// nodes runs at full width.
 fn run_cv(cursor: *Cursor, counter: u64, chunks: usize) Cv {
+    return collapse(lanes, run_top(cursor, counter, chunks));
+}
+
+/// The top `lanes` nodes, in vector form, of the run `run_cv` merges, before they collapse.
+fn run_top(cursor: *Cursor, counter: u64, chunks: usize) [8]Vec(lanes) {
     assert(std.math.isPowerOfTwo(chunks));
     assert(chunks >= lanes and chunks <= run_chunks_max);
     assert(counter % chunks == 0);
@@ -341,7 +353,25 @@ fn run_cv(cursor: *Cursor, counter: u64, chunks: usize) Cv {
     }
     const top = std.math.log2_int(usize, batches);
     assert(top < levels);
-    return collapse(lanes, pending[top]);
+    return pending[top];
+}
+
+/// The chaining values of two runs from their top nodes `a` and `b`, collapsed side by side:
+/// each level is one compression of both runs' nodes, so the narrow, latency-bound levels at
+/// the top of a run cost half as many compressions as collapsing each run alone.
+fn collapse_pair(a: [8]Vec(lanes), b: [8]Vec(lanes)) [2]Cv {
+    comptime assert(lanes >= 2);
+    var out: [2]Cv = undefined;
+    lane_cvs(2, collapse_to_two(lanes, parent_nodes(lanes, a, b)), &out);
+    return out;
+}
+
+/// Halves `nodes`, whose first half descends from one run and second from another, down to
+/// one node per run.
+inline fn collapse_to_two(comptime n: usize, nodes: [8]Vec(n)) [8]Vec(2) {
+    comptime assert(std.math.isPowerOfTwo(n) and n >= 2);
+    if (n == 2) return nodes;
+    return collapse_to_two(n / 2, parents_of(n, nodes));
 }
 
 /// Reads a message given as `parts` in order, chunk by chunk, copying a chunk only when it
@@ -404,6 +434,16 @@ const widths = blk: {
     break :blk list;
 };
 
+/// The compression width for a batch of `count` chunks: the narrowest power of two that
+/// covers it, except that with transposed loads a batch of more than 4 chunks pads to full
+/// width, which costs less than a narrower width's gathered loads (8 chunks: 1.31 us at 16
+/// lanes against 1.46 us at 8).
+fn width_of_batch(count: usize) usize {
+    assert(count > 0 and count <= lanes);
+    if (transposed and count > 4) return lanes;
+    return std.math.ceilPowerOfTwoAssert(usize, count);
+}
+
 /// Chaining values of `out.len` whole chunks read from `cursor`, the first at chunk `counter`,
 /// compressed `lanes` at a time. A short last batch compresses at the narrowest width that
 /// covers it, padded with copies of its last chunk whose outputs are dropped: one compression
@@ -415,8 +455,8 @@ fn chunks_cvs(cursor: *Cursor, counter: u64, out: []Cv) void {
     while (done < out.len) {
         // `usize`, not the narrowed type `@min` gives: `2 * count` must not overflow.
         const count: usize = @min(lanes, out.len - done);
-        const width: usize = @min(lanes, std.math.ceilPowerOfTwoAssert(usize, count));
-        assert(width >= count and width < 2 * count);
+        const width: usize = width_of_batch(count);
+        assert(width >= count and width <= lanes);
         var chunks: [lanes][*]const u8 = undefined;
         for (chunks[0..count], scratch[0..count]) |*chunk, *buffer| {
             chunk.* = cursor.take(chunk_len, buffer).ptr;
@@ -591,12 +631,29 @@ fn hash_rest(parts: []const []const u8, len: usize, offset: usize, rest: *Rest) 
     var cursor = Cursor.at(parts, offset);
     rest.run_count = 0;
     var done: usize = 0;
+    // Runs of at least `lanes` chunks collapse in pairs (`collapse_pair`).
+    var held: ?struct { top: [8]Vec(lanes), start: u64 } = null;
     while (done < whole) {
         const run = next_run(first, whole, done, partial > 0);
         if (run < lanes) break;
         assert((first + done) % run == 0);
-        rest.push(run_cv(&cursor, first + done, run), first + done);
+        const top = run_top(&cursor, first + done, run);
+        if (lanes == 1) {
+            rest.push(collapse(lanes, top), first + done);
+        } else if (held) |pair| {
+            const cvs = collapse_pair(pair.top, top);
+            rest.push(cvs[0], pair.start);
+            rest.push(cvs[1], first + done);
+            held = null;
+        } else {
+            held = .{ .top = top, .start = first + done };
+        }
         done += run;
+    }
+    if (held) |pair| rest.push(collapse(lanes, pair.top), pair.start);
+    if (transposed and whole - done > 4) {
+        rest_runs_transposed(&cursor, first, whole, done, partial > 0, rest);
+        done = whole;
     }
     if (done < whole) {
         var cvs: [lanes]Cv = undefined;
@@ -624,6 +681,51 @@ fn hash_rest(parts: []const []const u8, len: usize, offset: usize, rest: *Rest) 
     var scratch: [chunk_len]u8 = undefined;
     rest.last_counter = first + whole;
     rest.last = last_chunk_cv(cursor.take(partial, &scratch), rest.last_counter);
+}
+
+/// The runs of a rest's last `whole - done` whole chunks, 5 to `lanes` of them, from one
+/// padded 16-lane batch merged in vector form: level `l` of the merge holds every aligned run
+/// of `2^l` chunks, so each run's chaining value is one lane of one level, and no level
+/// gathers its words one at a time (16 KiB: two runs of 8 in 230 ns instead of 470).
+fn rest_runs_transposed(
+    cursor: *Cursor,
+    first: u64,
+    whole: usize,
+    done_before: usize,
+    partial: bool,
+    rest: *Rest,
+) void {
+    comptime assert(transposed and lanes == 16);
+    const count = whole - done_before;
+    assert(count > 4 and count <= lanes);
+    const start = first + done_before;
+    assert(start % lanes == 0);
+    var scratch: [lanes][chunk_len]u8 = undefined;
+    var chunks: [lanes][*]const u8 = undefined;
+    for (chunks[0..count], scratch[0..count]) |*chunk, *buffer| {
+        chunk.* = cursor.take(chunk_len, buffer).ptr;
+    }
+    for (chunks[count..]) |*chunk| chunk.* = chunks[count - 1];
+    // Levels 0 to 3 hold runs of 1 to 8 chunks; padded lanes' nodes are never read.
+    var levels: [4][lanes]Cv = undefined;
+    const level0 = chunk_nodes(16, &chunks, start);
+    lane_cvs(16, level0, &levels[0]);
+    const level1 = parents_of(16, level0);
+    lane_cvs(8, level1, levels[1][0..8]);
+    const level2 = parents_of(8, level1);
+    lane_cvs(4, level2, levels[2][0..4]);
+    lane_cvs(2, parents_of(4, level2), levels[3][0..2]);
+    var done = done_before;
+    while (done < whole) {
+        const run = next_run(first, whole, done, partial);
+        assert(run < lanes);
+        const offset = done - done_before;
+        assert(offset % run == 0);
+        const level = std.math.log2_int(usize, run);
+        rest.push(levels[level][offset / run], first + done);
+        done += run;
+    }
+    assert(done == whole);
 }
 
 /// Item `index` of a round: subtree `index`, or, at index `whole`, the rest, which it writes
