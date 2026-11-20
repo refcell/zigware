@@ -747,8 +747,9 @@ fn Suite(comptime Context: type) type {
                 try testing.expectEqualStrings("success", try ctx.timeout(ms(100), success, .{}));
                 // The function outlasts the timeout.
                 try testing.expectError(error.Timeout, ctx.timeout(ms(50), never, .{ctx.io()}));
-                // A sleep shorter than the timeout completes.
-                try (try ctx.timeout(ms(100), Context.sleep, .{ &ctx, ms(50) }));
+                // A sleep shorter than the timeout completes. Commonware uses a 100 ms timeout;
+                // a loaded 3-vCPU macOS runner overshot the 50 ms margin on the real clock.
+                try (try ctx.timeout(ms(1_000), Context.sleep, .{ &ctx, ms(50) }));
             }
         }.body;
 
