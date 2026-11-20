@@ -977,6 +977,29 @@ three alternating rounds at a load of 50 to 69:
   than the value. The branch was dropped. A dedicated Montgomery square (a 21-product wide
   square, then `reduce_wide`) was no faster than `mul` either (39 against 38 ns).
 
+## glue: transfers::settle with nonces, provisional (2026-11-20, consensus-simplex lane)
+
+`transfers::settle/transfers=32768 accounts=4096 effects=nonce` read 1.9× commonware on
+`smp_allocator`. Thread CPU timing put the cause in the allocator, not the settle loop. Of
+settle's 38–50 µs, the effects loop took 14 µs. Allocating and memsetting the 4096 × 24-byte
+slot array took 21 µs, because `smp_allocator` unmaps and remaps a block that size on every
+call. The bench harness's `allocator.Heap` (0ea389fd) reuses that block in 615 ns with no
+page faults, and 9f4eeba4's thread caches remove its per-allocation mutex. Commonware's
+settle does the same work (`vec![Slot::Keep; len]`, then `try_run_batches`), so no settle
+code changed.
+
+One pair per row, binaries built after 9f4eeba4, run under the old bench lock at a 1-minute
+load of about 70. It is a single round, not yet ABBA, so these are not verdicts:
+
+| bench | parameters | commonware | zigware | zigware / commonware |
+|---|---|---|---|---|
+| `transfers::settle` | `transfers=32768 accounts=4096 effects=nonce conc=1` | 27.7 µs | 21.7 µs | 0.78× |
+| `transfers::settle` | `transfers=32768 accounts=4096 effects=nonce conc=8` | 31.9 µs | 20.4 µs | 0.64× |
+| `transfers::settle` | `transfers=32768 accounts=4096 effects=none conc=1` | 13.1 µs | 8.06 µs | 0.62× |
+| `transfers::settle` | `transfers=32768 accounts=4096 effects=none conc=8` | 9.63 µs | 6.77 µs | 0.70× |
+
+The ABBA rounds for every glue `transfers` row follow once the bls12381 runs finish.
+
 ## Coding: Reed-Solomon scheme and engines (2026-11-20, coding lane)
 
 commonware's `coding_scheme_times` (`reed_solomon::encode`, `reed_solomon::decode`) and
