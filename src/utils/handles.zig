@@ -88,6 +88,17 @@ fn mask_of(lanes: @Vector(WINDOW, bool)) Mask {
     return @as(u16, @bitCast(lanes));
 }
 
+/// A probe at `displacement` stops at a slot when this is at most `displacement`: one past the
+/// entry's displacement, or 0 for `EMPTY`, whose metadata wraps (no entry's reaches 2^32 - 256).
+/// One compare replaces the empty test and the closer-to-home test.
+fn stop_key(meta: u32) u32 {
+    return (meta +% DISPLACEMENT_UNIT) >> 8;
+}
+
+fn stop_keys(window: Lanes) Lanes {
+    return (window +% @as(Lanes, @splat(DISPLACEMENT_UNIT))) >> @splat(8);
+}
+
 /// One probe step from `slot` for `hash` at `displacement`: a whole window when it fits, else
 /// one slot. `matches` are bits from `slot` before the run ends; `scanned` counts the slots
 /// consumed, which end at the run's stop when `stopped`.
@@ -100,8 +111,7 @@ fn probe(metas: []const u32, slot: usize, hash: u64, displacement: u32) Probe {
         const fingerprint: u32 = @intCast(hash >> FINGERPRINT_SHIFT);
         const expected = (displacements << @splat(8)) | @as(Lanes, @splat(fingerprint));
         const matches = mask_of(window == expected);
-        const stops = mask_of(window == @as(Lanes, @splat(EMPTY))) |
-            mask_of((window >> @splat(8)) < displacements);
+        const stops = mask_of(stop_keys(window) <= displacements);
         assert(matches & stops == 0);
         if (stops == 0) return .{ .matches = matches, .stopped = false, .scanned = WINDOW };
         const end: u32 = @ctz(stops);
@@ -110,7 +120,7 @@ fn probe(metas: []const u32, slot: usize, hash: u64, displacement: u32) Probe {
         return .{ .matches = matches, .stopped = true, .scanned = end };
     }
     const meta = metas[slot];
-    if (meta == EMPTY or meta >> 8 < displacement) {
+    if (stop_key(meta) <= displacement) {
         return .{ .matches = 0, .stopped = true, .scanned = 0 };
     }
     const matched = meta == slot_meta(hash, displacement);
