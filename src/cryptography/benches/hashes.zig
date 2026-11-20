@@ -111,7 +111,9 @@ fn bench_hash_many(
     var rng = utils.test_rng();
     const pool = try parallel.ThreadPool.create(gpa, runner.io, .{ .threads = concurrency });
     defer pool.destroy();
-    const rayon = parallel.Rayon.init(pool);
+    // commonware's `Rayon::new` decides serial or parallel with its adaptive policy.
+    var policy = parallel.Policy.init(runner.io);
+    const rayon = parallel.Rayon.init(pool).with_policy(&policy);
     var storage: [128][]u8 = undefined;
     var messages: [128][]const u8 = undefined;
     var digests: [128]H.Digest = undefined;
@@ -281,9 +283,10 @@ pub fn run(runner: *bench.Runner) !void {
         .threads = concurrency,
     });
     defer pool.destroy();
+    var policy = parallel.Policy.init(runner.io);
     try bench_hash_message(Blake3, runner, "blake3::hash_message", &.{
         8, 12, 16, 17, 18, 19, 20, 24,
-    }, parallel.Rayon.init(pool));
+    }, parallel.Rayon.init(pool).with_policy(&policy));
     try bench_hash_message(Sha256, runner, "sha256::hash_message", &.{
         8, 12, 16, 19, 20, 24,
     }, null);

@@ -532,3 +532,7 @@ hold whole units of lanes" over coding's lane-aware `hash_batches`, and `sha512/
   (one root compression; std's setup and finalize cost more), so 32 bytes take about 99 ns
   instead of 133 ns. The `Blake3.hash` test lengths gain 32 and 65; hashing only the first
   part is caught.
+- 2026-11-20: the hash benches' `Rayon` strategies carry an adaptive `Policy`, as commonware's
+  `Rayon::new` does, so small batches run serially; without it sha512 `hash_many` conc=8 rows
+  of 96 B to 1 KiB messages read 1.5 to 3.6x commonware (count=9 len=96: 3.74 µs, now 0.83 µs
+  against 1.05 µs).
