@@ -166,6 +166,11 @@ Read this whole file before you change anything. These rules are not optional.
   assert that calls a hash, a scan, or `contains` runs that work on the hot path
   (bloomfilter `insert` hashed every item twice, f56321ac). Assert the cheap invariant
   directly, or put the expensive check behind `std.debug.runtime_safety`.
+- On Darwin, `std.testing.allocator` captures a stack trace on every free, and the MachO
+  unwinder takes a cancelable lock that consumes a task's pending cancel. A free after a
+  cancel then makes the next `checkCancel` pass (the macOS "destroying a pool in a canceled
+  task" failure, d301a875). Tests that free after a cancel use an allocator without stack
+  traces.
 - The build runner prints `run test test-X stderr` and a `failed command: ...` line for any
   test step that wrote to stderr, even when every test in it passed. That alone is not a
   failure: look for a step line with `fail`, `crash`, `timeout`, or `leaks`, an `error:`
