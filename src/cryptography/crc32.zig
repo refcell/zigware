@@ -8,12 +8,15 @@
 //! has it and a table otherwise. The two keep their running state differently (the hardware
 //! wrapper stores the checksum so far, the table version the pre-xor register); both start
 //! from the state of the empty checksum, so `state = checksum ^ init().crc` covers both.
+//! Inputs of 512 bytes or more fold with VPCLMULQDQ when the target has it (`crc32_fold.zig`,
+//! as commonware's `crc-fast` does); the checksum is the same either way.
 
 const std = @import("std");
 const codec = @import("codec");
 const assert = std.debug.assert;
 const hasher = @import("hasher.zig");
 const digest = @import("digest.zig");
+const fold = @import("crc32_fold.zig");
 
 pub const Core = std.hash.crc.@"CRC-32/ISCSI";
 
@@ -35,6 +38,7 @@ pub const Crc32 = struct {
 
     /// The CRC-32C checksum of `data`.
     pub fn checksum(data: []const u8) u32 {
+        if (fold.available and data.len >= fold.min_len) return fold.update(0, data);
         var core = Core.init();
         core.update(data);
         return core.final();
@@ -49,6 +53,10 @@ pub const Crc32 = struct {
     }
 
     pub fn update(self: *Self, bytes: []const u8) void {
+        if (fold.available and bytes.len >= fold.min_len) {
+            self.core.crc = fold.update(self.core.final(), bytes) ^ Core.init().crc;
+            return;
+        }
         self.core.update(bytes);
     }
 
@@ -211,6 +219,26 @@ test "crc32 resume continues the stream and finalize resets" {
         var resumed = Crc32.resume_from(value);
         try testing.expectEqual(value, resumed.finalize().as_u32());
     }
+}
+
+test "crc32 long inputs match the bitwise reference across chunkings" {
+    var buffer: [70_000]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(0xc3c32);
+    prng.random().bytes(&buffer);
+    const expected = reference(&buffer);
+    try testing.expectEqual(expected, Crc32.checksum(&buffer));
+    for ([_]usize{ 511, 512, 513, 4096, 65_540 }) |chunk| {
+        var h = Crc32.init();
+        var offset: usize = 0;
+        while (offset < buffer.len) : (offset += chunk) {
+            h.update(buffer[offset..@min(offset + chunk, buffer.len)]);
+        }
+        try testing.expectEqual(expected, h.finalize().as_u32());
+    }
+}
+
+test {
+    _ = fold;
 }
 
 test "crc32 fuzz hasher entrypoints" {
