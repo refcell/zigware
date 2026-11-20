@@ -733,6 +733,61 @@ fn Point(comptime kind: PointKind) type {
             return .{ .point = point };
         }
 
+        /// The point `hash_to_group_parts` clears, on the curve but not yet in the group.
+        /// Clearing multiplies by a fixed scalar, so a sum of these cleared once with
+        /// `clear_cofactor` equals the sum of their hashes.
+        pub fn map_to_group_parts(dst: []const u8, parts: []const []const u8) Self {
+            assert(dst.len <= arithmetic.map.dst_length_max);
+            // The dst length is checked above and the expansion length is fixed.
+            const point = switch (kind) {
+                .g1 => arithmetic.map.map_to_g1_jacobian_parts(parts, dst),
+                .g2 => arithmetic.map.map_to_g2_jacobian_parts(parts, dst),
+            } catch unreachable;
+            return .{ .point = point };
+        }
+
+        /// RFC 9380 clear_cofactor: the point times the group's effective cofactor.
+        pub fn clear_cofactor(self: Self) Self {
+            const point = switch (kind) {
+                .g1 => arithmetic.g1.clear_cofactor(self.point),
+                .g2 => arithmetic.g2.clear_cofactor(self.point),
+            };
+            return .{ .point = point };
+        }
+
+        /// A running sum of messages' `map_to_group_parts` points. G1 messages map in
+        /// `arithmetic.map.G1Batch` batches (lane-wise where the target has IFMA), so this is
+        /// variable time: for public messages only.
+        pub const MapSum = struct {
+            sum: Jacobian = Jacobian.identity,
+            batch: if (kind == .g1) arithmetic.map.G1Batch else void =
+                if (kind == .g1) .{} else {},
+
+            /// Adds the map of the concatenation of `parts` under `dst`.
+            pub fn push(self: *MapSum, dst: []const u8, parts: []const []const u8) void {
+                if (kind == .g2) {
+                    self.sum = self.sum.add(map_to_group_parts(dst, parts).point);
+                    return;
+                }
+                assert(dst.len <= arithmetic.map.dst_length_max);
+                // The dst length is checked above and the expansion length is fixed.
+                self.batch.push(parts, dst) catch unreachable;
+                if (self.batch.is_full()) self.sum = self.batch.sum_into(self.sum);
+            }
+
+            /// Adds `other`'s messages.
+            pub fn merge(self: *MapSum, other: MapSum) void {
+                var rest = other;
+                self.sum = rest.finish().point.add(self.finish().point);
+            }
+
+            /// The sum of every message's point so far, not yet cleared.
+            pub fn finish(self: *MapSum) Self {
+                if (kind == .g1) self.sum = self.batch.sum_into(self.sum);
+                return .{ .point = self.sum };
+            }
+        };
+
         pub fn arbitrary(u: *Unstructured) minifuzz.Error!Self {
             return generator.mul(try ScalarType.arbitrary(u));
         }

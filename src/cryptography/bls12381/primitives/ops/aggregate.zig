@@ -94,25 +94,31 @@ pub fn combine_messages(
     strategy: anytype,
 ) Message(V) {
     assert(messages.len > 0);
-    return strategy.fold(messages, CombineMessages(V){});
+    // Clearing the cofactor multiplies by a fixed scalar, so the sum of the messages' hashes
+    // is the sum of their uncleared points cleared once: one clearing instead of one per
+    // message, the same point.
+    var sum = strategy.fold(messages, CombineMessages(V){});
+    return .{ .value = sum.finish().clear_cofactor() };
 }
 
-/// `combine_messages`' fold: each chunk sums its messages' hashes, and chunk sums add.
+/// `combine_messages`' fold: each chunk sums its messages' uncleared hash points (in
+/// batches, `MapSum`), and chunk sums add.
 fn CombineMessages(comptime V: type) type {
+    const Sum = V.Signature.MapSum;
     return struct {
-        pub fn identity(_: @This()) Message(V) {
-            return .zero;
+        pub fn identity(_: @This()) Sum {
+            return .{};
         }
 
-        pub fn fold(_: @This(), acc: Message(V), item: *const NamespacedMessage) Message(V) {
+        pub fn fold(_: @This(), acc: Sum, item: *const NamespacedMessage) Sum {
             var sum = acc;
-            sum.add(ops.hash_with_namespace(V, V.message, item.namespace, item.message));
+            ops.map_with_namespace(V, &sum, V.message, item.namespace, item.message);
             return sum;
         }
 
-        pub fn reduce(_: @This(), a: Message(V), b: Message(V)) Message(V) {
+        pub fn reduce(_: @This(), a: Sum, b: Sum) Sum {
             var sum = a;
-            sum.add(b.value);
+            sum.merge(b);
             return sum;
         }
     };

@@ -377,6 +377,28 @@ test "aggregate: combine_messages across pools equals the sequential sum" {
     }
 }
 
+// combine_messages clears the cofactor once on the sum of uncleared hash points; that must be
+// the sum of the messages' own hashes, for one message and for many.
+test "aggregate: combine_messages equals the sum of the messages' hashes" {
+    var rng = utils.test_rng();
+    var bytes: [9][24]u8 = undefined;
+    var messages: [9]aggregate.NamespacedMessage = undefined;
+    for (&bytes, &messages) |*message, *item| {
+        rng.fill_bytes(message);
+        item.* = .{ .namespace = "combine", .message = message };
+    }
+    inline for (.{ MinPk, MinSig }) |V| {
+        for ([_]usize{ 1, 2, 9 }) |count| {
+            var want: aggregate.Message(V) = .zero;
+            for (messages[0..count]) |item| {
+                want.add(ops.hash_with_namespace(V, V.message, item.namespace, item.message));
+            }
+            const got = aggregate.combine_messages(V, messages[0..count], parallel.sequential);
+            try testing.expect(want.eql(got));
+        }
+    }
+}
+
 test "batch: same signer accepts valid and rejects identity and wrong signatures" {
     inline for (.{ MinPk, MinSig }) |V| {
         const Entry = batch.SignerEntry(V);

@@ -11,6 +11,7 @@ const assert = std.debug.assert;
 const fields = @import("fields.zig");
 const g1 = @import("g1.zig");
 const g2 = @import("g2.zig");
+const fp8 = @import("fp8.zig");
 const sha256 = @import("sha256.zig");
 
 const Fp = fields.Fp;
@@ -136,16 +137,19 @@ fn sswu_y_generic(comptime F: type, comptime params: SswuParameters(F), z_u2: F,
 /// gx1 is not a square, to -gx1; then gx2 = (Z u^3)^2 Z gx1 has the root
 /// Z u^3 sqrt(-Z) y' because Z gx1 = (-Z)(-gx1). Updates `x` to x2 in that case.
 fn sswu_y_fp(comptime params: SswuParameters(Fp), u: Fp, z_u2: Fp, x: *Fp) Fp {
-    const sqrt_minus_z = comptime blk: {
-        @setEvalBranchQuota(10_000_000);
-        break :blk params.z.neg().sqrt().?;
-    };
+    const sqrt_minus_z = comptime sqrt_neg(params.z);
     const gx1 = curve_rhs(Fp, params, x.*);
     const candidate = gx1.pow((fields.p + 1) / 4);
     if (candidate.square().eql(gx1)) return candidate;
     assert(candidate.square().eql(gx1.neg()));
     x.* = z_u2.mul(x.*);
     return params.z.mul(u.square().mul(u)).mul(sqrt_minus_z).mul(candidate);
+}
+
+/// sqrt(-z) for a compile-time z whose negation is a square.
+fn sqrt_neg(comptime z: Fp) Fp {
+    @setEvalBranchQuota(10_000_000);
+    return z.neg().sqrt().?;
 }
 
 fn curve_rhs(comptime F: type, comptime params: SswuParameters(F), x: F) F {
@@ -331,12 +335,29 @@ pub fn hash_to_g1_parts(parts: []const []const u8, dst: []const u8) ExpandError!
 
 /// hash_to_g1_parts in Jacobian coordinates, for callers that keep points projective.
 pub fn hash_to_g1_jacobian_parts(parts: []const []const u8, dst: []const u8) ExpandError!g1.G1 {
-    const u = try hash_to_field_fp_parts(parts, dst);
-    const result = g1.clear_cofactor(sum_mapped(g1.G1, map_pair(Fp, g1_sswu, g1_isogeny, u)));
+    const result = g1.clear_cofactor(try map_to_g1_jacobian_parts(parts, dst));
     // A subgroup check is a third of the hash. ReleaseFast never checks an assert, yet LLVM
     // keeps this one's work, so it runs only in builds that check asserts.
     if (std.debug.runtime_safety) assert(g1.is_in_subgroup(result.to_affine()));
     return result;
+}
+
+/// The point `hash_to_g1_jacobian_parts` clears, on the curve but not yet in G1: the sum of
+/// both field elements' mapped points. Clearing multiplies by the fixed h_eff, so a caller
+/// summing many hashes may sum these and clear the sum once.
+pub fn map_to_g1_jacobian_parts(parts: []const []const u8, dst: []const u8) ExpandError!g1.G1 {
+    // One message fills two of a batch's lanes, which still beats the scalar map.
+    var batch: G1Batch = .{};
+    try batch.push(parts, dst);
+    var point: [1]g1.G1 = undefined;
+    batch.map_into(&point);
+    return point[0];
+}
+
+/// The point `hash_to_g2_jacobian_parts` clears, as `map_to_g1_jacobian_parts` for G2.
+pub fn map_to_g2_jacobian_parts(parts: []const []const u8, dst: []const u8) ExpandError!g2.G2 {
+    const u = try hash_to_field_fp2_parts(parts, dst);
+    return sum_mapped(g2.G2, map_pair(Fp2, g2_sswu, g2_isogeny, u));
 }
 
 /// The sum of two `map_pair` results as a `Point` (g1.G1 or g2.G2).
@@ -354,6 +375,165 @@ fn sum_mapped(comptime Point: type, mapped: anytype) Point {
     return sum;
 }
 
+/// Maps hashed messages to G1 in batches, each message's point the one
+/// `map_to_g1_jacobian_parts` gives. On a target with AVX-512 IFMA a batch maps on fp8's
+/// lanes, two field elements per message; elsewhere it maps message by message. Variable
+/// time, like every map here: for public messages only, never for signing.
+pub const G1Batch = G1BatchOn(if (fp8.ifma_available) .ifma else null);
+
+/// `G1Batch` on fp8 lanes of `backend`, or the scalar map when null.
+pub fn G1BatchOn(comptime backend: ?fp8.Backend) type {
+    return struct {
+        const Self = @This();
+
+        /// Messages a batch holds.
+        pub const capacity = fp8.lanes / 2;
+
+        u: [fp8.lanes]Fp = undefined,
+        count: usize = 0,
+
+        pub fn is_full(batch: *const Self) bool {
+            assert(batch.count <= capacity);
+            return batch.count == capacity;
+        }
+
+        /// Hashes a message (the concatenation of `parts`) to its two field elements.
+        pub fn push(batch: *Self, parts: []const []const u8, dst: []const u8) ExpandError!void {
+            assert(batch.count < capacity);
+            const u = try hash_to_field_fp_parts(parts, dst);
+            batch.u[2 * batch.count] = u[0];
+            batch.u[2 * batch.count + 1] = u[1];
+            batch.count += 1;
+        }
+
+        /// Maps the pending messages into `out`, one point per message in push order, and
+        /// empties the batch.
+        pub fn map_into(batch: *Self, out: []g1.G1) void {
+            assert(out.len == batch.count);
+            defer batch.count = 0;
+            if (batch.count == 0) return;
+            if (backend == null) {
+                for (out, 0..) |*point, index| {
+                    const u = batch.u[2 * index ..][0..2].*;
+                    point.* = sum_mapped(g1.G1, map_pair(Fp, g1_sswu, g1_isogeny, u));
+                }
+                return;
+            }
+            // Unused lanes repeat the first element; their points are dropped.
+            for (batch.u[2 * batch.count ..]) |*u| u.* = batch.u[0];
+            const mapped = map_g1_lanes(fp8.Lanes(backend.?), &batch.u);
+            for (out, 0..) |*point, index| {
+                point.* = sum_mapped(g1.G1, mapped[2 * index ..][0..2]);
+            }
+        }
+
+        /// Maps the pending messages and returns the sum of their points; empties the batch.
+        pub fn sum_into(batch: *Self, sum: g1.G1) g1.G1 {
+            var points: [capacity]g1.G1 = undefined;
+            const count = batch.count;
+            batch.map_into(points[0..count]);
+            var result = sum;
+            for (points[0..count]) |point| result = result.add(point);
+            return result;
+        }
+    };
+}
+
+/// SSWU then the 11-isogeny for every lane of `u` on `L` (an `fp8.Lanes`): lane i is the
+/// point `isogeny(map_to_curve_sswu(u[i]))` gives, null for the identity.
+fn map_g1_lanes(comptime L: type, u: *const [fp8.lanes]Fp) [fp8.lanes]?[2]Fp {
+    const params = g1_sswu;
+    const lane_u = L.from_fp(u);
+    const z = L.constant(params.z);
+    const u_squared = lane_u.square();
+    const z_u2 = z.mul(u_squared);
+    const denominator = z_u2.square().add(z_u2);
+    // A zero denominator inverts to zero, and that lane takes x1 = B / (Z A).
+    const tv1 = inverse_lanes(L, denominator);
+    const x1 = L.select(
+        denominator.is_zero(),
+        L.constant(params.b_over_za),
+        L.constant(params.minus_b_over_a).mul(L.one.add(tv1)),
+    );
+    const gx1 = x1.square().add(L.constant(params.a)).mul(x1).add(L.constant(params.b));
+    // As `sswu_y_fp`: gx1^((p+1)/4) is sqrt(gx1), or sqrt(-gx1) when gx1 is not a square.
+    const candidate = gx1.pow((fields.p + 1) / 4);
+    const square = candidate.square().eql(gx1);
+    const x = L.select(square, x1, z_u2.mul(x1));
+    const root_minus_z = L.constant(comptime sqrt_neg(params.z));
+    const other = z.mul(u_squared.mul(lane_u)).mul(root_minus_z).mul(candidate);
+    const root = L.select(square, candidate, other);
+    const y = L.select(lane_u.sgn0() != root.sgn0(), root.neg(), root);
+    if (std.debug.runtime_safety) assert(@reduce(.And, y.square().eql(curve_rhs_lanes(L, x))));
+    return isogeny_g1_lanes(L, x, y);
+}
+
+/// Every lane's inverse (zero for zero) from one scalar safegcd inversion, by Montgomery's
+/// trick: a Fermat power on the lanes costs some 450 lane products, this about 30 Fp ones.
+fn inverse_lanes(comptime L: type, x: L) L {
+    const values = x.to_fp();
+    var prefix: [fp8.lanes]Fp = undefined;
+    var product = Fp.one;
+    for (values, &prefix) |value, *before| {
+        before.* = product;
+        if (!value.is_zero()) product = product.mul(value);
+    }
+    var inverse = product.inverse();
+    var out: [fp8.lanes]Fp = undefined;
+    var lane: usize = fp8.lanes;
+    while (lane > 0) {
+        lane -= 1;
+        if (values[lane].is_zero()) {
+            out[lane] = Fp.zero;
+            continue;
+        }
+        out[lane] = inverse.mul(prefix[lane]);
+        inverse = inverse.mul(values[lane]);
+    }
+    assert(inverse.mul(product).is_zero() == product.is_zero());
+    return L.from_fp(&out);
+}
+
+fn curve_rhs_lanes(comptime L: type, x: L) L {
+    return x.square().add(L.constant(g1_sswu.a)).mul(x).add(L.constant(g1_sswu.b));
+}
+
+/// The G1 isogeny map lane-wise; a zero denominator gives the identity (null).
+fn isogeny_g1_lanes(comptime L: type, x: L, y: L) [fp8.lanes]?[2]Fp {
+    const x_num = polynomial_lanes(L, g1_isogeny.x_numerator, false, x);
+    const x_den = polynomial_lanes(L, g1_isogeny.x_denominator, true, x);
+    const y_num = polynomial_lanes(L, g1_isogeny.y_numerator, false, x);
+    const y_den = polynomial_lanes(L, g1_isogeny.y_denominator, true, x);
+    const denominators = x_den.mul(y_den);
+    const inverse = inverse_lanes(L, denominators);
+    const out_x = x_num.mul(y_den).mul(inverse).to_fp();
+    const out_y = y.mul(y_num).mul(x_den).mul(inverse).to_fp();
+    const identity: [fp8.lanes]bool = denominators.is_zero();
+    var out: [fp8.lanes]?[2]Fp = undefined;
+    for (&out, identity, out_x, out_y) |*point, empty, px, py| {
+        point.* = if (empty) null else .{ px, py };
+    }
+    return out;
+}
+
+/// `polynomial`, or `polynomial_monic` when `monic`, lane-wise with compile-time coefficients.
+fn polynomial_lanes(
+    comptime L: type,
+    comptime coefficients: []const Fp,
+    comptime monic: bool,
+    x: L,
+) L {
+    comptime assert(coefficients.len > 0);
+    const top = if (monic) coefficients.len else coefficients.len - 1;
+    var accumulator = if (monic) L.one else L.constant(coefficients[top]);
+    comptime var index = top;
+    inline while (index > 0) {
+        index -= 1;
+        accumulator = accumulator.mul(x).add(L.constant(coefficients[index]));
+    }
+    return accumulator;
+}
+
 /// hash_to_curve for BLS12381G2_XMD:SHA-256_SSWU_RO_ with a caller-chosen DST.
 pub fn hash_to_g2(message: []const u8, dst: []const u8) ExpandError!g2.Affine {
     return hash_to_g2_parts(&.{message}, dst);
@@ -366,8 +546,7 @@ pub fn hash_to_g2_parts(parts: []const []const u8, dst: []const u8) ExpandError!
 
 /// hash_to_g2_parts in Jacobian coordinates, for callers that keep points projective.
 pub fn hash_to_g2_jacobian_parts(parts: []const []const u8, dst: []const u8) ExpandError!g2.G2 {
-    const u = try hash_to_field_fp2_parts(parts, dst);
-    const result = g2.clear_cofactor(sum_mapped(g2.G2, map_pair(Fp2, g2_sswu, g2_isogeny, u)));
+    const result = g2.clear_cofactor(try map_to_g2_jacobian_parts(parts, dst));
     // A subgroup check is a third of the hash. ReleaseFast never checks an assert, yet LLVM
     // keeps this one's work, so it runs only in builds that check asserts.
     if (std.debug.runtime_safety) assert(g2.is_in_subgroup(result.to_affine()));
@@ -673,4 +852,94 @@ test "map: SSWU constants and exceptional inputs" {
     // u = 0 takes the tv1 = 0 branch.
     try testing.expect(g1.is_in_subgroup(map_fp_to_g1(Fp.zero)));
     try testing.expect(g2.is_in_subgroup(map_fp2_to_g2(Fp2.zero)));
+}
+
+const batch_backends = .{ G1BatchOn(null), G1BatchOn(.portable), G1Batch };
+
+test "map: G1 batches give the RFC 9380 J.9.1 hashes on every backend" {
+    const dst = "QUUX-V01-CS02-with-BLS12381G1_XMD:SHA-256_SSWU_RO_";
+    inline for (batch_backends) |Batch| {
+        // Five vectors fill one batch and leave one message for a partial batch.
+        var lines = std.mem.tokenizeScalar(u8, @embedFile("vectors/rfc9380_g1.txt"), '\n');
+        var buffers: [5][1024]u8 = undefined;
+        var vectors: [5]VectorFields = undefined;
+        var batch: Batch = .{};
+        var points: [5]g1.G1 = undefined;
+        var mapped: usize = 0;
+        for (&vectors, &buffers) |*vector, *buffer| {
+            vector.* = try split_vector(lines.next().?, buffer);
+            try batch.push(&.{vector.message}, dst);
+            if (batch.is_full()) {
+                batch.map_into(points[mapped..][0..Batch.capacity]);
+                mapped += Batch.capacity;
+            }
+        }
+        batch.map_into(points[mapped..]);
+        try testing.expect(lines.next() == null);
+        for (vectors, points) |vector, point| {
+            const hashed = g1.clear_cofactor(point).to_affine();
+            try testing.expect(hashed.x.eql(try parse_fp(vector.columns[0])));
+            try testing.expect(hashed.y.eql(try parse_fp(vector.columns[1])));
+        }
+    }
+}
+
+test "map: G1 lanes match the scalar map on edge and random inputs" {
+    var prng = @import("prng.zig").Prng.init(0x6d6170);
+    inline for (.{ fp8.Lanes(.portable), fp8.Fp8 }) |L| {
+        for (0..6) |round| {
+            var u: [fp8.lanes]Fp = undefined;
+            for (&u) |*value| value.* = Fp.from_int(prng.int(Fp.Int) % fields.p);
+            // u = 0 takes the zero-denominator branch; 1 and -1 differ only in sign.
+            if (round == 0) {
+                u[0] = Fp.zero;
+                u[1] = Fp.one;
+                u[2] = Fp.one.neg();
+            }
+            for (map_g1_lanes(L, &u), u) |lane, value| {
+                const want = isogeny(Fp, g1_isogeny, map_to_curve_sswu(Fp, g1_sswu, value));
+                try testing.expect(want != null and lane != null);
+                try testing.expect(want.?[0].eql(lane.?[0]) and want.?[1].eql(lane.?[1]));
+            }
+        }
+    }
+}
+
+test "map: G1 batch sums equal the sum of the messages' maps" {
+    const dst = "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
+    inline for (batch_backends) |Batch| {
+        var batch: Batch = .{};
+        var want = g1.G1.identity;
+        var sum = g1.G1.identity;
+        const messages = [_][]const u8{ "a", "bc", "def" };
+        for (messages) |message| {
+            want = want.add(try map_to_g1_jacobian_parts(&.{message}, dst));
+            try batch.push(&.{message}, dst);
+        }
+        sum = batch.sum_into(sum);
+        try testing.expect(batch.count == 0);
+        try testing.expect(sum.eql(want));
+    }
+}
+
+test "map: fp8's variable-time lanes stay behind the map of hashed messages" {
+    // The lanes branch on their values (square roots, inversions), so no other arithmetic file
+    // imports fp8.zig: secret scalars (signing, keys, shares) never reach them.
+    const siblings = .{
+        "curve.zig", "fields.zig",  "g1.zig",   "g2.zig",      "montgomery.zig",
+        "msm.zig",   "pairing.zig", "prng.zig", "safegcd.zig", "sha256.zig",
+        "root.zig",
+    };
+    inline for (siblings) |name| {
+        try testing.expect(std.mem.indexOf(u8, @embedFile(name), "fp8") == null);
+    }
+    // Here they run once, on the field elements `G1BatchOn.push` hashes from messages.
+    const source = @embedFile("map.zig");
+    const code = source[0..std.mem.indexOf(u8, source, "\nconst testing = std.testing;").?];
+    try testing.expectEqual(1, std.mem.count(u8, code, "map_g1_lanes(fp8.Lanes("));
+    try testing.expectEqual(1, std.mem.count(u8, code, "batch.u[2 * batch.count] = "));
+}
+
+test {
+    _ = fp8;
 }

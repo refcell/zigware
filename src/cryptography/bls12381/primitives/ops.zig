@@ -53,6 +53,20 @@ pub fn hash_with_namespace(
     return V.Signature.hash_to_group_parts(dst, &parts);
 }
 
+/// Adds to `sum` the point `hash_with_namespace` clears (`map_to_group_parts`). Variable
+/// time: for public messages only.
+pub fn map_with_namespace(
+    comptime V: type,
+    sum: *V.Signature.MapSum,
+    dst: []const u8,
+    namespace: []const u8,
+    message: []const u8,
+) void {
+    var prefix: [5]u8 = undefined;
+    const parts = group.union_unique_parts(&prefix, namespace, message);
+    sum.push(dst, &parts);
+}
+
 /// Signs `message` hashed with `dst`.
 pub fn sign(comptime V: type, private: Private, dst: []const u8, message: []const u8) V.Signature {
     return hash(V, dst, message).mul(private.scalar.value);
