@@ -196,6 +196,38 @@ pub fn key_order(comptime K: type, comptime T: type, gpa: Allocator, items: []co
 
 const PrefixSlot = struct { prefix: u64, index: u32 };
 
+/// Sorts `values` ascending: a stable LSD radix sort on bytes, skipping each byte that is the
+/// same in every value (database locations differ in their low two or three bytes only).
+pub fn sort_u64(gpa: Allocator, values: []u64) !void {
+    if (values.len < 2) return;
+    const scratch = try gpa.alloc(u64, values.len);
+    defer gpa.free(scratch);
+    var counts: [8][256]u32 = @splat(@splat(0));
+    for (values) |value| {
+        inline for (0..8) |digit| counts[digit][@as(u8, @truncate(value >> (digit * 8)))] += 1;
+    }
+    var source = values;
+    var target = scratch;
+    for (&counts, 0..) |*count, digit| {
+        const shift: u6 = @intCast(digit * 8);
+        if (count[@as(u8, @truncate(source[0] >> shift))] == values.len) continue;
+        var offset: u32 = 0;
+        for (count) |*bucket| {
+            const size = bucket.*;
+            bucket.* = offset;
+            offset += size;
+        }
+        for (source) |value| {
+            const bucket = &count[@as(u8, @truncate(value >> shift))];
+            target[bucket.*] = value;
+            bucket.* += 1;
+        }
+        std.mem.swap([]u64, &source, &target);
+    }
+    if (source.ptr != values.ptr) @memcpy(values, source);
+    assert(!std.debug.runtime_safety or std.sort.isSorted(u64, values, {}, std.sort.asc(u64)));
+}
+
 /// The key of `item`: the item itself when `T` is `K`, else its `key` field.
 fn item_key(comptime K: type, comptime T: type, item: *const T) *const K {
     if (T == K) return item;
@@ -353,6 +385,11 @@ pub fn Cursors(comptime K: type, comptime V: type) type {
         pub fn deinit(self: *Self, gpa: Allocator) void {
             gpa.free(self.positions);
             self.* = undefined;
+        }
+
+        /// Rewinds every cursor, for another ascending run of queries.
+        pub fn reset(self: *Self) void {
+            @memset(self.positions, 0);
         }
 
         /// The nearest entry for `key`. Queries must not decrease.
@@ -530,6 +567,19 @@ test "diff key order matches a stable byte-order sort" {
     try expect_key_order([2]u8, random);
     try expect_key_order([12]u8, random);
     try expect_key_order([32]u8, random);
+    for (0..100) |round| {
+        const values = try testing.allocator.alloc(u64, random.uintAtMost(usize, 500));
+        defer testing.allocator.free(values);
+        // Few high bits set, so most passes are skipped, and some values span every byte.
+        for (values) |*value| {
+            value.* = if (round % 4 == 0) random.int(u64) else random.uintAtMost(u64, 70_000);
+        }
+        const reference = try testing.allocator.dupe(u64, values);
+        defer testing.allocator.free(reference);
+        std.mem.sort(u64, reference, {}, std.sort.asc(u64));
+        try sort_u64(testing.allocator, values);
+        try testing.expectEqualSlices(u64, reference, values);
+    }
 }
 
 fn expect_key_order(comptime K: type, random: std.Random) !void {

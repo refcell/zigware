@@ -436,21 +436,17 @@ pub const View = struct {
         misses: []usize,
     ) usize {
         assert(misses.len >= ranges.len);
-        var count: usize = 0;
         self.validate_ranges(buf.len, ranges) catch {
             for (misses[0..ranges.len], 0..) |*miss, index| miss.* = index;
             return ranges.len;
         };
-        var start: usize = 0;
-        for (ranges, 0..) |range, index| {
-            const slot = buf[start..][0..range.len];
-            start += range.len;
-            if (self.try_read_sync_into(slot, range.offset)) continue;
-            misses[count] = index;
-            count += 1;
-        }
-        assert(count <= ranges.len);
-        return count;
+        const Listed = struct {
+            ranges: []const Range,
+            fn get(listed: @This(), index: usize) Range {
+                return listed.ranges[index];
+            }
+        };
+        return self.probe_sync(buf, ranges.len, Listed{ .ranges = ranges }, misses);
     }
 
     /// Cache-only `read_many_into`: writes the indices of items that need a blob read into
@@ -465,16 +461,71 @@ pub const View = struct {
     ) usize {
         assert(item_size > 0);
         assert(buf.len == offsets.len * item_size and misses.len >= offsets.len);
-        var count: usize = 0;
-        for (offsets, 0..) |offset, index| {
-            if (index > 0) assert(offset >= offsets[index - 1] +| item_size);
-            const slot = buf[index * item_size ..][0..item_size];
-            if (self.try_read_sync_into(slot, offset)) continue;
-            misses[count] = index;
-            count += 1;
+        if (offsets.len > 1) {
+            for (offsets[1..], offsets[0 .. offsets.len - 1]) |offset, previous| {
+                assert(offset >= previous +| item_size);
+            }
         }
-        assert(count <= offsets.len);
-        return count;
+        const Items = struct {
+            offsets: []const u64,
+            item_size: usize,
+            fn get(items: @This(), index: usize) Range {
+                return .{ .offset = items.offsets[index], .len = items.item_size };
+            }
+        };
+        const items: Items = .{ .offsets = offsets, .item_size = item_size };
+        return self.probe_sync(buf, offsets.len, items, misses);
+    }
+
+    /// Ranges a sync probe resolves under one page-cache lock.
+    const probe_chunk = 64;
+
+    /// The cache-only probe of `count` ranges (`ranges.get(index)`, ascending and disjoint)
+    /// into consecutive slots of `buf`: each takes the tail, then the page cache, with one lock
+    /// per `probe_chunk` ranges instead of one per range. Writes the indices of the ranges it
+    /// could not serve, ascending, into `misses` and returns how many; a range past the view
+    /// misses.
+    fn probe_sync(self: View, buf: []u8, count: usize, ranges: anytype, misses: []usize) usize {
+        assert(misses.len >= count);
+        var missed: usize = 0;
+        var byte: usize = 0;
+        var first: usize = 0;
+        while (first < count) {
+            const end = @min(count, first + probe_chunk);
+            var pending: [probe_chunk]CacheRef.Pending = undefined;
+            var pending_count: usize = 0;
+            var miss: [probe_chunk]bool = @splat(false);
+            for (first..end) |index| {
+                const range = ranges.get(index);
+                const slot = buf[byte..][0..range.len];
+                byte += range.len;
+                const range_end = std.math.add(u64, range.offset, range.len) catch
+                    std.math.maxInt(u64);
+                if (range_end > self.size) {
+                    miss[index - first] = true;
+                    continue;
+                }
+                const below = self.copy_tail_overlap(slot, range.offset);
+                if (below == 0) continue;
+                pending[pending_count] = .{
+                    .buf = slot[0..below],
+                    .offset = range.offset,
+                    .index = index - first,
+                };
+                pending_count += 1;
+            }
+            const left = self.cache_ref.read_cached_many(self.id, pending[0..pending_count]);
+            for (pending[0..left]) |range| miss[range.index] = true;
+            for (miss[0 .. end - first], first..) |is_miss, index| {
+                if (!is_miss) continue;
+                misses[missed] = index;
+                missed += 1;
+            }
+            first = end;
+        }
+        assert(byte == buf.len);
+        assert(missed <= count);
+        return missed;
     }
 
     /// Copy the part of `[offset, offset + buf.len)` held in the tail; returns the

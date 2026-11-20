@@ -652,7 +652,7 @@ fn Merkleizer(comptime D: type) type {
                     try locations.append(self.gpa, loc.*);
                 }
             }
-            std.sort.pdq(u64, locations.items, {}, std.sort.asc(u64));
+            try diff_mod.sort_u64(self.gpa, locations.items);
             var count: usize = 0;
             for (locations.items) |loc| {
                 if (count > 0 and locations.items[count - 1] == loc) continue;
@@ -764,7 +764,7 @@ fn Merkleizer(comptime D: type) type {
             var w = floor_mod.Walk.init(self.base_floor, next_loc, limits.entries, limits.skips);
             if (active_keys == 0 or w.entries == 0) return w.floor;
             const inactive = walked.superseded.items;
-            std.sort.pdq(u64, inactive, {}, std.sort.asc(u64));
+            try diff_mod.sort_u64(self.gpa, inactive);
             try walked.superseded.append(self.gpa, self.db_state.size - 1);
             var candidates: std.ArrayList(u64) = .empty;
             defer candidates.deinit(self.gpa);

@@ -1154,13 +1154,56 @@ pub fn Journal(comptime A: type) type {
         }
 
         /// Probe strictly increasing `positions`, serving those readable without I/O.
+        /// Each run of positions in one blob is probed in groups of up to `probe_items`, under
+        /// one page-cache lock per group instead of one per item.
         pub fn try_read_many_sync(self: *const Self, positions: []const u64, out: []?A) void {
             assert(out.len == positions.len);
-            for (positions, out, 0..) |position, *slot, index| {
-                if (index > 0) assert(positions[index - 1] < position);
-                slot.* = self.try_read_sync(position);
+            var hits: u64 = 0;
+            var start: usize = 0;
+            while (start < positions.len) {
+                const position = positions[start];
+                if (start > 0) assert(positions[start - 1] < position);
+                const located = self.locate(position) catch {
+                    out[start] = null;
+                    start += 1;
+                    continue;
+                };
+                const blob = position_to_blob(position, self.items_per_blob);
+                var offsets: [probe_items]u64 = undefined;
+                offsets[0] = located.offset;
+                var end = start + 1;
+                while (end < positions.len and end - start < probe_items) : (end += 1) {
+                    const next = positions[end];
+                    assert(positions[end - 1] < next);
+                    if (next >= self.bounds.end) break;
+                    if (position_to_blob(next, self.items_per_blob) != blob) break;
+                    offsets[end - start] = located.offset + (next - position) * chunk_u64;
+                }
+                const count = end - start;
+                var bytes: [probe_items * chunk]u8 = undefined;
+                var misses: [probe_items]usize = undefined;
+                const view = located.writer.view();
+                const buf = bytes[0 .. count * chunk];
+                const missed = view.try_read_many_sync_into(buf, offsets[0..count], chunk, &misses);
+                var next_miss: usize = 0;
+                for (out[start..end], 0..) |*slot, index| {
+                    if (next_miss < missed and misses[next_miss] == index) {
+                        next_miss += 1;
+                        slot.* = null;
+                        continue;
+                    }
+                    slot.* = codec.decode_fixed(A, bytes[index * chunk ..][0..chunk]) catch null;
+                    hits += @intFromBool(slot.* != null);
+                }
+                assert(next_miss == missed);
+                start = end;
             }
+            self.metrics.cache_hits.metric().inc_by(hits);
+            self.metrics.items_read.metric().inc_by(hits);
         }
+
+        /// Items `try_read_many_sync` probes per group: at most 64, and at most 4 KiB of them.
+        const probe_items: usize = @max(1, @min(64, 4096 / chunk));
 
         /// Replay the items in `range` as batches of consecutive items, each within one blob
         /// and of at most about `buffer_bytes` bytes. Fails with `ItemPruned` if the range

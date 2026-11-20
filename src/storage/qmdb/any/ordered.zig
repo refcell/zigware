@@ -102,6 +102,11 @@ pub fn Emitter(comptime D: type) type {
             const ops = try gpa.alloc(D.Operation, locations.len);
             defer gpa.free(ops);
             try m.read_ops(locations, &.{}, ops);
+            // Each location adds at most one candidate of each kind, each write at most one more.
+            const most = locations.len + writes.len;
+            try state.next.ensureUnusedCapacity(gpa, most);
+            try state.prev.ensureUnusedCapacity(gpa, most);
+            try state.updated.ensureUnusedCapacity(gpa, writes.len);
             for (locations, ops) |loc, op| {
                 const update = try live(m, loc, op) orelse continue;
                 try push_neighbor(gpa, state, update, loc);
@@ -243,31 +248,69 @@ pub fn Emitter(comptime D: type) type {
         /// Emits the deletes, the updates, and the creates, each in key order.
         fn emit_writes(m: anytype, walked: anytype, state: *const State) !void {
             const gpa = m.gpa;
+            const total = state.deleted.items.len + state.updated.items.len +
+                state.created.items.len;
+            try walked.ops.ensureUnusedCapacity(gpa, total);
+            try walked.diff.ensureUnusedCapacity(gpa, total);
+            try walked.superseded.ensureUnusedCapacity(gpa, total);
+            // Each list is key-sorted, so its successors and ancestor bases come from cursors
+            // that only advance (commonware's sorted merges), not a search per key.
+            var bases = try diff_mod.Cursors(K, V).init(gpa, m.ancestor_entries);
+            defer bases.deinit(gpa);
             for (state.deleted.items) |deleted| {
-                const base = base_of(m, &deleted.key, deleted.loc);
+                const base = base_at(&bases, &deleted.key, deleted.loc);
                 if (base) |loc| try walked.superseded.append(gpa, loc);
                 try walked.push_delete(gpa, deleted.key, base);
             }
+            bases.reset();
+            var successors: Successors = .{ .next = state.next.items };
             for (state.updated.items) |updated| {
-                const next = next_key(state, &updated.key);
                 const update: D.Update = .{
                     .key = updated.key,
                     .value = updated.value,
-                    .next_key = next,
+                    .next_key = successors.after(&updated.key),
                 };
-                try push(m, walked, update, base_of(m, &updated.key, updated.loc));
+                try push(m, walked, update, base_at(&bases, &updated.key, updated.loc));
             }
+            successors = .{ .next = state.next.items };
             for (state.created.items) |created| {
-                const next = next_key(state, &created.key);
                 const update: D.Update = .{
                     .key = created.key,
                     .value = created.value,
-                    .next_key = next,
+                    .next_key = successors.after(&created.key),
                 };
                 try push(m, walked, update, created.base_old_loc);
                 walked.active_keys_delta += 1;
             }
         }
+
+        /// `base_of` for ascending keys, through `bases`.
+        fn base_at(bases: *diff_mod.Cursors(K, V), key: *const K, loc: u64) ?u64 {
+            const entry = bases.resolve(key) orelse return loc;
+            return entry.base_old_loc();
+        }
+
+        /// `next_key` for ascending keys: a cursor into the sorted candidates that only
+        /// advances.
+        const Successors = struct {
+            next: []const K,
+            at: usize = 0,
+            previous: ?K = null,
+
+            fn after(successors: *Successors, key: *const K) K {
+                const next = successors.next;
+                assert(next.len > 0); // A written key's successor is always a candidate.
+                if (std.debug.runtime_safety) {
+                    if (successors.previous) |*previous| {
+                        assert(diff_mod.order(K, previous, key) == .lt);
+                    }
+                    successors.previous = key.*;
+                }
+                while (successors.at < next.len and
+                    diff_mod.order(K, &next[successors.at], key) != .gt) successors.at += 1;
+                return if (successors.at < next.len) next[successors.at] else next[0];
+            }
+        };
 
         /// Rewrites the predecessor of each created, then each deleted, key with its current
         /// value and its successor in the final key set, once per predecessor.
