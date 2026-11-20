@@ -961,8 +961,28 @@ Rows over 2×:
 Unprofiled. A spot check of `decode/msg_len=4194304 chunks=100 min_shards=34
 shard_selection=best` at load 63 had zigware ahead at both `conc=1` (5.88 ms against 6.99 ms)
 and `conc=8` (4.87 ms against 5.35 ms), where this run gives 1.40× and 1.65×. So part of the
-decode gap is load. A second three-round run on `95742da3` (benches on `allocator.Heap`)
-will show which rows are really slow before they are profiled.
+decode gap is load, which the rerun below confirms.
+
+### Decode with a pool, re-measured (2026-11-20, coding lane)
+
+The rows over 2× above do not reproduce. Three alternating rounds of the six worst rows on
+`95742da3` (benches on `allocator.Heap`), load 75 to 105 on 32 cores, median of per-round
+ratios:
+
+| bench | parameters | first run | rerun | rerun, adaptive policy |
+|---|---|---:|---:|---:|
+| `reed_solomon::decode` | `msg_len=1048576 chunks=25 min_shards=9 conc=8 shard_selection=best` | 2.88× | 0.99× | 1.27× |
+| `reed_solomon::decode` | `msg_len=1048576 chunks=20 min_shards=7 conc=4 shard_selection=best` | 2.85× | 1.08× | 0.97× |
+| `reed_solomon::decode` | `msg_len=4194304 chunks=25 min_shards=9 conc=8 shard_selection=exception` | 2.67× | 0.93× | 0.92× |
+| `reed_solomon::decode` | `msg_len=4194304 chunks=100 min_shards=34 conc=8 shard_selection=worst` | 2.39× | 0.89× | 1.02× |
+| `reed_solomon::encode` | `msg_len=1048576 chunks=25 conc=8` | 1.78× | 0.74× | 0.65× |
+| `reed_solomon::decode` | `msg_len=8388608 chunks=50 min_shards=17 conc=8 shard_selection=worst` | 2.08× | 0.77× | 0.73× |
+
+So the pool rows' gap was the load (about three runnable threads per core), not the code.
+zigware's fastest samples run 1.5 to 2× under commonware's (`decode` 1 MiB chunks=25 best:
+352 µs against 629 µs) but its slowest run well over them: its spread under load is wider.
+The coding benches now run their pool through `Rayon.with_policy`, the adaptive strategy
+commonware's `Rayon::new` builds. That made no difference beyond noise here.
 
 ## Appendix: bench coverage
 

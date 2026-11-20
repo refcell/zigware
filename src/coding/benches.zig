@@ -230,7 +230,9 @@ fn bench_case(
         .threads = threads,
     });
     defer pool.destroy();
-    const strategy = parallel.Rayon.init(pool);
+    // commonware's `Rayon::new` decides serial or parallel with its adaptive policy.
+    var policy = parallel.Policy.init(runner.io);
+    const strategy = parallel.Rayon.init(pool).with_policy(&policy);
     if (selections) |s| return bench_decode_with(runner, rng, case, s, strategy);
     return bench_encode_with(runner, rng, case, strategy);
 }
