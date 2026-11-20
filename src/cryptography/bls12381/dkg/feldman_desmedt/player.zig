@@ -205,22 +205,29 @@ pub fn Player(comptime V: type, comptime S: type) type {
             rng: anytype,
             logs: *Logs(V, P, M),
             failure: ?*Failure(P),
+            strategy: anytype,
         ) !Finalized {
             if (!logs.info.eql(self.info)) return error.MismatchedLogs;
-            var selected = try logs.select(gpa, rng, failure);
+            var selected = try logs.select(gpa, rng, failure, strategy);
             defer selected.deinit(gpa);
             const shares = try self.dealings(gpa, selected);
             defer {
                 for (shares) |*value| value.zeroize();
                 gpa.free(shares);
             }
-            var observed = try logs_mod.reckon(V, P, M, gpa, self.info, selected);
+            var observed = try logs_mod.reckon(V, P, M, gpa, self.info, selected, strategy);
             errdefer observed.output.deinit(gpa);
             var private = Scalar.zero;
             if (observed.weights) |*weights| {
                 defer weights.deinit(gpa);
                 // Proof: `select` returned enough logs to recover.
-                private = weights.interpolate(Scalar, selected.dealers.items, shares).?;
+                private = (try weights.interpolate_strategy(
+                    Scalar,
+                    gpa,
+                    selected.dealers.items,
+                    shares,
+                    strategy,
+                )).?;
             } else {
                 for (shares) |value| private = private.add(value);
             }

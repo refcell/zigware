@@ -96,13 +96,15 @@ pub fn Failure(comptime P: type) type {
 
 /// Checks `log` from `dealer` against `info`'s round under fault model `M`: membership,
 /// the public message, the player set, the reveal count, every ack signature (one batch),
-/// and every reveal (one random linear combination). `rng` draws the batch randomness.
+/// and every reveal (one random linear combination). `rng` draws the batch randomness, and
+/// `strategy` runs the ack batch.
 pub fn check_dealer_log(
     comptime V: type,
     comptime P: type,
     comptime M: type,
     gpa: Allocator,
     rng: anytype,
+    strategy: anytype,
     info: *const Info(V, P),
     round_transcript: *const Transcript,
     dealer: P,
@@ -137,7 +139,7 @@ pub fn check_dealer_log(
             reveal_sum = reveal_sum.add(coeff.mul(priv_msg.share));
         },
     };
-    if (!P.verify_batch(rng, acks.items, signer.entries, parallel.sequential)) {
+    if (!P.verify_batch(rng, acks.items, signer.entries, strategy)) {
         return .{ .fault = .invalid_ack };
     }
     const lhs = try log.pub_msg.commitment.lin_comb_eval(gpa, Scalar, pairs.items);
@@ -246,36 +248,69 @@ pub fn Logs(comptime V: type, comptime P: type, comptime M: type) type {
             return if (slot.found) &self.entries.items[slot.index].log else null;
         }
 
-        /// Checks `pending` entries (indices into `entries`) in order. Each check draws its
-        /// randomness from a seed taken from `rng` up front, as commonware does, so results
-        /// do not depend on the order checks run in.
-        fn check_dealers(self: *Self, gpa: Allocator, rng: anytype, pending: []const usize) !void {
-            const seeds = try gpa.alloc(Summary, pending.len);
-            defer gpa.free(seeds);
-            for (seeds) |*seed| rng.fill_bytes(&seed.bytes);
-            const transcript = self.info.round_transcript();
-            for (pending, seeds) |index, seed| {
-                const entry = &self.entries.items[index];
-                const resumed = Transcript.resume_from(seed, round.transcript_version);
-                var local_rng = resumed.noise(round.noise_pre_verify);
-                entry.known = try check_dealer_log(
-                    V,
-                    P,
-                    M,
-                    gpa,
-                    &local_rng,
-                    self.info,
-                    &transcript,
-                    entry.dealer,
-                    &entry.log,
-                );
+        /// Checks `pending` entries (indices into `entries`) across `strategy`, as commonware's
+        /// `check_dealers` does. Each check draws its randomness from a seed taken from `rng`
+        /// up front, so results do not depend on the order or the thread checks run on.
+        fn check_dealers(
+            self: *Self,
+            gpa: Allocator,
+            rng: anytype,
+            pending: []const usize,
+            strategy: anytype,
+        ) !void {
+            const jobs = try gpa.alloc(Job, pending.len);
+            defer gpa.free(jobs);
+            for (jobs, pending) |*job, index| {
+                job.* = .{ .index = index, .seed = undefined };
+                rng.fill_bytes(&job.seed.bytes);
             }
+            const checks = try gpa.alloc(Check, pending.len);
+            defer gpa.free(checks);
+            const op: CheckOp(@TypeOf(strategy)) = .{
+                .logs = self,
+                .gpa = gpa,
+                .strategy = strategy,
+                .transcript = self.info.round_transcript(),
+            };
+            try strategy.try_map_into(jobs, checks, op);
+            for (jobs, checks) |job, check| self.entries.items[job.index].known = check;
+            assert(checks.len == pending.len);
+        }
+
+        const Job = struct { index: usize, seed: Summary };
+
+        fn CheckOp(comptime S: type) type {
+            return struct {
+                logs: *const Self,
+                gpa: Allocator,
+                strategy: S,
+                transcript: Transcript,
+
+                pub fn map(op: @This(), job: *const Job) Allocator.Error!Check {
+                    const entry = &op.logs.entries.items[job.index];
+                    assert(entry.known == null);
+                    const resumed = Transcript.resume_from(job.seed, round.transcript_version);
+                    var local_rng = resumed.noise(round.noise_pre_verify);
+                    return check_dealer_log(
+                        V,
+                        P,
+                        M,
+                        op.gpa,
+                        &local_rng,
+                        op.strategy,
+                        op.logs.info,
+                        &op.transcript,
+                        entry.dealer,
+                        &entry.log,
+                    );
+                }
+            };
         }
 
         /// Checks the logs recorded so far, so `select` has less to do. Optimistically
         /// checks only as many unchecked logs as are still needed; if any of those fail, it
         /// checks every remaining unchecked log.
-        pub fn pre_verify(self: *Self, gpa: Allocator, rng: anytype) !void {
+        pub fn pre_verify(self: *Self, gpa: Allocator, rng: anytype, strategy: anytype) !void {
             var need = self.info.required_commitments(M);
             var pending: std.ArrayList(usize) = .empty;
             defer pending.deinit(gpa);
@@ -289,7 +324,7 @@ pub fn Logs(comptime V: type, comptime P: type, comptime M: type) type {
                     try pending.append(gpa, cursor);
                 }
             }
-            try self.check_dealers(gpa, rng, pending.items);
+            try self.check_dealers(gpa, rng, pending.items, strategy);
             var all_usable = true;
             for (pending.items) |index| all_usable = all_usable and
                 self.entries.items[index].known.? == .available;
@@ -300,7 +335,7 @@ pub fn Logs(comptime V: type, comptime P: type, comptime M: type) type {
             for (self.entries.items[cursor..], cursor..) |entry, index| {
                 if (entry.known == null) try pending.append(gpa, index);
             }
-            try self.check_dealers(gpa, rng, pending.items);
+            try self.check_dealers(gpa, rng, pending.items, strategy);
         }
 
         /// The first `required_commitments` usable logs in dealer order, borrowed from
@@ -310,8 +345,9 @@ pub fn Logs(comptime V: type, comptime P: type, comptime M: type) type {
             gpa: Allocator,
             rng: anytype,
             failure: ?*Failure(P),
+            strategy: anytype,
         ) !Selection(V, P) {
-            try self.pre_verify(gpa, rng);
+            try self.pre_verify(gpa, rng, strategy);
             const required = self.info.required_commitments(M);
             var dealers: std.ArrayList(P) = .empty;
             defer dealers.deinit(gpa);
@@ -438,6 +474,7 @@ fn interpolate_commitments(
     gpa: Allocator,
     weights: math.poly.Interpolator(P, Scalar),
     selected: Selection(V, P),
+    strategy: anytype,
 ) Allocator.Error!Poly(V.Public) {
     assert(selected.len() > 0);
     const count = selected.logs[0].pub_msg.commitment.coeffs.len;
@@ -451,7 +488,14 @@ fn interpolate_commitments(
             assert(log.pub_msg.commitment.coeffs.len == count);
             value.* = log.pub_msg.commitment.coeffs[c];
         }
-        coeff.* = weights.interpolate(V.Public, selected.dealers.items, column).?;
+        // Proof: `select` keeps only dealers in the interpolator's subset.
+        coeff.* = (try weights.interpolate_strategy(
+            V.Public,
+            gpa,
+            selected.dealers.items,
+            column,
+            strategy,
+        )).?;
     }
     return Poly(V.Public).from_owned(coeffs);
 }
@@ -465,6 +509,7 @@ fn public_poly(
     info: *const Info(V, P),
     selected: Selection(V, P),
     weights_out: *?math.poly.Interpolator(P, Scalar),
+    strategy: anytype,
 ) !Poly(V.Public) {
     const previous = info.previous orelse {
         var public = try Poly(V.Public).zero(gpa);
@@ -482,7 +527,7 @@ fn public_poly(
         selected.dealers.items,
     )).?;
     errdefer weights.deinit(gpa);
-    const public = try interpolate_commitments(V, P, gpa, weights, selected);
+    const public = try interpolate_commitments(V, P, gpa, weights, selected, strategy);
     // Each commitment's constant is the dealer's previous share commitment, so a valid
     // subset interpolates to the previous public key.
     assert(previous.public.public().eql(public.constant()));
@@ -498,11 +543,12 @@ pub fn reckon(
     gpa: Allocator,
     info: *const Info(V, P),
     selected: Selection(V, P),
+    strategy: anytype,
 ) !Observed(V, P) {
     var revealed = try revealed_players(V, P, M, gpa, info, selected);
     errdefer revealed.deinit(gpa);
     var weights: ?math.poly.Interpolator(P, Scalar) = null;
-    var public = try public_poly(V, P, gpa, info, selected, &weights);
+    var public = try public_poly(V, P, gpa, info, selected, &weights, strategy);
     errdefer if (weights) |*w| w.deinit(gpa);
     var sharing = Sharing(V).init(gpa, info.mode, info.num_players(), public) catch |err| {
         public.deinit(gpa);
@@ -534,10 +580,11 @@ pub fn observe(
     rng: anytype,
     logs: *Logs(V, P, M),
     failure: ?*Failure(P),
+    strategy: anytype,
 ) !Output(V, P) {
-    var selected = try logs.select(gpa, rng, failure);
+    var selected = try logs.select(gpa, rng, failure, strategy);
     defer selected.deinit(gpa);
-    var observed = try reckon(V, P, M, gpa, logs.info, selected);
+    var observed = try reckon(V, P, M, gpa, logs.info, selected, strategy);
     if (observed.weights) |*weights| weights.deinit(gpa);
     return observed.output;
 }

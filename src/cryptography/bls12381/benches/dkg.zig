@@ -3,6 +3,7 @@
 //! none), for a fresh DKG and a reshare.
 
 const std = @import("std");
+const parallel = @import("parallel");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const bench = @import("bench");
@@ -120,6 +121,7 @@ fn deal(
 const Finalize = struct {
     gpa: Allocator,
     round: *const Round,
+    strategy: parallel.Rayon,
     logs: ?Logs = null,
 
     pub fn before_iter(workload: *Finalize) !void {
@@ -131,7 +133,14 @@ const Finalize = struct {
         var player = try Player.init(&workload.round.info, workload.round.me);
         defer player.deinit(workload.gpa);
         var rng = utils.test_rng();
-        var finalized = try player.finalize(N3f1, workload.gpa, &rng, &workload.logs.?, null);
+        var finalized = try player.finalize(
+            N3f1,
+            workload.gpa,
+            &rng,
+            &workload.logs.?,
+            null,
+            workload.strategy,
+        );
         finalized.output.deinit(workload.gpa);
     }
 
@@ -146,21 +155,41 @@ fn bench_dkg(runner: *bench.Runner, reshare: bool) !void {
     const standard = [_]u32{ 5, 10, 20, 50 };
     const full = [_]u32{ 5, 10, 20, 50, 100, 250, 500 };
     const counts = runner.inputs.pick([]const u32, standard[0..1], &standard, &full);
+    // commonware's `concurrency_levels`: 1, 4, and 8 with full inputs, else 1.
+    const all_concurrencies = [_]usize{ 1, 4, 8 };
+    const concurrencies = runner.inputs.pick(
+        []const usize,
+        all_concurrencies[0..1],
+        all_concurrencies[0..1],
+        &all_concurrencies,
+    );
+    const threads = try common.pool(runner);
+    defer threads.destroy();
     var rng = utils.test_rng();
     for (counts) |n| {
         const prefix = if (reshare)
             "bls12381::dkg::feldman_desmedt_reshare_recovery"
         else
             "bls12381::dkg::feldman_desmedt_recovery";
-        const name = bench.Benchmark.init(prefix)
-            .with_param("n", n).with_param("t", N3f1.quorum(n)).with_param("conc", 1);
-        if (try common.skip(runner, name)) continue;
-        var round: Round = undefined;
-        try round.init(gpa, &rng, reshare, n);
-        defer round.deinit(gpa);
-        var workload: Finalize = .{ .gpa = gpa, .round = &round };
-        defer workload.teardown();
-        try runner.run(name, &workload);
+        var round: ?Round = null;
+        defer if (round) |*r| r.deinit(gpa);
+        for (concurrencies) |conc| {
+            const name = bench.Benchmark.init(prefix)
+                .with_param("n", n).with_param("t", N3f1.quorum(n)).with_param("conc", conc);
+            if (try common.skip(runner, name)) continue;
+            if (round == null) {
+                round = undefined;
+                try round.?.init(gpa, &rng, reshare, n);
+            }
+            var policy = parallel.Policy.init(runner.io);
+            var workload: Finalize = .{
+                .gpa = gpa,
+                .round = &round.?,
+                .strategy = common.strategy(threads, &policy, conc),
+            };
+            defer workload.teardown();
+            try runner.run(name, &workload);
+        }
     }
 }
 

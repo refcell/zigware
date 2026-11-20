@@ -239,14 +239,26 @@ pub const Plan = struct {
 
     /// Runs the plan with `seed`; fails when validation fails or any check does.
     pub fn run(self: Plan, comptime V: type, gpa: Allocator, seed: u64) !void {
+        return self.run_with(V, gpa, seed, parallel.sequential);
+    }
+
+    /// `run` with every select, observe, and finalize going through `strategy`.
+    pub fn run_with(
+        self: Plan,
+        comptime V: type,
+        gpa: Allocator,
+        seed: u64,
+        strategy: anytype,
+    ) !void {
         if (!self.validate()) return error.InvalidPlan;
-        var runner = try Runner(V).init(gpa, self, seed);
+        var runner = try Runner(V, @TypeOf(strategy)).init(gpa, self, seed, strategy);
         defer runner.deinit();
         for (self.rounds, 0..) |r, index| try runner.run_round(@intCast(index), r);
+        assert(runner.keys.len == self.num_participants);
     }
 };
 
-fn Runner(comptime V: type) type {
+fn Runner(comptime V: type, comptime S: type) type {
     return struct {
         const Self = @This();
         const Info = fd.Info(V, PublicKey);
@@ -260,13 +272,14 @@ fn Runner(comptime V: type) type {
 
         gpa: Allocator,
         rng: utils.rng.TestRng,
+        strategy: S,
         keys: []PrivateKey,
         max_read_size: u32,
         previous_output: ?Output = null,
         shares: std.ArrayList(struct { PublicKey, Share }) = .empty,
         threshold_public_key: ?V.Public = null,
 
-        fn init(gpa: Allocator, plan: Plan, seed: u64) !Self {
+        fn init(gpa: Allocator, plan: Plan, seed: u64, strategy: S) !Self {
             var rng = utils.rng.TestRng.init(seed);
             const keys = try gpa.alloc(PrivateKey, plan.num_participants);
             for (keys) |*key| key.* = PrivateKey.random(&rng);
@@ -278,6 +291,7 @@ fn Runner(comptime V: type) type {
             return .{
                 .gpa = gpa,
                 .rng = rng,
+                .strategy = strategy,
                 .keys = keys,
                 .max_read_size = plan.num_participants + max_shift,
             };
@@ -333,7 +347,12 @@ fn Runner(comptime V: type) type {
             }
             var selection_logs = try logs.clone(gpa);
             defer selection_logs.deinit(gpa);
-            var selection = selection_logs.select(gpa, &self.rng, null) catch |err| switch (err) {
+            var selection = selection_logs.select(
+                gpa,
+                &self.rng,
+                null,
+                self.strategy,
+            ) catch |err| switch (err) {
                 error.InsufficientLogs => null,
                 else => return err,
             };
@@ -345,7 +364,16 @@ fn Runner(comptime V: type) type {
             };
             var observe_logs = try logs.clone(gpa);
             defer observe_logs.deinit(gpa);
-            const observed = fd.observe(V, PublicKey, N3f1, gpa, &self.rng, &observe_logs, null);
+            const observed = fd.observe(
+                V,
+                PublicKey,
+                N3f1,
+                gpa,
+                &self.rng,
+                &observe_logs,
+                null,
+                self.strategy,
+            );
             if (r.expect_failure(previous)) {
                 try testing.expectError(error.InsufficientLogs, observed);
                 return;
@@ -731,7 +759,14 @@ fn Runner(comptime V: type) type {
                     resumed.acks.deinit(gpa);
                     var copy = try logs.clone(gpa);
                     defer copy.deinit(gpa);
-                    const finalized = resumed.player.finalize(N3f1, gpa, &self.rng, &copy, null);
+                    const finalized = resumed.player.finalize(
+                        N3f1,
+                        gpa,
+                        &self.rng,
+                        &copy,
+                        null,
+                        self.strategy,
+                    );
                     try testing.expectError(error.MissingPlayerDealing, finalized);
                     tested += 1;
                 }
@@ -767,7 +802,14 @@ fn Runner(comptime V: type) type {
             for (state.players, state.info.players.items) |*player, player_pk| {
                 var copy = try logs.clone(gpa);
                 defer copy.deinit(gpa);
-                var finalized = try player.finalize(N3f1, gpa, &self.rng, &copy, null);
+                var finalized = try player.finalize(
+                    N3f1,
+                    gpa,
+                    &self.rng,
+                    &copy,
+                    null,
+                    self.strategy,
+                );
                 defer finalized.output.deinit(gpa);
                 try testing.expect(finalized.output.eql(output));
                 const expected = try output.public.partial_public(finalized.share.index);
@@ -798,7 +840,7 @@ fn Runner(comptime V: type) type {
                 gpa,
                 output.public,
                 partials[0..quorum],
-                parallel.sequential,
+                self.strategy,
             );
             try ops.verify_message(V, self.threshold_public_key.?, namespace, message, signature);
         }

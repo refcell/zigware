@@ -1,6 +1,7 @@
 //! Feldman-Desmedt tests (commonware `feldman_desmedt::test`).
 
 const std = @import("std");
+const parallel = @import("parallel");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 const testing = std.testing;
@@ -73,6 +74,30 @@ test "feldman-desmedt: fuzz plan (coverage-guided)" {
 
 test "feldman-desmedt: single round" {
     try run(4, &.{.{ .dealers = all4, .players = all4 }});
+}
+
+test "feldman-desmedt: plan runs the same across a strategy" {
+    // Dealer 0's reveal is bad and dealer 1 sends a bad share, so the pooled checks
+    // disagree per dealer; the second round reshares, so commitment interpolation runs.
+    const rounds: []const plan_mod.Round = &.{
+        .{
+            .dealers = all4,
+            .players = all4,
+            .bad_reveals = &.{.{ 0, 1 }},
+            .bad_shares = &.{.{ 1, 2 }},
+        },
+        .{ .dealers = all4, .players = all4 },
+    };
+    const plan: Plan = .{ .num_participants = 4, .rounds = rounds };
+    for ([_]u32{ 1, 3, 8 }) |threads| {
+        const pool = try parallel.ThreadPool.create(testing.allocator, testing.io, .{
+            .threads = threads,
+        });
+        defer pool.destroy();
+        const par = parallel.Rayon.init(pool).with_parallelism(threads + 1);
+        try plan.run_with(MinPk, testing.allocator, 7, par);
+    }
+    try plan.run_with(MinPk, testing.allocator, 7, parallel.sequential);
 }
 
 test "feldman-desmedt: multiple rounds" {
@@ -350,6 +375,7 @@ fn check_log_with(info: *const Info, dealer: PublicKey, log: *const DealerLog) !
         N3f1,
         testing.allocator,
         &local,
+        parallel.sequential,
         info,
         &round,
         dealer,
@@ -457,7 +483,15 @@ fn reckon_pairs(
         .dealers = .{ .items = dealers },
         .logs = logs,
     };
-    var observed = try logs_mod.reckon(MinPk, PublicKey, N3f1, gpa, info, selection);
+    var observed = try logs_mod.reckon(
+        MinPk,
+        PublicKey,
+        N3f1,
+        gpa,
+        info,
+        selection,
+        parallel.sequential,
+    );
     if (observed.weights) |*weights| weights.deinit(gpa);
     observed.weights = null;
     return observed;
@@ -568,10 +602,26 @@ fn reveal_outcome(gpa: Allocator, reveal: fd.Reveal) !RevealOutcome {
     var observe_logs = try logs.clone(gpa);
     defer observe_logs.deinit(gpa);
     var observe_rng = utils.test_rng();
-    var observed = try fd.observe(MinPk, PublicKey, N3f1, gpa, &observe_rng, &observe_logs, null);
+    var observed = try fd.observe(
+        MinPk,
+        PublicKey,
+        N3f1,
+        gpa,
+        &observe_rng,
+        &observe_logs,
+        null,
+        parallel.sequential,
+    );
     errdefer observed.deinit(gpa);
     var finalize_rng = utils.test_rng();
-    const finalized = try resumed.player.finalize(N3f1, gpa, &finalize_rng, &logs, null);
+    const finalized = try resumed.player.finalize(
+        N3f1,
+        gpa,
+        &finalize_rng,
+        &logs,
+        null,
+        parallel.sequential,
+    );
     return .{ .finalized = finalized.output, .observed = observed, .target = target };
 }
 
@@ -731,7 +781,7 @@ fn incremental_pre_verify_case(fixture: *const PreVerifyFixture, u: *minifuzz.Un
             index,
             valid[index],
         );
-        try incremental.pre_verify(gpa, &incremental_rng);
+        try incremental.pre_verify(gpa, &incremental_rng, parallel.sequential);
         start += size;
     }
     var expected: std.ArrayList(PublicKey) = .empty;
@@ -745,9 +795,9 @@ fn incremental_pre_verify_case(fixture: *const PreVerifyFixture, u: *minifuzz.Un
     var fresh = try fixture.logs_for(gpa, &fixture.info, &valid);
     defer fresh.deinit(gpa);
     var fresh_rng = utils.test_rng();
-    var fresh_selected = fresh.select(gpa, &fresh_rng, null);
+    var fresh_selected = fresh.select(gpa, &fresh_rng, null, parallel.sequential);
     defer if (fresh_selected) |*s| s.deinit(gpa) else |_| {};
-    var incremental_selected = incremental.select(gpa, &incremental_rng, null);
+    var incremental_selected = incremental.select(gpa, &incremental_rng, null, parallel.sequential);
     defer if (incremental_selected) |*s| s.deinit(gpa) else |_| {};
     if (fresh_selected) |selected| {
         try testing.expectEqualSlices(PublicKey, expected.items, selected.dealers.items);
@@ -968,13 +1018,22 @@ test "feldman-desmedt: logs are bound to constructor info" {
     var wrong_logs = try fixture.logs_for(gpa, &fixture.wrong_info, &all_invalid);
     defer wrong_logs.deinit(gpa);
     var rng = utils.test_rng();
-    try logs.pre_verify(gpa, &rng);
-    try wrong_logs.pre_verify(gpa, &rng);
+    try logs.pre_verify(gpa, &rng, parallel.sequential);
+    try wrong_logs.pre_verify(gpa, &rng, parallel.sequential);
     // Control: the logs verify in the round they were made for.
-    var selection = try wrong_logs.select(gpa, &rng, null);
+    var selection = try wrong_logs.select(gpa, &rng, null, parallel.sequential);
     selection.deinit(gpa);
     var failure: Failure = undefined;
-    const result = fd.observe(MinPk, PublicKey, N3f1, gpa, &rng, &logs, &failure);
+    const result = fd.observe(
+        MinPk,
+        PublicKey,
+        N3f1,
+        gpa,
+        &rng,
+        &logs,
+        &failure,
+        parallel.sequential,
+    );
     try testing.expectError(error.InsufficientLogs, result);
     defer failure.deinit(gpa);
     try testing.expectEqual(fixture.required(), failure.required);
@@ -1004,13 +1063,22 @@ test "feldman-desmedt: pre-verify preserves classifications and invalidates repl
     };
     _ = try logs.record(gpa, fixture.dealers[2].key, wrong_players);
     var rng = utils.test_rng();
-    try logs.pre_verify(gpa, &rng);
+    try logs.pre_verify(gpa, &rng, parallel.sequential);
 
     var copy = try logs.clone(gpa);
     defer copy.deinit(gpa);
     var failure: Failure = undefined;
     var observe_rng = utils.test_rng();
-    const result = fd.observe(MinPk, PublicKey, N3f1, gpa, &observe_rng, &copy, &failure);
+    const result = fd.observe(
+        MinPk,
+        PublicKey,
+        N3f1,
+        gpa,
+        &observe_rng,
+        &copy,
+        &failure,
+        parallel.sequential,
+    );
     try testing.expectError(error.InsufficientLogs, result);
     defer failure.deinit(gpa);
     try testing.expectEqual(fixture.required(), failure.required);
@@ -1026,7 +1094,16 @@ test "feldman-desmedt: pre-verify preserves classifications and invalidates repl
     // Replacing one rejected log restores the exact quorum.
     try fixture.record(gpa, &logs, 0, true);
     var output_rng = utils.test_rng();
-    var output = try fd.observe(MinPk, PublicKey, N3f1, gpa, &output_rng, &logs, null);
+    var output = try fd.observe(
+        MinPk,
+        PublicKey,
+        N3f1,
+        gpa,
+        &output_rng,
+        &logs,
+        null,
+        parallel.sequential,
+    );
     output.deinit(gpa);
 }
 
@@ -1037,7 +1114,16 @@ test "feldman-desmedt: missing logs report dealers as unavailable" {
     defer logs.deinit(gpa);
     var failure: Failure = undefined;
     var rng = utils.test_rng();
-    const result = fd.observe(MinPk, PublicKey, N3f1, gpa, &rng, &logs, &failure);
+    const result = fd.observe(
+        MinPk,
+        PublicKey,
+        N3f1,
+        gpa,
+        &rng,
+        &logs,
+        &failure,
+        parallel.sequential,
+    );
     try testing.expectError(error.InsufficientLogs, result);
     defer failure.deinit(gpa);
     try testing.expectEqual(fixture.required(), failure.required);
@@ -1054,7 +1140,14 @@ test "feldman-desmedt: finalize wraps reconciliation failure" {
     var logs: Logs = .init(&fixture.info);
     defer logs.deinit(gpa);
     var rng = utils.test_rng();
-    try testing.expectError(error.InsufficientLogs, player.finalize(N3f1, gpa, &rng, &logs, null));
+    try testing.expectError(error.InsufficientLogs, player.finalize(
+        N3f1,
+        gpa,
+        &rng,
+        &logs,
+        null,
+        parallel.sequential,
+    ));
 }
 
 test "feldman-desmedt: finalize rejects logs bound to different round" {
@@ -1067,7 +1160,7 @@ test "feldman-desmedt: finalize rejects logs bound to different round" {
     var rng = utils.test_rng();
     try testing.expectError(
         error.MismatchedLogs,
-        player.finalize(N3f1, gpa, &rng, &wrong_logs, null),
+        player.finalize(N3f1, gpa, &rng, &wrong_logs, null, parallel.sequential),
     );
 }
 
@@ -1130,7 +1223,7 @@ fn run_replaced_dealing(gpa: Allocator, replacement_ack: bool) !void {
     defer resumed.player.deinit(gpa);
     resumed.acks.deinit(gpa);
     var rng = utils.test_rng();
-    const result = resumed.player.finalize(N3f1, gpa, &rng, &logs, null);
+    const result = resumed.player.finalize(N3f1, gpa, &rng, &logs, null, parallel.sequential);
     if (replacement_ack) return testing.expectError(error.InvalidPersistedDealing, result);
     var finalized = try result;
     defer finalized.output.deinit(gpa);

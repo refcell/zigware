@@ -7,6 +7,7 @@
 //! state or a provider contract violation, these return errors.
 
 const std = @import("std");
+const parallel = @import("parallel");
 const assert = std.debug.assert;
 const target = "commonware_glue::dkg::reshare::actor::inclusion";
 const Allocator = std.mem.Allocator;
@@ -132,7 +133,14 @@ pub fn Artifacts(comptime T: type) type {
             defer if (player) |*value| value.deinit();
             if (player) |*value| {
                 const crypto = &value.player;
-                const finalized = crypto.finalize(N3f1, gpa, &rng, &selection, null) catch |err|
+                const finalized = crypto.finalize(
+                    N3f1,
+                    gpa,
+                    &rng,
+                    &selection,
+                    null,
+                    parallel.sequential,
+                ) catch |err|
                     switch (err) {
                         error.InsufficientLogs => {
                             const fields = .{ .epoch = epoch, .failure = err };
@@ -145,7 +153,16 @@ pub fn Artifacts(comptime T: type) type {
                     };
                 return .{ .output = finalized.output, .share = finalized.share };
             }
-            const output = fd.observe(V, P, N3f1, gpa, &rng, &selection, null) catch |err|
+            const output = fd.observe(
+                V,
+                P,
+                N3f1,
+                gpa,
+                &rng,
+                &selection,
+                null,
+                parallel.sequential,
+            ) catch |err|
                 switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => {
