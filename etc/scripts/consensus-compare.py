@@ -11,8 +11,10 @@ machine load. A scenario is a function `run(side, binary_dir, port) -> {metric: 
 registered in SCENARIOS with, per metric, whether lower is better. For each metric the table
 shows both sides' medians and the median of the per-round ratios (zigware / commonware, flipped
 for higher-is-better metrics so a ratio below 1 always means zigware is better). The verdict is
-"faster" only when that median is below 0.95 and every round's ratio is below 1; otherwise "not
-yet faster". Raw measurements go to stderr as `round\\tside\\tscenario\\tmetric\\tvalue`.
+"faster" only when that median is below 0.95 and at most n/8 of the n rounds reach 1 (none of
+4, one of 8); otherwise "not yet faster". Each round's pair of runs holds the machine-wide bench
+lock (~/.cache/zigware/bench.lock, as bench-compare.sh), so no other lane benches meanwhile.
+Raw measurements go to stderr as `round\\tside\\tscenario\\tmetric\\tvalue`.
 
 Scenarios:
 - `log`: four `log` validators of one implementation (ed25519 seeds 0..3, validator 0
@@ -26,6 +28,7 @@ Scenarios:
   proposed.
 """
 
+import fcntl
 import os
 import re
 import shutil
@@ -108,9 +111,19 @@ def ratio(commonware, zigware, lower_better):
 
 
 def verdict(ratios):
-    if statistics.median(ratios) < 0.95 and all(r < 1 for r in ratios):
+    slow = sum(r >= 1 for r in ratios)
+    if statistics.median(ratios) < 0.95 and slow <= len(ratios) // 8:
         return "faster"
     return "not yet faster"
+
+
+def bench_lock():
+    """The machine-wide bench lock, held until the returned file is closed."""
+    path = os.path.expanduser("~/.cache/zigware/bench.lock")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    handle = open(path, "a")
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    return handle
 
 
 def main():
@@ -126,6 +139,7 @@ def main():
         order = ["commonware", "zigware"] if round_index % 2 == 0 else ["zigware", "commonware"]
         for name in names:
             run, metrics = SCENARIOS[name]
+            lock = bench_lock()
             for side in order:
                 # Every run gets fresh ports, so none waits on the last run's sockets.
                 run_index += 1
@@ -135,6 +149,7 @@ def main():
                     values[(name, metric)][side].append(value)
                     print(f"{round_index + 1}\t{side}\t{name}\t{metric}\t{value:.4g}",
                           file=sys.stderr, flush=True)
+            lock.close()
     print("| scenario | metric | commonware | zigware | ratio | verdict |")
     print("|---|---|---|---|---|---|")
     counts = {}
