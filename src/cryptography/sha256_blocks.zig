@@ -65,53 +65,83 @@ pub fn digest_n(comptime n: usize, inputs: [n][]const u8, outs: [n]*[32]u8) void
 }
 
 /// The Merkle shapes whose words load straight into registers, skipping the padded copy on
-/// the stack (commonware's `hash_36` and the 64-byte half of its `hash_64`/pair kernels):
-/// `leaf_36` is a 4-byte position then a digest, one block; `node_64` is two digests, one
-/// message block then a padding block whose schedule is a constant.
+/// the stack (commonware's `hash_36`, `hash_40`, `hash_64`, and `hash_72` and their pair
+/// kernels): `leaf_36` is a 4-byte position then a digest and `leaf_40` an 8-byte position
+/// then a digest, one block each; `node_64` is two digests, one message block then a padding
+/// block whose schedule is a constant; `node_72` is an 8-byte position then two digests, two
+/// blocks.
 pub const Shape = enum {
     leaf_36,
+    leaf_40,
     node_64,
+    node_72,
 
-    pub fn first_len(comptime shape: Shape) usize {
+    /// The lengths of the shape's parts.
+    pub fn lens(comptime shape: Shape) []const usize {
         return switch (shape) {
-            .leaf_36 => 4,
-            .node_64 => 32,
+            .leaf_36 => &.{ 4, 32 },
+            .leaf_40 => &.{ 8, 32 },
+            .node_64 => &.{ 32, 32 },
+            .node_72 => &.{ 8, 32, 32 },
         };
     }
 };
 
-/// The digests of `firsts[j] || seconds[j]` in `shape`, `n` (1 or 2) interleaved.
+/// The digests of each `messages[j]` (the parts of one message in `shape`), `n` (1 or 2)
+/// interleaved.
 pub fn digest_shape(
     comptime n: usize,
     comptime shape: Shape,
-    firsts: [n]*const [shape.first_len()]u8,
-    seconds: [n]*const [32]u8,
+    messages: [n][]const []const u8,
     outs: [n]*[32]u8,
 ) void {
     comptime assert(available);
     comptime assert(n == 1 or n == 2);
+    const lens = comptime shape.lens();
+    for (messages) |parts| {
+        assert(parts.len == lens.len);
+        inline for (lens, 0..) |len, i| assert(parts[i].len == len);
+    }
     var x: [n]V4u32 = @splat(iv_x);
     var y: [n]V4u32 = @splat(iv_y);
     var m: [n][4]V4u32 = undefined;
-    inline for (0..n) |j| m[j] = shape_words(shape, firsts[j], seconds[j]);
+    inline for (0..n) |j| m[j] = shape_words(shape, messages[j]);
     block_n(n, &x, &y, &m);
-    if (shape == .node_64) fixed_block_n(n, &x, &y, &fixed_wk_64);
+    switch (shape) {
+        .leaf_36, .leaf_40 => {},
+        .node_64 => fixed_block_n(n, &x, &y, &fixed_wk_64),
+        .node_72 => {
+            // The right digest's last two words, 0x80 then zeros, and the bit length 576.
+            inline for (0..n) |j| {
+                const hi = load(messages[j][2][0..32], 16);
+                m[j] = .{ @shuffle(u32, hi, tail_pad, mask_23_01), @splat(0), @splat(0), .{
+                    0, 0, 0, 72 * 8,
+                } };
+            }
+            block_n(n, &x, &y, &m);
+        },
+    }
     store_digests(n, x, y, outs);
 }
 
-/// The big-endian words of the one message block of `first || second` in `shape`.
-inline fn shape_words(
-    comptime shape: Shape,
-    first: *const [shape.first_len()]u8,
-    second: *const [32]u8,
-) [4]V4u32 {
-    const lo = load(second, 0);
-    const hi = load(second, 16);
+/// Lanes 2 and 3 of the first vector, then lanes 0 and 1 of the second.
+const mask_23_01 = @Vector(4, i32){ 2, 3, -1, -2 };
+/// The first padding word (0x80 then zeros) and three zero words.
+const tail_pad: V4u32 = .{ 0x80000000, 0, 0, 0 };
+
+/// The big-endian words of the first message block of `parts` in `shape`.
+inline fn shape_words(comptime shape: Shape, parts: []const []const u8) [4]V4u32 {
     switch (shape) {
-        .node_64 => return .{ load(first, 0), load(first, 16), lo, hi },
+        .node_64 => {
+            const left = parts[0][0..32];
+            const right = parts[1][0..32];
+            return .{ load(left, 0), load(left, 16), load(right, 0), load(right, 16) };
+        },
         .leaf_36 => {
             // position, digest words 0 to 7, 0x80 then zeros, and the bit length 288.
-            const head: V4u32 = .{ std.mem.readInt(u32, first, .big), 0, 0, 0 };
+            const lo = load(parts[1][0..32], 0);
+            const hi = load(parts[1][0..32], 16);
+            const head: V4u32 = .{ std.mem.readInt(u32, parts[0][0..4], .big), 0, 0, 0 };
             const tail: V4u32 = .{ 0, 0x80000000, 0, 0 };
             return .{
                 @shuffle(u32, head, lo, @Vector(4, i32){ 0, -1, -2, -3 }),
@@ -120,7 +150,43 @@ inline fn shape_words(
                 .{ 0, 0, 0, 36 * 8 },
             };
         },
+        .leaf_40 => {
+            // position words 0 and 1, digest words 0 to 7, 0x80 then zeros, bit length 320.
+            const lo = load(parts[1][0..32], 0);
+            const hi = load(parts[1][0..32], 16);
+            const head = position_words(parts[0][0..8]);
+            return .{
+                @shuffle(u32, head, lo, @Vector(4, i32){ 0, 1, -1, -2 }),
+                @shuffle(u32, lo, hi, mask_23_01),
+                @shuffle(u32, hi, tail_pad, mask_23_01),
+                .{ 0, 0, 0, 40 * 8 },
+            };
+        },
+        .node_72 => {
+            // position words 0 and 1, left digest words 0 to 7, right digest words 0 to 5.
+            const left_lo = load(parts[1][0..32], 0);
+            const left_hi = load(parts[1][0..32], 16);
+            const right_lo = load(parts[2][0..32], 0);
+            const right_hi = load(parts[2][0..32], 16);
+            const head = position_words(parts[0][0..8]);
+            return .{
+                @shuffle(u32, head, left_lo, @Vector(4, i32){ 0, 1, -1, -2 }),
+                @shuffle(u32, left_lo, left_hi, mask_23_01),
+                @shuffle(u32, left_hi, right_lo, mask_23_01),
+                @shuffle(u32, right_lo, right_hi, mask_23_01),
+            };
+        },
     }
+}
+
+/// The two big-endian words of an 8-byte position, in lanes 0 and 1.
+inline fn position_words(position: *const [8]u8) V4u32 {
+    return .{
+        std.mem.readInt(u32, position[0..4], .big),
+        std.mem.readInt(u32, position[4..8], .big),
+        0,
+        0,
+    };
 }
 
 /// W[t] + K[t] of the padding block that ends a 64-byte message (0x80, zeros, and the bit

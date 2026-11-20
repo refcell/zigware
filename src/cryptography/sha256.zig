@@ -63,25 +63,25 @@ pub const Core = struct {
         if (comptime !blocks.available) return stream(parts, out);
         if (total > short_max) return stream(parts, out);
         if (shape_of(parts)) |shape| switch (shape) {
-            inline else => |s| {
-                const n = comptime s.first_len();
-                return blocks.digest_shape(1, s, .{parts[0][0..n]}, .{parts[1][0..32]}, .{out});
-            },
+            inline else => |s| return blocks.digest_shape(1, s, .{parts}, .{out}),
         };
         var padded: [2 * block_length]u8 align(16) = @splat(0);
         const len = pad_short(parts, total, &padded);
         blocks.digest_n(1, .{padded[0..len]}, .{out});
     }
 
-    /// The register-loaded kernel shape of `parts`, if it has one: a 4-byte position or a
-    /// digest, then a digest (commonware's `hash_single` dispatch for the BMT shapes).
+    /// The register-loaded kernel shape of `parts`, if it has one (commonware's
+    /// `hash_single` dispatch for the BMT and MMR leaf and node shapes).
     fn shape_of(parts: []const []const u8) ?blocks.Shape {
-        if (parts.len != 2 or parts[1].len != 32) return null;
-        return switch (parts[0].len) {
-            4 => .leaf_36,
-            32 => .node_64,
-            else => null,
-        };
+        inline for (comptime std.enums.values(blocks.Shape)) |shape| {
+            const lens = comptime shape.lens();
+            if (parts.len == lens.len) {
+                var same = true;
+                inline for (lens, 0..) |len, i| same = same and parts[i].len == len;
+                if (same) return shape;
+            }
+        }
+        return null;
     }
 
     /// `parts` padded into `padded` (zeroed) as one or two final blocks; returns the padded
@@ -120,12 +120,9 @@ pub const Core = struct {
         if (!short) return separate(left, right, out);
         const shape_left = shape_of(left);
         if (shape_left != null and shape_left == shape_of(right)) switch (shape_left.?) {
-            inline else => |s| {
-                const n = comptime s.first_len();
-                return blocks.digest_shape(2, s, .{ left[0][0..n], right[0][0..n] }, .{
-                    left[1][0..32], right[1][0..32],
-                }, .{ &out[0], &out[1] });
-            },
+            inline else => |s| return blocks.digest_shape(2, s, .{ left, right }, .{
+                &out[0], &out[1],
+            }),
         };
         var padded: [2][2 * block_length]u8 align(16) = @splat(@splat(0));
         const len_left = pad_short(left, totals[0], &padded[0]);
@@ -309,32 +306,35 @@ test "sha256 single-message shapes and near misses match streaming" {
     }
 }
 
-test "sha256 register-loaded BMT shapes match std" {
-    // The 4+32 leaf and 32+32 node kernels, alone and paired (also with one side a near
-    // miss), over random bytes at every start offset mod 16.
+test "sha256 register-loaded Merkle shapes match std" {
+    // The BMT (4+32, 32+32) and MMR (8+32, 8+32+32) kernels, alone and paired (also with one
+    // side a near miss), over random bytes at every start offset mod 16.
     var prng = std.Random.DefaultPrng.init(0xb317);
     var data: [576]u8 = undefined;
     prng.random().bytes(&data);
-    const shapes = [_][2]usize{ .{ 4, 32 }, .{ 32, 32 } };
+    const shapes = [_][]const usize{ &.{ 4, 32 }, &.{ 32, 32 }, &.{ 8, 32 }, &.{ 8, 32, 32 } };
     for (0..200) |round| {
         for (shapes) |shape| {
             const a = (round * 7) % 200;
             const b = 250 + (round * 13) % 200;
-            const len = shape[0] + shape[1];
-            const left = [_][]const u8{ data[a..][0..shape[0]], data[a + shape[0] ..][0..32] };
-            const right = [_][]const u8{ data[b..][0..shape[0]], data[b + shape[0] ..][0..32] };
+            var len: usize = 0;
+            for (shape) |part_len| len += part_len;
+            var left_parts: [4][]const u8 = undefined;
+            var right_parts: [4][]const u8 = undefined;
+            const left = split(data[a..][0..len], shape, &left_parts);
+            const right = split(data[b..][0..len], shape, &right_parts);
             var expected: [2][32]u8 = undefined;
             StdSha256.hash(data[a..][0..len], &expected[0], .{});
             StdSha256.hash(data[b..][0..len], &expected[1], .{});
-            try testing.expectEqualSlices(u8, &expected[0], &Sha256.hash(&left).bytes);
-            const pair = Sha256.hash_pair(&left, &right, parallel.sequential);
+            try testing.expectEqualSlices(u8, &expected[0], &Sha256.hash(left).bytes);
+            const pair = Sha256.hash_pair(left, right, parallel.sequential);
             try testing.expectEqualSlices(u8, &expected[0], &pair[0].bytes);
             try testing.expectEqualSlices(u8, &expected[1], &pair[1].bytes);
-            // A right side of another shape takes the padded path.
-            const other = [_][]const u8{ data[b..][0..8], data[b + 8 ..][0..32] };
+            // A right side of a shape without a kernel takes the padded path.
+            const other = [_][]const u8{ data[b..][0..8], data[b + 8 ..][0..36] };
             var expected_other: [32]u8 = undefined;
-            StdSha256.hash(data[b..][0..40], &expected_other, .{});
-            const mixed = Sha256.hash_pair(&left, &other, parallel.sequential);
+            StdSha256.hash(data[b..][0..44], &expected_other, .{});
+            const mixed = Sha256.hash_pair(left, &other, parallel.sequential);
             try testing.expectEqualSlices(u8, &expected[0], &mixed[0].bytes);
             try testing.expectEqualSlices(u8, &expected_other, &mixed[1].bytes);
         }

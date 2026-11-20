@@ -540,3 +540,10 @@ hold whole units of lanes" over coding's lane-aware `hash_batches`, and `sha512/
   (4+32, commonware `hash_36`) and node (32+32, message block then a constant-schedule padding
   block) from register-built words, singly and paired; the per-arch block loops share
   `block_n`/`rounds_wk`. bmt::build 0.72× of 356e1da9's time.
+- 2026-11-20: sha256's register-loaded shapes gain the MMR leaf (8+32 bytes, one block) and
+  node (8+32+32, two blocks whose second holds the right digest's last two words), as
+  commonware's `hash_40` and `hash_72` and their pair kernels do; `digest_shape` takes each
+  message's parts. Standalone min of 5: mmr_leaf 48 -> 27 ns (commonware 27.5), mmr_node
+  78 -> 50 ns (commonware 59), the mmr pair 106 -> 92 ns (commonware 89.5). The shape test
+  covers all four shapes against std on x86-64 and aarch64 under qemu; planted bugs in both
+  bit lengths, the node's right words, and its tail digest are caught.
