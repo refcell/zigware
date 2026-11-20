@@ -98,13 +98,7 @@ fn split_terms(
     var count: usize = 0;
     for (points, scalars) |point, scalar| {
         if (point.infinity) continue;
-        const out_points = split_points[count..][0..parts];
-        const out_scalars = split_scalars[count..][0..parts];
-        if (C == g1.G1) {
-            g1.glv_split(point, scalar, out_points, out_scalars);
-        } else {
-            g2.gls_split(point, scalar, out_points, out_scalars);
-        }
+        split_point(C, point, scalar, split_points[count..][0..parts], split_scalars[count..][0..parts]);
         count += parts;
     }
     assert(count % parts == 0 and count <= points.len * parts);
@@ -182,37 +176,94 @@ const straus_bits = 4;
 const straus_multiples = 1 << (straus_bits - 1);
 
 /// sum_i [scalars[i]] points[i] over one doubling chain: each window doubles the sum
-/// `straus_bits` times and adds every point's table entry for its digit (Straus-Shamir).
+/// `straus_bits` times and adds every term's table entry for its digit (Straus-Shamir).
+/// Every term is split by the curve's endomorphism (GLV for G1, GLS for G2), and the
+/// images' tables are the images of the point's table, so the chain doubles a half or a
+/// quarter as often for the same additions. Inputs are in the order-r subgroup.
 fn msm_straus(comptime C: type, points: []const C.Affine, scalars: []const u256) C {
+    const parts = comptime split_parts(C);
+    const terms_max = comptime straus_points_max(C) * parts;
+    assert(points.len == scalars.len and points.len <= straus_points_max(C));
+    var tables: [terms_max * straus_multiples]C.Affine = undefined;
+    var split_scalars: [terms_max]u256 = undefined;
+    const terms = straus_tables(C, points, scalars, &tables, &split_scalars);
+    assert(terms % parts == 0 and terms <= terms_max);
+    var result = C.identity;
+    var window: u32 = scalar_bits / parts / straus_bits + 1;
+    while (window > 0) {
+        window -= 1;
+        if (!result.is_identity()) {
+            for (0..straus_bits) |_| result = result.double();
+        }
+        for (split_scalars[0..terms], 0..) |scalar, term| {
+            const digit = digit_at(scalar, window, straus_bits);
+            if (digit == 0) continue;
+            const entry = tables[term * straus_multiples + @abs(digit) - 1];
+            result = result.add_affine(if (digit > 0) entry else entry.neg());
+        }
+    }
+    return result;
+}
+
+/// Fills each finite point's table P, 2P, ..., 8P in affine form, then the tables of its
+/// endomorphism images and their scalar parts; returns the number of terms.
+fn straus_tables(
+    comptime C: type,
+    points: []const C.Affine,
+    scalars: []const u256,
+    tables: *[straus_points_max(C) * split_parts(C) * straus_multiples]C.Affine,
+    split_scalars: *[straus_points_max(C) * split_parts(C)]u256,
+) usize {
     const F = @TypeOf(@as(C.Affine, undefined).x);
+    const parts = comptime split_parts(C);
     const entries_max = comptime straus_points_max(C) * straus_multiples;
     assert(points.len == scalars.len and points.len <= straus_points_max(C));
     var jacobian: [entries_max]C = undefined;
     var scratch: [entries_max]F = undefined;
-    var tables: [entries_max]C.Affine = undefined;
-    for (points, 0..) |point, index| {
-        const table = jacobian[index * straus_multiples ..][0..straus_multiples];
+    var base: [entries_max]C.Affine = undefined;
+    var images: [parts]C.Affine = undefined;
+    var count: usize = 0;
+    for (points, scalars) |point, scalar| {
+        if (point.infinity) continue;
+        const table = jacobian[count * straus_multiples ..][0..straus_multiples];
         table[0] = point.to_jacobian();
         table[1] = table[0].double();
         for (2..straus_multiples) |multiple| {
             table[multiple] = table[multiple - 1].add_affine(point);
         }
+        split_point(C, point, scalar, &images, split_scalars[count * parts ..][0..parts]);
+        count += 1;
     }
-    const entries = points.len * straus_multiples;
-    C.batch_to_affine(jacobian[0..entries], tables[0..entries], scratch[0..entries]);
-    var result = C.identity;
-    var window = window_count_for(straus_bits);
-    while (window > 0) {
-        window -= 1;
-        for (0..straus_bits) |_| result = result.double();
-        for (scalars, 0..) |scalar, index| {
-            const digit = digit_at(scalar, window, straus_bits);
-            if (digit == 0) continue;
-            const entry = tables[index * straus_multiples + @abs(digit) - 1];
-            result = result.add_affine(if (digit > 0) entry else entry.neg());
+    const entries = count * straus_multiples;
+    C.batch_to_affine(jacobian[0..entries], base[0..entries], scratch[0..entries]);
+    var unused: [parts]u256 = undefined;
+    for (base[0..entries], 0..) |entry, index| {
+        // jP is finite for a finite P of prime order r > 8.
+        split_point(C, entry, 0, &images, &unused);
+        const point_index = index / straus_multiples;
+        const multiple = index % straus_multiples;
+        for (images, 0..) |image, part| {
+            tables[(point_index * parts + part) * straus_multiples + multiple] = image;
         }
     }
-    return result;
+    assert(count <= points.len);
+    return count * parts;
+}
+
+/// The endomorphism split of one term (GLV for G1, GLS for G2).
+fn split_point(
+    comptime C: type,
+    point: C.Affine,
+    scalar: u256,
+    out_points: *[split_parts(C)]C.Affine,
+    out_scalars: *[split_parts(C)]u256,
+) void {
+    assert(!point.infinity);
+    if (C == g1.G1) {
+        g1.glv_split(point, scalar, out_points, out_scalars);
+    } else {
+        g2.gls_split(point, scalar, out_points, out_scalars);
+    }
 }
 
 /// Below this many points the per-batch inversion does not pay off.
