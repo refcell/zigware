@@ -14,8 +14,7 @@ variants need `runtime` storage; do them after its interface lands.
   positions and peaks math identical to commonware, proof codec, and the position codec
   (`merkle.read_position`; qmdb's `operation.read_location` decodes locations). Port its tests
   and vectors.
-  (The Proof `CodecConformance` hash still waits on the conformance lane's `arbitrary`
-  emulation.)
+  (The Proof `CodecConformance` hash matches commonware: merkle/proof_conformance_test.zig.)
 - [x] merkle/batch: stacked speculative batches (`Mem.new_batch`, `merkleize`,
   `Mem.apply_batch`, `add_many`, leaf updates) with commonware's batch.rs and mem.rs tests.
 - [x] merkle/mmb and shared merkle proof types.
@@ -230,6 +229,14 @@ check. Status after the 24 open ports landed (two `read_location` tests went to 
 | persisted/full.rs | 121 | 118 | 0 | 3 |
 | journal/contiguous/fixed.rs | 136 | 129 | 0 | 7 |
 | journal/contiguous/variable.rs | 152 | 136 | 0 | 16 |
+
+Conformance (outside the rows above): all five of commonware's merkle entries in
+storage/conformance.toml match, `MmrRootStability`, `MmbRootStability`, and the MMR `Proof`
+`CodecConformance` (65536 cases, merkle/proof_conformance_test.zig), and
+`StorageConformance<MmrFullWorkload>`/`<MmbFullWorkload>` (256 cases each,
+persisted/full_conformance_test.zig, the journal and metadata blobs byte-identical). Commonware's
+`random_range(16..96)` there is unconstrained, so Rust samples an `i32`; drawing a `u64`
+instead fails both storage hashes, and swapping the proof's two varints fails the codec hash.
 
 The `should_panic` tests are death tests (`utils.death`) in merkle/death_test.zig (mmr
 `to_nearest_size` past `MAX_NODES`, mmb `children` of a leaf) and journal/contiguous/death_test.zig
@@ -694,6 +701,8 @@ The ports found four differences from commonware, now fixed:
     by using it; `Mode.compress` stays only for comparison.
 - 2026-11-19: test tally of index, rmap, bitmap, and translator against commonware (clearing lane).
 - 2026-11-19: tally of merkle and journal internals; ported its 22 open tests in this lane.
+- 2026-11-20: the last three merkle conformance hashes (MMR proof codec, Mmr/Mmb full storage
+  workloads) ported and matching (bls-math's conformance audit).
 - 2026-11-19: partitioned index ranges (`new_range`/`install_range`) and their 5 tests
   (clearing lane).
 - 2026-11-19: proposed the asynchronous start_sync design (awaiting the coordinator).

@@ -861,6 +861,7 @@ test {
     _ = @import("full_fuzz_test.zig");
     _ = @import("full_proof_test.zig");
     _ = @import("full_init_test.zig");
+    _ = @import("full_conformance_test.zig");
     _ = @import("full_blob_test.zig");
     _ = @import("mmr_full_test.zig");
 }

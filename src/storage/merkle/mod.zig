@@ -276,6 +276,7 @@ test {
     _ = @import("batch_test.zig");
     _ = @import("batch_parallel_test.zig");
     _ = @import("death_test.zig");
+    _ = @import("proof_conformance_test.zig");
 }
 
 test "bagging domains are distinct" {
