@@ -386,6 +386,42 @@ test "build crc record preserves the old slot" {
     try testing.expectEqual(Slot.first, active2.slot);
 }
 
+/// commonware's `CodecConformance<Checksum>`: an arbitrary record (four fields in order, as its
+/// `Arbitrary` impl draws them) encoded to its 12 bytes.
+const ChecksumConformance = struct {
+    const codec = @import("codec");
+
+    pub fn commit(gpa: std.mem.Allocator, seed: u64) ![]u8 {
+        const record = try codec.arbitrary.generate(Checksum, arbitrary_checksum, gpa, seed);
+        const bytes = record.to_bytes();
+        assert(std.meta.eql(Checksum.decode(&bytes), record));
+        return gpa.dupe(u8, &bytes);
+    }
+
+    fn arbitrary_checksum(
+        _: std.mem.Allocator,
+        u: *codec.arbitrary.Unstructured,
+    ) !Checksum {
+        const len1 = u.int(u16);
+        const crc1 = u.int(u32);
+        const len2 = u.int(u16);
+        const crc2 = u.int(u32);
+        return .{ .len1 = len1, .crc1 = crc1, .len2 = len2, .crc2 = crc2 };
+    }
+};
+
+test "paged conformance: CodecConformance<Checksum>" {
+    const conformance = @import("conformance");
+    try conformance.verify(
+        ChecksumConformance,
+        testing.allocator,
+        "commonware_runtime::utils::buffer::paged::tests::conformance::" ++
+            "CodecConformance<Checksum>",
+        conformance.default_cases,
+        @embedFile("../../conformance.toml"),
+    );
+}
+
 test {
     std.testing.refAllDecls(@This());
 }
