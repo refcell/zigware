@@ -1266,8 +1266,9 @@ fn converges_after_evicted_targets(io_: std.Io) anyerror!void {
     for (7..10) |height| try testing.expect(run.tips.send_lossy(.init(anchor(height), height)));
     try run.report.try_send({});
     try run.burst(io_, 10, 12);
-    // The database adopts the newest target and reports it, finishing the sync there.
-    try run.report.try_send({});
+    // The database adopts the newest target and reports it, finishing the sync there. The
+    // send waits for the database to take the first report, which it polls once a tick.
+    try run.report.send({});
     try run.expect_converged(io_, 12);
 }
 
@@ -1281,8 +1282,9 @@ fn adopts_queued_tip_before_finishing(io_: std.Io) anyerror!void {
     try testing.expect(run.tips.send_lossy(update.update));
     try run.report.try_send({});
     try update.observed.recv();
-    // The database takes the tip's target and reports it, finishing the sync there.
-    try run.report.try_send({});
+    // The database takes the tip's target and reports it, finishing the sync there. The
+    // send waits for the database to take the first report, which it polls once a tick.
+    try run.report.send({});
     try run.expect_converged(io_, 1);
 }
 
