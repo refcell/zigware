@@ -122,7 +122,8 @@ pub const Container = union(Kind) {
             .run => |*run| try run.insert(gpa, value),
         };
         try self.normalize(gpa);
-        assert(self.contains(value));
+        // Each leaf insert asserts its write; this re-search checks `normalize` kept it.
+        if (std.debug.runtime_safety) assert(self.contains(value));
         return inserted;
     }
 

@@ -180,7 +180,9 @@ pub const Run = struct {
         } else {
             try self.runs.insert(gpa, position, .{ value, value });
         }
-        assert(self.contains(value));
+        // The run this insert wrote covers `value`: O(1), where `contains` searches.
+        const written = self.runs.items[if (extends_previous) position - 1 else position];
+        assert(written[0] <= value and value <= written[1]);
         return true;
     }
 
