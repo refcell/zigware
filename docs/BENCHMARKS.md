@@ -1456,6 +1456,7 @@ Totals: 22 faster, 20 tie, 6 slower.
   slower than x16 alone (3.0 against 3.1–3.3 µs a 16 KiB message), so it did not land.
 - **sha512 individual** (1.29×) is the open gap: commonware's `sha2` crate runs its AVX2 message
   schedule; zigware's `sha512_blocks.zig` four-block schedule beats std by 15–20% but not it.
+  Since flipped to 0.85–0.93× (see [Sweep](#sweep-the-rows-still-slower-2026-11-20-sweep)).
 
 ## cryptography: blake3 and bloomfilter (2026-11-20, parallel lane)
 
@@ -1500,6 +1501,44 @@ b55d750c (load 2–3), and its rounds are still being extended. blake3: 3 faster
   block. 16 chunks take 1255 ns; 16 plus one interleaved scalar chunk take 1900–1940 ns,
   about the sum of the two, so the scalar chain does not ride on idle pipes. A 32-lane
   kernel and a policy-free `hash_across` gave no gain either.
+
+## Sweep: the rows still slower (2026-11-20, sweep)
+
+The rows left slower or unverdicted when the lanes paused, measured with `bench-compare.sh`
+(ABBA rounds through `bench-lock.sh`, commonware `-C target-cpu=native`, median of per-round
+ratios). Raw rounds are in `docs/bench/sweep.tsv`. Load 5 to 15 on 32 threads.
+
+| bench | params | commonware | zigware | median | rounds | verdict |
+|---|---|---|---|---|---|---|
+| `sha512::hash_many::individual` | `count=1 len=96` | 146 ns | 125 ns | 0.85× | 0.84–0.92 (8) | faster |
+| `sha512::hash_many::individual` | `count=1 len=1024` | 1.05 µs | 966 ns | 0.92× | 0.89–0.94 (8) | faster |
+| `sha512::hash_many::individual` | `count=1 len=16384` | 14.5 µs | 13.5 µs | 0.92× | 0.92–1.25 (8) | faster |
+| `sha512::hash_many::individual` | `count=1 len=65536` | 57.7 µs | 53.5 µs | 0.93× | 0.81–0.93 (8) | faster |
+| `sha512::hash_many::individual` | `count=1 len=262144` | 230 µs | 212 µs | 0.92× | 0.89–0.93 (8) | faster |
+| `archive::get` | `variant=prunable mode=concurrent`, 4 rows | 7.8–8.9 ms | 2.7–2.9 ms | 0.32–0.35× | ≤0.38 (6) | faster |
+| `lthash::checksum` | | 1.17 µs | 1.26 µs | 1.08× | 1.07–1.08 (6) | slower |
+
+- **sha512** was 1.10× at 1 KiB and a tie from 16 KiB on b9f83fde (4 rounds). Two changes
+  flipped it, both in `sha512_blocks.zig`: blocks schedule eight at a time on AVX-512, where
+  eight u64 lanes cost what four do (a0cd1ca0; 1 KiB then read 1.00×, longer messages 0.96×),
+  and the looped rounds keep LLVM from chaining `Ch`, `h`, `W + K`, `Σ1`, and `d` one after
+  another on `e` (ce4b9de7): empty-asm pins hold `d + h + W + K` and `h + W + K` off the chain,
+  and majority adds as its disjoint terms `a & (b ^ c)` and `b & c`. The same pins on the
+  unrolled lone block made 96 B slower (150 against 118 ns), so it keeps the old form, and a
+  padding block routed through the loop after whole blocks cost 96 B the same. This is
+  `sha2` crate code on commonware's side, not commonware's.
+- **archive concurrent get** (prunable) was 1.10×; ec9b8ee5 (`get_many` reads values
+  concurrently) made it 0.32–0.35×.
+- **lthash checksum** hashes its 2 KiB state with BLAKE3: two chunks, which the transposed
+  kernel compresses in 2-lane vectors. On this CPU a dependent vector add, xor, or rotate takes
+  about twice a scalar add's latency (1.27 against 0.63 TSC ticks), so the kernel is bound by
+  its round chain, not its op count (per 4-lane block: 336 `vpaddd`, 224 `vprold`, 232 xors,
+  the minimum). It runs about 239 TSC ticks a compression against about 200 for the `blake3`
+  crate's row-wise asm. A single chunk on scalar registers is 130 a compression, but two
+  interleaved scalar chunks spill (32 state words) and a scalar chunk beside a vector one
+  waits on the vector chain. Rotates as byte shuffles were rewritten back into `vprold` by
+  LLVM, and forced `vpshufb` was slower. Not yet faster; the same kernel holds
+  `blake3::hash_message/msg_len=4096` at 1.12×.
 
 ## Appendix: bench coverage
 
