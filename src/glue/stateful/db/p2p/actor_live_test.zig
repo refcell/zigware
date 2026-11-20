@@ -325,7 +325,12 @@ const Background = struct {
 
 /// Runs `body` on a deterministic runtime that fails after 10 simulated seconds.
 fn run(comptime body: fn (Io) anyerror!void) !void {
-    const timeout_ns = 10 * std.time.ns_per_s;
+    try run_within(10, body);
+}
+
+/// Runs `body` on deterministic runtimes that fail after `timeout_s` simulated seconds.
+fn run_within(comptime timeout_s: u64, comptime body: fn (Io) anyerror!void) !void {
+    const timeout_ns = timeout_s * std.time.ns_per_s;
     try runtime.deterministic.soak(gpa, .{ .timeout_ns = timeout_ns }, {}, struct {
         fn run_round(_: void, runner: *runtime.deterministic.Runner) anyerror!void {
             try try runner.start(body, .{runner.io()});
@@ -436,11 +441,16 @@ test "stateful p2p actor live: multiple batches sync through the live mailbox" {
 }
 
 /// Links `client` to `good` once the network records a block.
-fn link_after_block(cluster: *Cluster, client: usize, good: usize) !void {
+/// Links `client` to `good` once any peer is blocked, recording when in `blocked_ns`.
+fn link_after_block(cluster: *Cluster, client: usize, good: usize, blocked_ns: *u64) !void {
     while (true) {
         const blocked = try cluster.oracle().blocked(gpa);
         gpa.free(blocked);
-        if (blocked.len > 0) return cluster.link(client, good);
+        if (blocked.len > 0) {
+            const now = Io.Clock.Timestamp.now(cluster.io, .awake).raw.nanoseconds;
+            blocked_ns.* = @intCast(now);
+            return cluster.link(client, good);
+        }
         try cluster.io.sleep(.fromMilliseconds(1), .awake);
     }
 }
@@ -453,8 +463,9 @@ fn invalid_peer(io: Io) !void {
     const bad = 0;
     const good = 1;
     const client = 2;
-    // Only the bad peer is reachable until the client blocks it, so the first candidate is
-    // invalid whatever peer the fetcher would sample (commonware relies on its seeded order).
+    // Only the bad peer is reachable until the client blocks it, so the first answer the
+    // client gets is invalid whatever peer the fetcher samples (commonware relies on its
+    // seeded order). A request to the unreachable good peer before then times out.
     try cluster.link(client, bad);
     cluster.databases[bad] = try cluster.nodes[bad].open(2, 100);
     cluster.databases[good] = try cluster.nodes[good].open(2, 0);
@@ -469,18 +480,20 @@ fn invalid_peer(io: Io) !void {
     var destination: Node = undefined;
     try destination.init(io);
     defer destination.deinit();
-    var linker = try io.concurrent(link_after_block, .{ &cluster, client, good });
+    var blocked_ns: u64 = 0;
+    var linker = try io.concurrent(link_after_block, .{ &cluster, client, good, &blocked_ns });
     defer linker.cancel(io) catch {};
-    const started = Io.Clock.Timestamp.now(io, .awake);
     const reached = try sync_through(&destination, mailbox, target, .{
         .fetch_batch_size = 16,
         .apply_batch_size = 16,
         .max_outstanding_requests = 1,
     });
-    // The rejected peer is blocked and the same registration retries at once, well before
-    // the 2 s request timeout.
-    const elapsed = started.durationTo(Io.Clock.Timestamp.now(io, .awake));
-    try testing.expect(elapsed.raw.toNanoseconds() < std.time.ns_per_s);
+    // The rejected peer is blocked and the same registration retries at once: the sync ends
+    // well within the 2 s request timeout of the block. Timing from the block, not the
+    // start, leaves out the timeouts of requests sent to the good peer while unreachable.
+    try testing.expect(blocked_ns > 0);
+    const done_ns = Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+    try testing.expect(done_ns - blocked_ns < std.time.ns_per_s);
     try testing.expect(db.targets_eql(KeylessDb.SyncTarget, &reached, &target));
     const blocked = try cluster.oracle().blocked(gpa);
     defer gpa.free(blocked);
@@ -491,7 +504,9 @@ fn invalid_peer(io: Io) !void {
 }
 
 test "stateful p2p actor live: an invalid peer retries the same qmdb source registration" {
-    try run(invalid_peer);
+    // Until the block, the fetcher draws the unreachable good peer at random (by weight) and
+    // waits out each 2 s request timeout; some seeds draw it several times, so 10 s is short.
+    try run_within(60, invalid_peer);
 }
 
 fn concurrent_serves(io: Io) !void {

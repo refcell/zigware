@@ -401,6 +401,14 @@ const Harness = struct {
         try h.io.sleep(.fromMilliseconds(@intCast(ms)), .awake);
     }
 
+    /// Lets the source probe take its attachment, so it serves the next request: until then
+    /// it is discovering, and discovery ignores requests. Each hand-off between tasks costs a
+    /// scheduler cycle of simulated time, so a request sent at once can arrive first on some
+    /// runner seeds (found by -Dfuzz-soak).
+    fn settle_source(h: *Harness) !void {
+        try h.sleep_ms(10);
+    }
+
     /// Expects participant `by` to have blocked participant `peer`.
     fn expect_blocked(h: *Harness, by: usize, peer: usize) !void {
         const blocked = try h.net.oracle().blocked(gpa);
@@ -509,7 +517,7 @@ test "dkg probe: discovers the artifact from a sample" {
             var h: Harness = undefined;
             try h.init(io, .{});
             defer h.deinit();
-            var subscription = try h.joiner.subscribe();
+            var subscription = try subscribe_solicited(&h);
             defer subscription.deinit();
             var target = try h.complete_target_sample();
             defer target.deinit(gpa);
@@ -578,7 +586,7 @@ test "dkg probe: the sample selects the highest reply" {
             var h: Harness = undefined;
             try h.init(io, .{ .source_boundaries = &.{2} });
             defer h.deinit();
-            var subscription = try h.joiner.subscribe();
+            var subscription = try subscribe_solicited(&h);
             defer subscription.deinit();
             var info = try epoch_info(2, h.participants);
             defer info.deinit(gpa);
@@ -607,7 +615,7 @@ test "dkg probe: a genesis floor resolves locally" {
             var h: Harness = undefined;
             try h.init(io, .{ .source_boundaries = &.{} });
             defer h.deinit();
-            var subscription = try h.joiner.subscribe();
+            var subscription = try subscribe_solicited(&h);
             defer subscription.deinit();
             // An epoch-zero sample resolves from genesis without a boundary fetch.
             var floor = try latest_finalization(&h.fixture, 0, Sha256.hash(&.{"genesis floor"}));
@@ -898,7 +906,7 @@ test "dkg probe: a late subscriber receives the cached artifact" {
             var h: Harness = undefined;
             try h.init(io, .{});
             defer h.deinit();
-            var first = try h.joiner.subscribe();
+            var first = try subscribe_solicited(&h);
             defer first.deinit();
             var target = try h.complete_target_sample();
             defer target.deinit(gpa);
@@ -918,6 +926,7 @@ test "dkg probe: service answers a latest request from the source" {
             var h: Harness = undefined;
             try h.init(io, .{});
             defer h.deinit();
+            try h.settle_source();
             try send_to(&h.client.sender, h.fixture.participants[0], .latest_request);
             var response = try next_response(&h.client.receiver, &h.fixture);
             defer response.deinit();
@@ -933,6 +942,7 @@ test "dkg probe: service answers boundary finalization and block requests" {
             var h: Harness = undefined;
             try h.init(io, .{});
             defer h.deinit();
+            try h.settle_source();
             const source = h.fixture.participants[0];
             try send_to(&h.client.sender, source, .{ .boundary_request = .new(1) });
             var boundary = try next_response(&h.client.receiver, &h.fixture);
