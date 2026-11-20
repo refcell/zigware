@@ -46,7 +46,19 @@ All of these are recorded in the
   mimalloc's layout, size classes, arenas, reservations, and delayed purges.
 - A heap is a value, not the process allocator, so configuration is per heap rather than once
   per process.
-- One lock guards a heap, so `Stats` are exact.
+- Each thread gets a cache in the heap, as mimalloc's per-thread heaps: it allocates and frees
+  its own small pages without the heap's lock, other threads' frees into them wait on a
+  lock-free deferred list, and its last emptied pages are kept for a few refills; `collect`
+  drains and releases them. Allocated bytes are summed over the caches when read, so `Stats`
+  are exact once no thread is allocating (mimalloc's per-thread counters drift by up to a
+  merge threshold).
+- There is no thread-exit hook (mimalloc's `mi_thread_done`): a thread that exits keeps its
+  cache slot and its pages, with any blocks other threads free into them, until a thread
+  with the same id reuses the slot, and after `locals_max` (64) distinct threads later
+  threads take the lock for every block. Only the measured bench harnesses use a `Heap`, and
+  their threads come from `std.Io.Threaded`, which keeps its workers until the `Io` is torn
+  down; a program that churns short-lived threads needs a `thread_exit` that abandons the
+  caller's pages first.
 - The mimalloc-only knobs (large OS pages, transparent huge pages, the stats merge threshold)
   are recorded in `effective` but change nothing.
 - The huge-page-advice integration tests are not ported: they read Linux smaps for mimalloc's

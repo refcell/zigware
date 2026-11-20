@@ -584,6 +584,10 @@ for the rows marked), at a 1-minute load of 56 to 89 with another lane benchmark
   `partitioned_ordered_2` at +40% in every round while the same code with probe counters
   read even: a code-layout effect. Marking `refill`, `attach`, `alloc_locked`, and
   `retire_owned` cold took the pair cost from 14.3 to 4.5 ns and the row to −8%.
+- A thread's cache outlives the thread (there is no `mi_thread_done`): its slot and pages
+  stay until a thread with the same id reuses them, and past 64 distinct threads later
+  threads take the lock. Bench threads come from `std.Io.Threaded`, which keeps its workers
+  for the whole run, so a harness reaches neither; only the bench harnesses use a `Heap`.
 
 ## Storage: merkle, bmt, rmap, variable journal reads (2026-11-19, storage-merkle lane)
 
