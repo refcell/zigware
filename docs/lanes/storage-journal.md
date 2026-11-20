@@ -295,7 +295,9 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   operation waits for it, as commonware's does. A writer
   takes ownership of its blob on success and closes it in `deinit`; a `Replay` borrows it.
   Large appends write their bulk pages in buffer-capacity chunks rather than one write; the
-  bytes on disk are identical. `recoverable_prefix_len` reads one page at a time.
+  bytes on disk are identical. The journals' recovery scans read whole pages up to a budget
+  per blob read (`recoverable_prefix_len_scan`), as commonware's: the config's
+  `replay_buffer` at open, and the replay's buffer and read options during a replay.
 
 - segmented: `Recovery.next` returns `?Item` with errors through the error union (commonware's
   `Option<Result>`); an error ends that section and makes `finish` fail. `finish` and

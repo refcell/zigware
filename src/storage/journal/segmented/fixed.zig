@@ -114,7 +114,12 @@ pub fn Journal(comptime A: type) type {
                 if (end > 0) {
                     if (try journal.manager.get(section)) |buffer| {
                         if (end < buffer.size()) {
-                            const recoverable = try buffer.recoverable_prefix_len_at_most(0, end);
+                            const recoverable = try buffer.recoverable_prefix_len_scan(
+                                0,
+                                end,
+                                cfg.replay_buffer,
+                                .{},
+                            );
                             end = recoverable - recoverable % chunk_u64;
                         }
                     }
@@ -595,7 +600,12 @@ fn RecoveryType(comptime A: type) type {
             const valid_size = std.math.mul(u64, current.position, chunk_u64) catch
                 return error.OffsetOverflow;
             const buffer = (try self.journal.?.manager.get(current.section)).?;
-            const recoverable = try buffer.recoverable_prefix_len(valid_size);
+            const recoverable = try buffer.recoverable_prefix_len_scan(
+                valid_size,
+                std.math.maxInt(u64),
+                self.cfg.replay_buffer,
+                self.cfg.replay_read_options,
+            );
             // A whole-blob prefix means the failure was not a torn page.
             if (recoverable >= size) return error.InvalidChecksum;
             const target = recoverable - recoverable % chunk_u64;

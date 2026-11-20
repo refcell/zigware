@@ -137,7 +137,9 @@ pub fn Journal(comptime V: type) type {
                 // Resolve a torn page before truncation tries to rewrite its partial checksum.
                 if (try journal.manager.get(section)) |buffer| {
                     if (end > 0 and end < buffer.size()) {
-                        end = @min(end, try buffer.recoverable_prefix_len_at_most(0, end));
+                        const recoverable =
+                            try buffer.recoverable_prefix_len_scan(0, end, cfg.replay_buffer, .{});
+                        end = @min(end, recoverable);
                     }
                 }
                 try journal.manager.truncate_pending(section, end);
@@ -505,7 +507,12 @@ fn RecoveryType(comptime V: type) type {
             const current = &self.replays.items[self.head];
             const blob_size = current.reader.blob_size();
             const buffer = (try self.journal.?.manager.get(current.section)).?;
-            const recoverable = try buffer.recoverable_prefix_len(current.offset);
+            const recoverable = try buffer.recoverable_prefix_len_scan(
+                current.offset,
+                std.math.maxInt(u64),
+                self.replay_buffer,
+                self.read_options,
+            );
             // A whole-blob prefix means the failure was not a torn page.
             if (recoverable >= blob_size) return error.InvalidChecksum;
             // The cut must not drop below the prefix already handed out.

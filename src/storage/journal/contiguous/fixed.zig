@@ -291,7 +291,13 @@ pub fn Recovery(comptime A: type) type {
                 const rounded = (std.math.divCeil(u64, bytes, page) catch unreachable) *| page;
                 break :blk @min(rounded, writer.size());
             } else writer.size();
-            const recoverable = try writer.recoverable_prefix_len_at_most(acknowledged, limit);
+            // Batched reads of up to the replay buffer, as commonware's recovery reads.
+            const recoverable = try writer.recoverable_prefix_len_scan(
+                acknowledged,
+                limit,
+                self.cfg.replay_buffer,
+                .{},
+            );
             const valid_items = recoverable / chunk_u64;
             const valid = try items_to_bytes(valid_items);
             if (valid == writer.size()) return;

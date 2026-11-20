@@ -769,6 +769,29 @@ test "fixed: commit does not advance the recovery watermark" {
     try journal.destroy();
 }
 
+test "fixed: recovery scans unacknowledged pages in replay-buffer batches" {
+    var h = try Harness.init(1000);
+    defer h.deinit();
+    var journal = try h.open();
+    try Harness.fill(&journal, 0, 1);
+    try journal.sync();
+    // Committed items are durable but above the watermark, so reopening scans their pages:
+    // 9,600 bytes of 44-byte pages. The 2,048-byte replay buffer reads 36 physical pages at a
+    // time (commonware's `recoverable_prefix_len_at_most` budget) instead of one per read.
+    try Harness.fill(&journal, 1, 300);
+    try journal.commit();
+    try testing.expectEqual(1, journal.recovery_watermark());
+    journal.deinit();
+    const before = h.storage.reads;
+    journal = try h.open();
+    const reads = h.storage.reads - before;
+    try testing.expectEqual(Bounds{ .start = 0, .end = 301 }, journal.get_bounds());
+    try testing.expectEqual(test_digest(300), try journal.read(300));
+    try testing.expect(reads > 0);
+    try testing.expect(reads < 40);
+    try journal.destroy();
+}
+
 test "fixed: prune to a blob boundary removes the pruning hint" {
     var h = try Harness.init(5);
     defer h.deinit();

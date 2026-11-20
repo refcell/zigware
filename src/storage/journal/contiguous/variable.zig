@@ -367,7 +367,12 @@ pub fn Recovery(comptime V: type) type {
 
         fn check_suspect(self: *Self, index: usize, floor: u64, floor_blob: u64) Error!void {
             const entry = &self.pending.items[index];
-            const valid = try entry.writer.recoverable_prefix_len(0);
+            const valid = try entry.writer.recoverable_prefix_len_scan(
+                0,
+                std.math.maxInt(u64),
+                self.cfg.replay_buffer,
+                .{},
+            );
             const size = entry.writer.size();
             assert(valid <= size);
             if (valid == size) return;
