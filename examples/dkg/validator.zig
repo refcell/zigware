@@ -737,13 +737,6 @@ const Validator = struct {
     }
 };
 
-fn run_network(net: *Net) Io.Cancelable!void {
-    net.run() catch |err| switch (err) {
-        error.Canceled => return error.Canceled,
-        else => std.debug.panic("network failed: {t}", .{err}),
-    };
-}
-
 /// Starts every validator actor from `node_dir` and runs until one stops (commonware
 /// `validator::run`).
 pub fn run(ctx: Ctx, arena: Allocator, node_dir: []const u8, state_sync: bool) !void {
@@ -755,7 +748,7 @@ pub fn run(ctx: Ctx, arena: Allocator, node_dir: []const u8, state_sync: bool) !
     defer gpa.destroy(self);
     try self.init(ctx, arena, dir, state_sync);
     defer self.deinit();
-    var network_task = try io.concurrent(run_network, .{self.net});
+    var network_task = try io.concurrent(net_mod.run, .{self.net});
     defer network_task.cancel(io) catch {};
     self.probe_handle = try ctx.child("dkg_probe").spawn(Validator.probe_task, .{self});
     const material: ?DkgPlan.Material = if (self.syncing) self.await_floor() catch |err| {

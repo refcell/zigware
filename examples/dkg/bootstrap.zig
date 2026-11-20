@@ -207,13 +207,6 @@ fn channels(net: *Net) !Engine.Channels {
     };
 }
 
-fn run_network(net: *Net) Io.Cancelable!void {
-    net.run() catch |err| switch (err) {
-        error.Canceled => return error.Canceled,
-        else => std.debug.panic("network failed: {t}", .{err}),
-    };
-}
-
 /// Runs the one-shot DKG for the epoch-0 committee from `node_dir`'s config, writes the
 /// genesis, and keeps serving until stopped (commonware `bootstrap::run`).
 pub fn run(ctx: production.runner.Context, arena: Allocator, node_dir: []const u8) !void {
@@ -240,7 +233,7 @@ pub fn run(ctx: production.runner.Context, arena: Allocator, node_dir: []const u
     const net = try Net.create(gpa, io, ctx.network, ctx.scope.child("network"), net_config);
     defer net.destroy();
     const engine_channels = try channels(net);
-    var network_task = try io.concurrent(run_network, .{net});
+    var network_task = try io.concurrent(net_mod.run, .{net});
     defer network_task.cancel(io) catch {};
 
     var store: types.Secrets = try .init(io, gpa, ctx.storage, partition);

@@ -68,6 +68,14 @@ pub fn network_config(
 }
 
 /// A registered channel's two ends.
+/// Runs `net` until canceled; any other failure panics, as commonware's listener does.
+pub fn run(net: *Net) std.Io.Cancelable!void {
+    net.run() catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => std.debug.panic("network failed: {t}", .{err}),
+    };
+}
+
 pub const Channel = struct { sender: Net.Sender, receiver: Net.Receiver };
 
 /// Registers `id` at commonware's per-peer `MESSAGE_RATE`.
