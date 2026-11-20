@@ -46,7 +46,10 @@ inline fn compress_group(
     comptime assert(count >= 1 and count <= group);
     var wk: [80][group]u64 align(64) = undefined;
     schedule(count, blocks, &wk);
-    inline for (0..count) |lane| rounds(state, &wk, lane);
+    // A lone block's rounds unroll whole; a group's run as a loop over an 8-round body, which
+    // keeps the code inside the instruction cache (four unrolled blocks, about 40 KB, were
+    // fetched from L2: 16 KiB took 16.3 us against 14.7 us looped).
+    for (0..count) |lane| rounds(state, &wk, lane, if (count == 1) 80 else 8);
 }
 
 /// The SHA-512 digest of `message`: its whole blocks compress straight from `message`, then
@@ -104,33 +107,46 @@ fn schedule(
     }
 }
 
-/// The 80 rounds of the block in lane `lane` of `wk`, then the feed-forward into `state`.
-inline fn rounds(state: *[8]u64, wk: *const [80][group]u64, comptime lane: usize) void {
-    comptime assert(lane < group);
+/// The 80 rounds of the block in lane `lane` of `wk`, `body` rounds unrolled per loop
+/// iteration, then the feed-forward into `state`.
+inline fn rounds(
+    state: *[8]u64,
+    wk: *const [80][group]u64,
+    lane: usize,
+    comptime body: usize,
+) void {
+    // Every 8 rounds the state words return to their registers, so a body of whole 8-round
+    // cycles loops without moving them.
+    comptime assert(body % 8 == 0 and 80 % body == 0);
+    assert(lane < group);
     var v = state.*;
     // `b ^ c` of the next round is `a ^ b` of this one, so majority costs one xor, one and, and
     // one xor (as sha2's x86_avx2 `bool3ary_232`, kept off the `a` chain).
     var b_xor_c = v[1] ^ v[2];
-    inline for (0..80) |i| {
-        // Round i's a is v[(8 - i % 8) % 8]; the others follow it cyclically.
-        const a = (8 - i % 8) % 8;
-        const b = (a + 1) % 8;
-        const d = (a + 3) % 8;
-        const e = (a + 4) % 8;
-        const f = (a + 5) % 8;
-        const g = (a + 6) % 8;
-        const h = (a + 7) % 8;
-        const early = (v[h] +% wk[i][lane]) +% (v[g] ^ (v[e] & (v[f] ^ v[g])));
-        const sigma1 = std.math.rotr(u64, v[e], 14) ^ std.math.rotr(u64, v[e], 18) ^
-            std.math.rotr(u64, v[e], 41);
-        const sigma0 = std.math.rotr(u64, v[a], 28) ^ std.math.rotr(u64, v[a], 34) ^
-            std.math.rotr(u64, v[a], 39);
-        const a_xor_b = v[a] ^ v[b];
-        const majority = v[b] ^ (a_xor_b & b_xor_c);
-        b_xor_c = a_xor_b;
-        const t1 = early +% sigma1;
-        v[d] = (v[d] +% early) +% sigma1;
-        v[h] = t1 +% (sigma0 +% majority);
+    var round: usize = 0;
+    while (round < 80) : (round += body) {
+        inline for (0..body) |i| {
+            // Round i's a is v[(8 - i % 8) % 8]; the others follow it cyclically.
+            const a = (8 - i % 8) % 8;
+            const b = (a + 1) % 8;
+            const d = (a + 3) % 8;
+            const e = (a + 4) % 8;
+            const f = (a + 5) % 8;
+            const g = (a + 6) % 8;
+            const h = (a + 7) % 8;
+            const early = (v[h] +% wk[round + i][lane]) +% (v[g] ^ (v[e] & (v[f] ^ v[g])));
+            const sigma1 = std.math.rotr(u64, v[e], 14) ^ std.math.rotr(u64, v[e], 18) ^
+                std.math.rotr(u64, v[e], 41);
+            const sigma0 = std.math.rotr(u64, v[a], 28) ^ std.math.rotr(u64, v[a], 34) ^
+                std.math.rotr(u64, v[a], 39);
+            const a_xor_b = v[a] ^ v[b];
+            const majority = v[b] ^ (a_xor_b & b_xor_c);
+            b_xor_c = a_xor_b;
+            const t1 = early +% sigma1;
+            v[d] = (v[d] +% early) +% sigma1;
+            v[h] = t1 +% (sigma0 +% majority);
+        }
     }
+    assert(round == 80);
     for (state, v) |*word, add| word.* +%= add;
 }

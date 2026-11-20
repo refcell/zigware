@@ -604,3 +604,14 @@ hold whole units of lanes" over coding's lane-aware `hash_batches`, and `sha512/
   16 KiB). Interleaving sha2's 2-word vector schedule with the rounds was slower (28 us), and so
   was `Ch` as two disjoint adds. Planted bugs in the carried value and the majority formula fail
   the std comparison tests.
+- 2026-11-20: sha512 group rounds loop over an 8-round body instead of unrolling four blocks'
+  320 rounds (about 40 KB of code, fetched from L2). A lone block still unrolls whole (96 B:
+  looped took 152 ns against 121). Pinned standalone, same CCD slot as commonware's native
+  bench: 1 KiB 1.35 -> 1.10 us, 16 KiB 16.3 -> 14.7 us, 64 KiB 65 -> 58 us, 256 KiB 0.27 ->
+  0.23 ms (commonware 1.10 us, 15.4 us, 58.6 us, 0.236 ms). Not yet confirmed with ABBA: the
+  8-round run was stopped when optimization paused. Rejected: computing the next group's
+  schedule inside the current group's rounds (no gain under the queue, 1 KiB worse), and
+  majority as `(a & (b ^ c)) ^ (b & c)` (16 KiB 18.8 us). Planted bugs (the loop's W+K index,
+  every block on lane 0) fail the std comparison tests. Stopped here: lthash checksum read
+  0.95x and sha256 hash_pair bmt 1.06x / mmr 0.99x in one round; hash_pair's kernel is 65 ns
+  against 66 ns through the dispatch, so the pair looks bound by the SHA-NI round latency.
