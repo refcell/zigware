@@ -16,6 +16,7 @@ add new entries here, with the bench row, its verdict, and the commit, in the sa
 | [One root compression for short BLAKE3 messages](#blake3-one-root-compression) | `blake3::hash_message` msg_len=256 | 0.79× (8 rounds) | faster | 772e9944 |
 | [lthash over a wide XOF and 32-lane state steps](#lthash) | `lthash::add`/`subtract` ≤ 1 KiB, `combine` | 0.52–0.71×, 0.22× (8 rounds) | faster | b23c4c4c |
 | [Reserve a compressed batch up front](#journal-reserve-a-compressed-batch-up-front) | `journal::variable_prepare_append` items=32 size=1048576 compression=3 random=true | 0.68× (8 rounds) | faster | c2766157 |
+| [qmdb batch writes appended, sorted once at merkleize](#qmdb-batch-writes-in-an-append-only-log) | `qmdb::merkleize` (4 rows) | 0.78–0.93× (8 rounds) | faster | 03f3ab28 |
 | [Blob I/O issued inline instead of on `spawn_blocking`](#storage-blob-io-without-a-thread-hop) | `freezer::get`, `freezer::put` | 0.03×, 0.07× (pre-ABBA) | see below | runtime design |
 
 ## ed25519 verify: Lehmer's half_size
@@ -122,6 +123,27 @@ tmpfs, where a syscall is cheap; on a real disk the dispatch cost is a smaller s
   [journal](BENCHMARKS.md#journal-every-bench-group-paired-rounds-2026-11-19-storage-journal-lane),
   [storage-merkle](BENCHMARKS.md#storage-merkle-bmt-rmap-variable-journal-native-abba-2026-11-20-storage-merkle-lane).
 
+## qmdb: batch writes in an append-only log
+
+commonware's `UnmerkleizedBatch::write` inserts each mutation into a `BTreeMap`, so building a
+batch of 1,000 random keys costs 1,000 ordered inserts with a byte comparison at each node.
+zigware appends each write to a vector and sorts once when the batch is merkleized: an LSD
+radix pass on the keys' first 8 bytes (big-endian, so prefix order is key order), with runs that
+share a prefix sorted by whole key and equal keys kept in write order, so the last write of each
+key wins as the map's overwrite does. On one CCD slot, building the `qmdb::merkleize` bench's
+1,000 writes took 132 µs in commonware and 87 µs in zigware, and zigware's sort inside merkleize
+about 9 µs. Reading a key back from an unmerkleized batch (`get`) then scans the log from its
+end instead of a tree lookup, which suits batches that are written and then merkleized.
+
+The other changes behind these rows are against zigware's own earlier code or match what
+commonware already does (the 8-thread pool, a linear merge of the floor diff, presized lists),
+except a per-group page-cache lock in the journal's sync probe and prefetched snapshot probes,
+whose share of the win is not isolated.
+
+- Evidence: [BENCHMARKS.md, qmdb merkleize](BENCHMARKS.md#qmdb-merkleize-pinned-abba-2026-11-20-qmdb-merkleize-thread)
+  (any fixed 0.82×, ordered chained 0.93×, current 0.78×, churned 0.81×; 8 rounds, no round at
+  or above 1). Phase timings in that section.
+
 ## Faster, cause not yet isolated
 
 These rows are faster at native ABBA, but no lane has yet named a portable mechanism, so they
@@ -130,7 +152,8 @@ are not claimed as adoptable:
 - `codec::lazy::get` (100k shared) 0.17× (README table).
 - qmdb ([BENCHMARKS.md](BENCHMARKS.md#qmdb-every-bench-group-pinned-abba-2026-11-20-storage-qmdb-lane)):
   `init` any 0.46× and store 0.52×, `generate` keyless 0.51× and store 0.63×,
-  `chained_growth` 0.71×. Eight qmdb rows are slower, including every `merkleize` (about 2×).
+  `chained_growth` 0.71×. The `merkleize` rows (about 2× slower until 2026-11-20) are now faster;
+  see above.
 - archive `restart` and serial `get`, freezer and ordinal groups (clearing and storage-archive
   lanes), and Reed-Solomon encoders and decoders (coding lane, provisional).
 

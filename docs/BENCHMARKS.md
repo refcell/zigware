@@ -296,6 +296,8 @@ docs/bench/storage-qmdb.tsv. Verdicts: 5 faster, 4 tie, 8 slower.
 | `qmdb::merkleize` | `v=current::unordered::fixed::mmb chunk=32 k=10000 ch=false s=false cc=false` | 369 µs | 736 µs | 1.98× | 1.93–2.15× (8) | slower |
 | `qmdb::merkleize` | `variant=any::unordered::fixed::mmb keys=10000 churn=50 cache_pages=32` | 536 µs | 1.08 ms | 2.01× | 1.92–2.07× (8) | slower |
 
+The four `merkleize` rows are now faster (0.78–0.93×); see "qmdb merkleize, pinned ABBA" below.
+
 The immutable `apply_batch` row replaces the 0.67× recorded earlier the same day (8 unpinned
 rounds at load 44 to 120, under the old planner). That run's commonware side read 0.97 to 1.52
 ms, against 0.42 to 0.63 ms here at low load, so its ratio measured commonware under load, not
@@ -303,6 +305,31 @@ zigware's speed. Pinning does not explain the gap: the same binaries on one CCD 
 CPUs read commonware 0.63/0.63 and 0.60/0.58 ms, zigware 1.65/1.48 and 1.54/1.60 ms (load
 about 10). b3528252's prefetch still halves zigware's table-insert cycles; the rest of the gap is
 open.
+
+## qmdb merkleize, pinned ABBA (2026-11-20, qmdb merkleize thread)
+
+The four `qmdb::merkleize` rows above (1.98–2.27×), re-run on d996f123 with the same settings
+(`BENCH_FILTER=qmdb::merkleize BENCH_WARMUP_MS=300 BENCH_MEASURE_MS=1000 BENCH_SAMPLES=10
+bench-compare.sh 8`). Load 5.8 to 7.4. Raw rounds: docs/bench/storage-qmdb_merkleize.tsv.
+Verdicts: 4 faster.
+
+| bench | parameters | commonware | zigware | zigware / commonware | rounds | verdict |
+|---|---|---|---|---|---|---|
+| `qmdb::merkleize` | `v=any::unordered::fixed::mmb k=10000 ch=false s=false cc=false` | 327 µs | 272 µs | 0.82× | 0.81–0.87× (8) | faster |
+| `qmdb::merkleize` | `v=any::ordered::variable::mmr k=10000 ch=true s=false cc=false` | 498 µs | 467 µs | 0.93× | 0.91–0.96× (8) | faster |
+| `qmdb::merkleize` | `v=current::unordered::fixed::mmb chunk=32 k=10000 ch=false s=false cc=false` | 379 µs | 298 µs | 0.78× | 0.76–0.81× (8) | faster |
+| `qmdb::merkleize` | `variant=any::unordered::fixed::mmb keys=10000 churn=50 cache_pages=32` | 561 µs | 454 µs | 0.81× | 0.78–0.84× (8) | faster |
+
+What changed (ec2650ed, 03f3ab28, 0290140c, 3ac948ab, d996f123): the bench opens its databases
+on an 8-thread pool as commonware's does (`THREADS = 8`); writes, diffs, and locations sort by
+an LSD radix pass on each key's first 8 bytes instead of a stable byte-compare merge sort, and
+lookups take a branchless prefix search; the fixed journal and the page cache probe a batch of
+reads under one cache lock per 64 instead of one per item; ordered emits use advancing cursors;
+the snapshot probes are prefetched 8 keys ahead; and the floor walk under `Proportional` moves
+values without copying them. Phase times per iteration on one CCD slot (rdtsc in zigware,
+`Instant` in commonware, scratch builds), any fixed row: building the batch's 1,000 writes 87
+µs vs 132 µs, gathering snapshot locations 15 vs 6, reading them 26 vs 17, emitting 17 vs 31,
+the floor walk 49 vs 62, finishing (journal hash and root) 69 vs 67.
 
 ## bls12381: the remaining benches (2026-11-19, bls-math lane)
 

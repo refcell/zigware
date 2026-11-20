@@ -1,0 +1,36 @@
+# date: 2026-11-20
+# zigware: d996f123
+# commonware: a9ffc25f3
+# method: ABBA rounds=8, --bench --noplot --warm-up-time 0.3 --measurement-time 1 --sample-size 10 | --bench --warm-up-ms 300 --measurement-ms 1000 --samples 10, commonware target-cpu=native
+1	storage	qmdb::merkleize/v=any::unordered::fixed::mmb k=10000 ch=false s=false cc=false	327330.0	267350.0	5.86
+1	storage	qmdb::merkleize/v=any::ordered::variable::mmr k=10000 ch=true s=false cc=false	495360.0	462980.0	5.88
+1	storage	qmdb::merkleize/v=current::unordered::fixed::mmb chunk=32 k=10000 ch=false s=false cc=false	379370.0	294840.0	5.81
+1	storage	qmdb::merkleize/variant=any::unordered::fixed::mmb keys=10000 churn=50 cache_pages=32	556100.0	449370.0	5.81
+2	storage	qmdb::merkleize/v=any::unordered::fixed::mmb k=10000 ch=false s=false cc=false	318030.0	271450.0	5.90
+2	storage	qmdb::merkleize/v=any::ordered::variable::mmr k=10000 ch=true s=false cc=false	505630.0	467490.0	5.90
+2	storage	qmdb::merkleize/v=current::unordered::fixed::mmb chunk=32 k=10000 ch=false s=false cc=false	384260.0	297460.0	6.31
+2	storage	qmdb::merkleize/variant=any::unordered::fixed::mmb keys=10000 churn=50 cache_pages=32	564650.0	449380.0	6.31
+3	storage	qmdb::merkleize/v=any::unordered::fixed::mmb k=10000 ch=false s=false cc=false	331940.0	270160.0	6.69
+3	storage	qmdb::merkleize/v=any::ordered::variable::mmr k=10000 ch=true s=false cc=false	500890.0	467470.0	6.69
+3	storage	qmdb::merkleize/v=current::unordered::fixed::mmb chunk=32 k=10000 ch=false s=false cc=false	373870.0	304220.0	6.55
+3	storage	qmdb::merkleize/variant=any::unordered::fixed::mmb keys=10000 churn=50 cache_pages=32	587930.0	458620.0	6.55
+4	storage	qmdb::merkleize/v=any::unordered::fixed::mmb k=10000 ch=false s=false cc=false	332270.0	273250.0	6.43
+4	storage	qmdb::merkleize/v=any::ordered::variable::mmr k=10000 ch=true s=false cc=false	493400.0	471740.0	6.43
+4	storage	qmdb::merkleize/v=current::unordered::fixed::mmb chunk=32 k=10000 ch=false s=false cc=false	378240.0	298170.0	6.95
+4	storage	qmdb::merkleize/variant=any::unordered::fixed::mmb keys=10000 churn=50 cache_pages=32	561640.0	456150.0	6.95
+5	storage	qmdb::merkleize/v=any::unordered::fixed::mmb k=10000 ch=false s=false cc=false	337110.0	274750.0	7.36
+5	storage	qmdb::merkleize/v=any::ordered::variable::mmr k=10000 ch=true s=false cc=false	505850.0	470510.0	7.36
+5	storage	qmdb::merkleize/v=current::unordered::fixed::mmb chunk=32 k=10000 ch=false s=false cc=false	391920.0	297570.0	7.17
+5	storage	qmdb::merkleize/variant=any::unordered::fixed::mmb keys=10000 churn=50 cache_pages=32	589250.0	459950.0	7.17
+6	storage	qmdb::merkleize/v=any::unordered::fixed::mmb k=10000 ch=false s=false cc=false	322660.0	279470.0	6.99
+6	storage	qmdb::merkleize/v=any::ordered::variable::mmr k=10000 ch=true s=false cc=false	500990.0	467330.0	6.99
+6	storage	qmdb::merkleize/v=current::unordered::fixed::mmb chunk=32 k=10000 ch=false s=false cc=false	385620.0	298210.0	7.40
+6	storage	qmdb::merkleize/variant=any::unordered::fixed::mmb keys=10000 churn=50 cache_pages=32	561190.0	463620.0	7.40
+7	storage	qmdb::merkleize/v=any::unordered::fixed::mmb k=10000 ch=false s=false cc=false	327120.0	271750.0	7.12
+7	storage	qmdb::merkleize/v=any::ordered::variable::mmr k=10000 ch=true s=false cc=false	495610.0	467670.0	7.12
+7	storage	qmdb::merkleize/v=current::unordered::fixed::mmb chunk=32 k=10000 ch=false s=false cc=false	363300.0	282060.0	6.87
+7	storage	qmdb::merkleize/variant=any::unordered::fixed::mmb keys=10000 churn=50 cache_pages=32	527120.0	425040.0	6.64
+8	storage	qmdb::merkleize/v=any::unordered::fixed::mmb k=10000 ch=false s=false cc=false	309790.0	254140.0	6.51
+8	storage	qmdb::merkleize/v=any::ordered::variable::mmr k=10000 ch=true s=false cc=false	478700.0	437380.0	6.39
+8	storage	qmdb::merkleize/v=current::unordered::fixed::mmb chunk=32 k=10000 ch=false s=false cc=false	352810.0	280090.0	6.28
+8	storage	qmdb::merkleize/variant=any::unordered::fixed::mmb keys=10000 churn=50 cache_pages=32	536340.0	451490.0	6.26
