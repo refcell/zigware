@@ -1,0 +1,128 @@
+# date: 2026-11-20
+# zigware: 65b32e52
+# commonware: a9ffc25f3
+# method: ABBA rounds=4, --bench --noplot --warm-up-time 1 --measurement-time 3 --sample-size 50 | --bench --warm-up-ms 1000 --measurement-ms 3000 --samples 50, commonware target-cpu=native
+1	storage	merkle::append/n=100000 family=mmr	10194000.0	7260000.0	47.66
+1	storage	merkle::append/n=100000 family=mmb	10463000.0	7565100.0	4.59
+1	storage	merkle::add_many/items=65536 workers=1 family=mmr	6841300.0	6986700.0	2.52
+1	storage	merkle::add_many/items=65536 workers=8 family=mmb	1059200.0	1187700.0	2.83
+1	storage	merkle::update/updates=100000 leaves=100000 strategy=BatchedSerial family=mmr	18168000.0	19086000.0	3.43
+1	storage	merkle::flush/n=100000 family=mmr	1572000.0	1646100.0	2.13
+1	storage	merkle::position_to_location/n=1000000 family=mmb	5356.0	3050.9	2.16
+1	storage	merkle::proof/n=100000 samples=100 family=mmr	37490.0	23648.0	2.15
+1	storage	merkle::proof/n=100000 samples=100 family=mmb	48226.0	31055.0	2.26
+1	storage	merkle::multi_proof/n=100000 items=100 family=mmr	8344.2	4058.0999999999995	1.64
+1	storage	merkle::range_proof/n=100000 range=100 samples=100 family=mmb	50850.0	35790.0	1.73
+1	storage	merkle::verify_single_element/n=100000 samples=100 family=mmr	178420.0	156010.0	2.78
+1	storage	merkle::verify_single_element/n=100000 samples=100 family=mmb	247270.0	219450.0	2.98
+1	storage	merkle::verify_multi/n=100000 items=100 family=mmr	80185.0	71476.0	2.34
+1	storage	merkle::verify_many_elements/n=100000 range=100 samples=100 family=mmr	1053900.0	714430.0	2.56
+1	storage	bmt::build/n=100000	4789900.0	4927000.0	1.67
+1	storage	bmt::proof/n=100000	20.58	21.604	1.91
+1	storage	bmt::multi_proof/n=100000 items=100	2222.7999999999997	2313.8	1.52
+1	storage	bmt::range_proof/n=100000 items=100	32.278	24.471	1.46
+1	storage	bmt::verify_single/n=100000 items=100	111950.0	101490.0	2.21
+1	storage	bmt::verify_multi/n=100000 items=100	39831.0	38467.0	2.15
+1	storage	bmt::verify_range/n=100000 items=100	6369.1	6062.299999999999	2.66
+1	storage	rmap::insert/items=100000	17734000.0	10686000.0	1.44
+1	storage	journal::read_cached/journal=variable size=32	2856200.0	1221200.0	1.71
+1	storage	journal::variable_read_random/mode=serial items=10000 size=32	50535000.0	10763000.0	1.36
+1	storage	journal::variable_read_random/mode=read_many items=10000 size=32	10818000.0	11725000.0	2.19
+1	storage	journal::variable_read_compressed/mode=read_many items=10000 size=1024 random=true	1394700.0	949680.0	2.03
+1	storage	journal::variable_read_compressed/mode=read_many_uncached items=10000 size=1024 random=true	4108200.0	2154700.0	2.06
+1	storage	journal::variable_replay/items=100000 buffer=65536 size=32 read_options=cache	2479600.0	570730.0	2.44
+1	storage	journal::variable_prepare_append/items=1 size=1048576 compression=3 random=false	91089.0	89580.0	2.38
+1	storage	journal::variable_prepare_append/items=32 size=1048576 compression=3 random=false	3354600.0	2912900.0	2.54
+2	storage	merkle::append/n=100000 family=mmr	9366100.0	7287800.0	2.09
+2	storage	merkle::append/n=100000 family=mmb	9847400.0	7176800.0	2.54
+2	storage	merkle::add_many/items=65536 workers=1 family=mmr	6812000.0	6993100.0	2.37
+2	storage	merkle::add_many/items=65536 workers=8 family=mmb	1060200.0	1210500.0	2.43
+2	storage	merkle::update/updates=100000 leaves=100000 strategy=BatchedSerial family=mmr	18911000.0	19585000.0	3.37
+2	storage	merkle::flush/n=100000 family=mmr	1616600.0	1594800.0	3.63
+2	storage	merkle::position_to_location/n=1000000 family=mmb	4857.3	2863.6	2.76
+2	storage	merkle::proof/n=100000 samples=100 family=mmr	33619.0	23986.0	2.79
+2	storage	merkle::proof/n=100000 samples=100 family=mmb	42721.0	32351.999999999996	3.64
+2	storage	merkle::multi_proof/n=100000 items=100 family=mmr	8163.6	3993.1	2.32
+2	storage	merkle::range_proof/n=100000 range=100 samples=100 family=mmb	48547.0	33668.0	2.13
+2	storage	merkle::verify_single_element/n=100000 samples=100 family=mmr	167880.0	147230.0	2.15
+2	storage	merkle::verify_single_element/n=100000 samples=100 family=mmb	268050.0	206020.0	2.80
+2	storage	merkle::verify_multi/n=100000 items=100 family=mmr	84599.0	75398.0	3.46
+2	storage	merkle::verify_many_elements/n=100000 range=100 samples=100 family=mmr	1058100.0	723370.0	4.87
+2	storage	bmt::build/n=100000	4831400.0	4985500.0	3.95
+2	storage	bmt::proof/n=100000	20.353	20.295	8.58
+2	storage	bmt::multi_proof/n=100000 items=100	2321.2000000000003	2358.2000000000003	4.33
+2	storage	bmt::range_proof/n=100000 items=100	31.248	24.524	3.07
+2	storage	bmt::verify_single/n=100000 items=100	111930.0	100890.0	2.55
+2	storage	bmt::verify_multi/n=100000 items=100	38304.0	38265.0	2.34
+2	storage	bmt::verify_range/n=100000 items=100	6258.8	5936.3	2.11
+2	storage	rmap::insert/items=100000	17403000.0	10779000.0	2.31
+2	storage	journal::read_cached/journal=variable size=32	2970500.0	1244700.0	2.27
+2	storage	journal::variable_read_random/mode=serial items=10000 size=32	49302000.0	10684000.0	2.38
+2	storage	journal::variable_read_random/mode=read_many items=10000 size=32	10763000.0	12180000.0	2.94
+2	storage	journal::variable_read_compressed/mode=read_many items=10000 size=1024 random=true	1367100.0	966500.0	2.33
+2	storage	journal::variable_read_compressed/mode=read_many_uncached items=10000 size=1024 random=true	3920600.0	2139600.0	2.64
+2	storage	journal::variable_replay/items=100000 buffer=65536 size=32 read_options=cache	1946800.0	592340.0	2.30
+2	storage	journal::variable_prepare_append/items=1 size=1048576 compression=3 random=false	87806.0	83733.0	3.49
+2	storage	journal::variable_prepare_append/items=32 size=1048576 compression=3 random=false	3498800.0	3101100.0	3.05
+3	storage	merkle::append/n=100000 family=mmr	9651300.0	7169400.0	2.64
+3	storage	merkle::append/n=100000 family=mmb	9786600.0	7181400.0	2.54
+3	storage	merkle::add_many/items=65536 workers=1 family=mmr	6804600.0	6938600.0	2.27
+3	storage	merkle::add_many/items=65536 workers=8 family=mmb	1024999.9999999999	1141300.0	2.81
+3	storage	merkle::update/updates=100000 leaves=100000 strategy=BatchedSerial family=mmr	17924000.0	18898000.0	3.34
+3	storage	merkle::flush/n=100000 family=mmr	1629900.0	1659400.0	2.50
+3	storage	merkle::position_to_location/n=1000000 family=mmb	4663.5	2863.9	2.52
+3	storage	merkle::proof/n=100000 samples=100 family=mmr	34728.0	22240.0	2.51
+3	storage	merkle::proof/n=100000 samples=100 family=mmb	43101.0	33024.0	2.33
+3	storage	merkle::multi_proof/n=100000 items=100 family=mmr	8544.4	4137.0	2.65
+3	storage	merkle::range_proof/n=100000 range=100 samples=100 family=mmb	50507.0	34155.0	2.31
+3	storage	merkle::verify_single_element/n=100000 samples=100 family=mmr	172440.0	151840.0	2.65
+3	storage	merkle::verify_single_element/n=100000 samples=100 family=mmb	246400.0	216290.0	2.34
+3	storage	merkle::verify_multi/n=100000 items=100 family=mmr	80391.0	71379.0	2.21
+3	storage	merkle::verify_many_elements/n=100000 range=100 samples=100 family=mmr	1005500.0000000001	686950.0	2.16
+3	storage	bmt::build/n=100000	4795800.0	4925500.0	2.16
+3	storage	bmt::proof/n=100000	20.776	20.216	2.42
+3	storage	bmt::multi_proof/n=100000 items=100	2228.2000000000003	2288.8	2.14
+3	storage	bmt::range_proof/n=100000 items=100	31.75	24.241	2.20
+3	storage	bmt::verify_single/n=100000 items=100	112000.0	100990.0	2.89
+3	storage	bmt::verify_multi/n=100000 items=100	36561.0	36542.0	2.46
+3	storage	bmt::verify_range/n=100000 items=100	6361.7	6073.0	2.51
+3	storage	rmap::insert/items=100000	17489000.0	10563000.0	2.42
+3	storage	journal::read_cached/journal=variable size=32	2825800.0	1198300.0	3.62
+3	storage	journal::variable_read_random/mode=serial items=10000 size=32	49692000.0	10434000.0	2.45
+3	storage	journal::variable_read_random/mode=read_many items=10000 size=32	10689000.0	12212000.0	2.25
+3	storage	journal::variable_read_compressed/mode=read_many items=10000 size=1024 random=true	1386000.0	1002799.9999999999	3.23
+3	storage	journal::variable_read_compressed/mode=read_many_uncached items=10000 size=1024 random=true	3865000.0	2169000.0	2.83
+3	storage	journal::variable_replay/items=100000 buffer=65536 size=32 read_options=cache	1957900.0	577410.0	2.69
+3	storage	journal::variable_prepare_append/items=1 size=1048576 compression=3 random=false	91037.0	89594.0	2.33
+3	storage	journal::variable_prepare_append/items=32 size=1048576 compression=3 random=false	3402200.0	3036000.0	2.19
+4	storage	merkle::append/n=100000 family=mmr	9882700.0	7232800.0	2.19
+4	storage	merkle::append/n=100000 family=mmb	10390000.0	7525800.0	2.10
+4	storage	merkle::add_many/items=65536 workers=1 family=mmr	7173200.0	7282000.0	2.19
+4	storage	merkle::add_many/items=65536 workers=8 family=mmb	1060100.0	1210600.0	2.14
+4	storage	merkle::update/updates=100000 leaves=100000 strategy=BatchedSerial family=mmr	17459000.0	19560000.0	2.59
+4	storage	merkle::flush/n=100000 family=mmr	1751800.0	1674300.0	2.57
+4	storage	merkle::position_to_location/n=1000000 family=mmb	5573.0	2865.2000000000003	2.48
+4	storage	merkle::proof/n=100000 samples=100 family=mmr	34369.0	22953.0	2.90
+4	storage	merkle::proof/n=100000 samples=100 family=mmb	43607.0	30807.0	3.44
+4	storage	merkle::multi_proof/n=100000 items=100 family=mmr	8271.2	3979.5	2.68
+4	storage	merkle::range_proof/n=100000 range=100 samples=100 family=mmb	49208.0	34085.0	2.05
+4	storage	merkle::verify_single_element/n=100000 samples=100 family=mmr	170600.0	147940.0	2.05
+4	storage	merkle::verify_single_element/n=100000 samples=100 family=mmb	231960.0	206890.0	2.18
+4	storage	merkle::verify_multi/n=100000 items=100 family=mmr	80452.0	71330.0	2.09
+4	storage	merkle::verify_many_elements/n=100000 range=100 samples=100 family=mmr	1003800.0	685560.0	2.00
+4	storage	bmt::build/n=100000	4782900.0	4924000.0	2.15
+4	storage	bmt::proof/n=100000	20.289	20.658	2.18
+4	storage	bmt::multi_proof/n=100000 items=100	2268.5	2292.6000000000004	2.56
+4	storage	bmt::range_proof/n=100000 items=100	31.456	24.117	2.17
+4	storage	bmt::verify_single/n=100000 items=100	111880.0	101110.0	2.41
+4	storage	bmt::verify_multi/n=100000 items=100	36580.0	37106.0	2.43
+4	storage	bmt::verify_range/n=100000 items=100	6050.099999999999	5732.3	2.17
+4	storage	rmap::insert/items=100000	16765000.0	10156000.0	2.10
+4	storage	journal::read_cached/journal=variable size=32	2896700.0	1197700.0	2.24
+4	storage	journal::variable_read_random/mode=serial items=10000 size=32	48454000.0	10596000.0	2.26
+4	storage	journal::variable_read_random/mode=read_many items=10000 size=32	10879000.0	12191000.0	2.28
+4	storage	journal::variable_read_compressed/mode=read_many items=10000 size=1024 random=true	1350000.0	940510.0	2.55
+4	storage	journal::variable_read_compressed/mode=read_many_uncached items=10000 size=1024 random=true	4003500.0	2098400.0	3.23
+4	storage	journal::variable_replay/items=100000 buffer=65536 size=32 read_options=cache	1904300.0	567950.0	2.53
+4	storage	journal::variable_prepare_append/items=1 size=1048576 compression=3 random=false	87889.0	85645.0	2.27
+4	storage	journal::variable_prepare_append/items=32 size=1048576 compression=3 random=false	3357100.0	2931600.0	2.24

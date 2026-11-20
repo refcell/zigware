@@ -665,6 +665,50 @@ for the rows marked), at a 1-minute load of 56 to 89 with another lane benchmark
   threads take the lock. Bench threads come from `std.Io.Threaded`, which keeps its workers
   for the whole run, so a harness reaches neither; only the bench harnesses use a `Heap`.
 
+## Storage: merkle, bmt, rmap, variable journal, native ABBA (2026-11-20, storage-merkle lane)
+
+31 rows, 4 rounds of etc/scripts/bench-compare.sh's method (ABBA order, commonware built with
+`-C target-cpu=native`, each pair on one CCD slot of etc/scripts/bench-lock.sh), zigware
+65b32e52, which includes the wall-time iteration planning of c7935b0c, so these replace the
+provisional rows below. The ratio is the median of the per-round zigware / commonware ratios;
+the times are each side's median. Load averaged 2.2 in rounds 2 to 4 and 48 in round 1, whose
+ratios agree with the others. Raw rounds: [bench/storage-merkle.tsv](bench/storage-merkle.tsv).
+Verdicts: 20 faster, 8 tie, 3 slower.
+
+| Bench | commonware | zigware | ratio | verdict |
+|---|---|---|---|---|
+| `merkle::append/n=100000 family=mmr` | 9.77 ms | 7.25 ms | 0.74× | faster |
+| `merkle::append/n=100000 family=mmb` | 10.1 ms | 7.35 ms | 0.73× | faster |
+| `merkle::add_many/items=65536 workers=1 family=mmr` | 6.83 ms | 6.99 ms | 1.02× | tie |
+| `merkle::add_many/items=65536 workers=8 family=mmb` | 1.06 ms | 1.2 ms | 1.13× | slower |
+| `merkle::update/updates=100000 leaves=100000 strategy=BatchedSerial family=mmr` | 18 ms | 19.3 ms | 1.05× | slower |
+| `merkle::flush/n=100000 family=mmr` | 1.62 ms | 1.65 ms | 1.00× | tie |
+| `merkle::position_to_location/n=1000000 family=mmb` | 5.11 µs | 2.86 µs | 0.58× | faster |
+| `merkle::proof/n=100000 samples=100 family=mmr` | 34.5 µs | 23.3 µs | 0.65× | faster |
+| `merkle::proof/n=100000 samples=100 family=mmb` | 43.4 µs | 31.7 µs | 0.73× | faster |
+| `merkle::multi_proof/n=100000 items=100 family=mmr` | 8.31 µs | 4.03 µs | 0.49× | faster |
+| `merkle::range_proof/n=100000 range=100 samples=100 family=mmb` | 49.9 µs | 34.1 µs | 0.69× | faster |
+| `merkle::verify_single_element/n=100000 samples=100 family=mmr` | 172 µs | 150 µs | 0.88× | faster |
+| `merkle::verify_single_element/n=100000 samples=100 family=mmb` | 247 µs | 212 µs | 0.88× | faster |
+| `merkle::verify_multi/n=100000 items=100 family=mmr` | 80.4 µs | 71.4 µs | 0.89× | faster |
+| `merkle::verify_many_elements/n=100000 range=100 samples=100 family=mmr` | 1.03 ms | 701 µs | 0.68× | faster |
+| `bmt::build/n=100000` | 4.79 ms | 4.93 ms | 1.03× | tie |
+| `bmt::proof/n=100000` | 20.5 ns | 20.5 ns | 1.01× | tie |
+| `bmt::multi_proof/n=100000 items=100` | 2.25 µs | 2.3 µs | 1.02× | tie |
+| `bmt::range_proof/n=100000 items=100` | 31.6 ns | 24.4 ns | 0.77× | faster |
+| `bmt::verify_single/n=100000 items=100` | 112 µs | 101 µs | 0.90× | faster |
+| `bmt::verify_multi/n=100000 items=100` | 37.4 µs | 37.7 µs | 1.00× | tie |
+| `bmt::verify_range/n=100000 items=100` | 6.31 µs | 6 µs | 0.95× | tie |
+| `rmap::insert/items=100000` | 17.4 ms | 10.6 ms | 0.60× | faster |
+| `journal::read_cached/journal=variable size=32` | 2.88 ms | 1.21 ms | 0.42× | faster |
+| `journal::variable_read_random/mode=serial items=10000 size=32` | 49.5 ms | 10.6 ms | 0.21× | faster |
+| `journal::variable_read_random/mode=read_many items=10000 size=32` | 10.8 ms | 12.2 ms | 1.13× | slower |
+| `journal::variable_read_compressed/mode=read_many items=10000 size=1024 random=true` | 1.38 ms | 958 µs | 0.70× | faster |
+| `journal::variable_read_compressed/mode=read_many_uncached items=10000 size=1024 random=true` | 3.96 ms | 2.15 ms | 0.54× | faster |
+| `journal::variable_replay/items=100000 buffer=65536 size=32 read_options=cache` | 1.95 ms | 574 µs | 0.30× | faster |
+| `journal::variable_prepare_append/items=1 size=1048576 compression=3 random=false` | 89.5 µs | 87.6 µs | 0.98× | tie |
+| `journal::variable_prepare_append/items=32 size=1048576 compression=3 random=false` | 3.38 ms | 2.98 ms | 0.88× | faster |
+
 ## Storage: merkle, bmt, rmap, variable journal reads (2026-11-19, storage-merkle lane)
 
 The rows bench-compare.sh now carries for storage-merkle's crates, with its settings (warm-up
