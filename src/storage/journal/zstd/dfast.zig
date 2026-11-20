@@ -22,6 +22,9 @@ const hash_read_size = 8;
 /// `MINMATCH`: match lengths are stored minus this.
 pub const match_min = 3;
 
+/// What `select_equal` reads for an index outside the window (libzstd's `dummy`).
+const select_backup = [8]u8{ 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0 };
+
 const prime4: u32 = 2654435761;
 const prime5: u64 = 889523592379;
 const prime8: u64 = 0xCF1BBCDCB7A56463;
@@ -138,6 +141,15 @@ fn hash8(src: []const u8, position: usize, log: u6) usize {
 
 /// `ZSTD_hashPtr` with `mls` 4 or 5.
 fn hash_short(src: []const u8, position: usize, log: u6, min_match: u6) usize {
+    assert(min_match == 4 or min_match == 5);
+    return if (min_match == 4)
+        hash_short_mls(src, position, log, 4)
+    else
+        hash_short_mls(src, position, log, 5);
+}
+
+/// `hash_short` for a `min_match` known at compile time, as libzstd templates its loop on.
+fn hash_short_mls(src: []const u8, position: usize, log: u6, comptime min_match: u6) usize {
     assert(log > 0 and log <= 32);
     if (min_match == 4) {
         return @intCast((read32(src, position) *% prime4) >> @intCast(32 - @as(u6, log)));
@@ -293,10 +305,21 @@ const Block = struct {
     /// compiler cannot prove apart from `block`'s fields, so keeping them there reloaded
     /// them after every table store.
     fn search(block: *Block) Found {
+        assert(block.state.min_match == 4 or block.state.min_match == 5);
+        return if (block.state.min_match == 4) block.search_mls(4) else block.search_mls(5);
+    }
+
+    /// `search` for one `min_match`. Like libzstd 1.5.7, it reads a candidate through
+    /// `select_equal` instead of branching on whether its table entry is in the window: on
+    /// incompressible input that branch is a coin flip at every position, and the loop
+    /// mispredicted it often.
+    fn search_mls(block: *Block, comptime min_match: u6) Found {
         const state = block.state;
         const src = block.src;
         const long = state.long;
         const short = state.short;
+        const long_log = state.long_log;
+        const short_log = state.short_log;
         const lowest = block.prefix_lowest_index;
         const offset_1 = block.offset_1;
         assert(lowest >= start_index);
@@ -308,11 +331,11 @@ const Block = struct {
         var next_step = ip + (1 << search_strength);
         var ip1 = ip + step;
         if (ip1 > limit) return .none;
-        var hash_long_0 = hash8(src, ip, state.long_log);
+        var hash_long_0 = hash8(src, ip, long_log);
         var index_long_0 = long[hash_long_0];
         while (true) {
             assert(ip < ip1 and ip1 <= limit);
-            const hash_short_0 = hash_short(src, ip, state.short_log, state.min_match);
+            const hash_short_0 = hash_short_mls(src, ip, short_log, min_match);
             const index_short_0 = short[hash_short_0];
             long[hash_long_0] = index_of(ip);
             short[hash_short_0] = index_of(ip);
@@ -320,17 +343,14 @@ const Block = struct {
                 block.resume_at(ip, step, 0, 0);
                 return block.found_repeat();
             }
-            const hash_long_1 = hash8(src, ip1, state.long_log);
-            if (index_long_0 >= lowest and
-                read64(src, index_long_0 - start_index) == read64(src, ip))
-            {
+            const hash_long_1 = hash8(src, ip1, long_log);
+            const word = read64(src, ip);
+            if (select_equal(src, index_long_0, lowest, word, 8)) {
                 block.resume_at(ip, step, hash_long_1, ip1);
                 return block.long_candidate(index_long_0).?;
             }
             const index_long_1 = long[hash_long_1];
-            if (index_short_0 >= lowest and
-                read32(src, index_short_0 - start_index) == read32(src, ip))
-            {
+            if (select_equal(src, index_short_0, lowest, word, 4)) {
                 block.resume_at(ip, step, hash_long_1, ip1);
                 return block.search_next_long(index_short_0, index_long_1, ip1);
             }
@@ -347,6 +367,30 @@ const Block = struct {
                 return .none;
             }
         }
+    }
+
+    /// Whether the `bytes` (4 or 8) at window index `index` equal `word`'s and `index` is at or
+    /// above `lowest`, without branching on the index (`ZSTD_selectAddr`): an index outside
+    /// the window reads `select_backup` instead, and a mask the optimizer cannot see through
+    /// fails the comparison, so the one branch is on the combined result, which is rare.
+    inline fn select_equal(
+        src: []const u8,
+        index: u32,
+        lowest: u32,
+        word: u64,
+        comptime bytes: u4,
+    ) bool {
+        comptime assert(bytes == 4 or bytes == 8);
+        const keep_visible = -%@as(usize, @intFromBool(index >= lowest));
+        const keep = asm (""
+            : [keep] "=r" (-> usize),
+            : [in] "0" (keep_visible),
+        );
+        const real = @intFromPtr(src.ptr) +% (@as(usize, index) -% start_index);
+        const address = (real & keep) | (@intFromPtr(&select_backup) & ~keep);
+        const candidate = std.mem.readInt(u64, @as(*const [8]u8, @ptrFromInt(address)), .little);
+        const mask: u64 = if (bytes == 8) std.math.maxInt(u64) else std.math.maxInt(u32);
+        return ((candidate ^ word) & mask) | ~@as(u64, keep) == 0;
     }
 
     /// Write the search's locals back for the match handlers and `run`.
