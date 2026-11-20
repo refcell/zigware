@@ -391,6 +391,7 @@ pub const Runner = struct {
     pub fn storage(runner: *Runner) storage_mod.Storage {
         if (runner.metered_storage == null) {
             assert(runner.audited_storage == null);
+            runner.memory_storage.io = runner.io();
             const inner = runner.storage_faulty().storage();
             runner.audited_storage = .init(runner.allocator, inner, &runner.auditor);
             const audited = runner.audited_storage.?.storage();

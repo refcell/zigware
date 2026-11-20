@@ -127,6 +127,9 @@ pub const Writer = struct {
         capacity: usize,
         cache_ref: *CacheRef,
     ) Error!Self {
+        // Like commonware's, the cache shares in-flight page reads whenever the runtime can
+        // wait for one.
+        if (blob.io()) |io| try cache_ref.share_reads(io);
         const page_size_value: usize = cache_ref.page_size;
         const physical = page_size_value + checksum_size;
         const page_scratch = try gpa.alloc(u8, physical);

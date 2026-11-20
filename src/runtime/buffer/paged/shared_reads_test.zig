@@ -550,3 +550,35 @@ fn unshared_reads_read_alone(io: Io) !void {
 test "a cache that does not share reads reads each miss alone" {
     try run(unshared_reads_read_alone);
 }
+
+/// Opens a writer on `runner`'s storage over `cache_ref`, then reports whether the cache now
+/// shares reads under `runner`'s `Io`.
+fn open_on(runner: *deterministic.Runner, cache_ref: *CacheRef) !bool {
+    const opened = try runner.storage().open("shared_reads", "blob");
+    errdefer opened.blob.close();
+    var writer = try writer_mod.Writer.init(gpa, opened.blob, opened.len, page_size, cache_ref);
+    defer writer.deinit();
+    const io = cache_ref.io orelse return false;
+    return io.userdata == runner.io().userdata;
+}
+
+test "a writer on runtime storage shares reads by default, across runners" {
+    // commonware's page cache always shares in-flight reads. A cache outliving its runner (a
+    // restarted test) moves to the next runner's `Io` while no fetch is live.
+    var cache_ref = try CacheRef.init(gpa, page_size, 4);
+    defer cache_ref.deinit();
+    for (0..2) |_| {
+        var runner = try deterministic.Runner.init(gpa, .{});
+        defer runner.deinit();
+        try testing.expect(try open_on(&runner, &cache_ref));
+    }
+    // A backend without an `Io` keeps every miss private.
+    var memory = mocks.Storage.init(gpa);
+    defer memory.deinit();
+    var unshared = try CacheRef.init(gpa, page_size, 4);
+    defer unshared.deinit();
+    const opened = try memory.interface().open("shared_reads", "blob");
+    var writer = try writer_mod.Writer.init(gpa, opened.blob, opened.len, page_size, &unshared);
+    defer writer.deinit();
+    try testing.expectEqual(null, unshared.io);
+}

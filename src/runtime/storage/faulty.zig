@@ -534,10 +534,15 @@ pub fn Storage(comptime Rng: type) type {
                 .sync = sync_erased,
                 .start_sync = start_sync_erased,
                 .close = close_erased,
+                .io = io_erased,
             };
 
             fn from(ptr: *anyopaque) *Blob {
                 return @ptrCast(@alignCast(ptr));
+            }
+
+            fn io_erased(ptr: *anyopaque) ?Io {
+                return from(ptr).inner.io();
             }
 
             fn read_at_erased(

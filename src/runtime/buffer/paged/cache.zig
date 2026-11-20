@@ -12,8 +12,9 @@
 //! instead of reading the page again. A fetch lives in one of `fetch_slots_max` slots with a page
 //! buffer of its own, so a joiner gets the page even if the cache evicts it first. A fetch whose
 //! reader is canceled resolves as abandoned: its joiners read the page again, the first of them
-//! as a new fetch the others join, so a cancel never fails other readers. Without `share_reads`,
-//! or with every slot taken, a miss reads alone.
+//! as a new fetch the others join, so a cancel never fails other readers. A `Writer` turns
+//! sharing on when it opens a blob whose backend has an `Io` (`Blob.io`); without one, or with
+//! every slot taken, a miss reads alone.
 //!
 //! Like commonware's, lookups first try `hints`, a direct-mapped array from `hint_index` to the
 //! `Slots` slot a page was last cached in: one array load instead of a hash probe chain. Hints
@@ -154,15 +155,24 @@ pub const CacheRef = struct {
         self.* = undefined;
     }
 
-    /// Lets readers that miss the same page share one blob read, waiting with `io`.
+    /// Lets readers that miss the same page share one blob read, waiting with `io`. Writers
+    /// call it on open with their blob's `Io`, so a cache shares reads by default, as
+    /// commonware's always does. A cache reused under a new runtime (a restarted test runner)
+    /// moves to its `Io`, which is safe only while no fetch is live.
     pub fn share_reads(self: *CacheRef, io: Io) Allocator.Error!void {
-        assert(self.io == null);
-        const fetch_slots = try self.gpa.alloc(Fetch, fetch_slots_max);
-        errdefer self.gpa.free(fetch_slots);
-        const fetch_pages = try self.gpa.alloc(u8, fetch_slots_max * @as(usize, self.page_size));
-        @memset(fetch_slots, .{});
-        self.fetch_slots = fetch_slots;
-        self.fetch_pages = fetch_pages;
+        self.acquire();
+        defer self.release();
+        if (self.fetch_slots.len == 0) {
+            const fetch_slots = try self.gpa.alloc(Fetch, fetch_slots_max);
+            errdefer self.gpa.free(fetch_slots);
+            const page_bytes = fetch_slots_max * @as(usize, self.page_size);
+            const fetch_pages = try self.gpa.alloc(u8, page_bytes);
+            @memset(fetch_slots, .{});
+            self.fetch_slots = fetch_slots;
+            self.fetch_pages = fetch_pages;
+        } else if (self.io.?.userdata != io.userdata) {
+            for (self.fetch_slots) |fetch| assert(fetch.state == .free);
+        }
         self.io = io;
         assert(self.fetch_slots.len == fetch_slots_max);
     }

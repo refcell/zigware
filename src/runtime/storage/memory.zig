@@ -86,6 +86,8 @@ pub const Storage = struct {
     generation_next: u64 = 0,
     /// Every handle not yet closed, including handles of removed blobs.
     handles: std.DoublyLinkedList = .{},
+    /// The runtime this storage runs under, reported by its blobs (`iface.Blob.io`).
+    io: ?std.Io = null,
 
     pub fn init(gpa: Allocator) Storage {
         return .{ .gpa = gpa };
@@ -508,7 +510,13 @@ pub const Blob = struct {
         .resize = resize_erased,
         .sync = sync_erased,
         .close = close_erased,
+        .io = io_erased,
     };
+
+    fn io_erased(ptr: *anyopaque) ?std.Io {
+        const self: *Blob = @ptrCast(@alignCast(ptr));
+        return self.storage.io;
+    }
 
     fn read_at_erased(
         ptr: *anyopaque,

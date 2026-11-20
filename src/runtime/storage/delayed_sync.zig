@@ -359,10 +359,15 @@ pub const Blob = struct {
         .sync = sync,
         .close = close,
         .start_sync = start_sync,
+        .io = io_of,
     };
 
     fn of(ptr: *anyopaque) *Blob {
         return @ptrCast(@alignCast(ptr));
+    }
+
+    fn io_of(ptr: *anyopaque) ?Io {
+        return of(ptr).inner.io();
     }
 
     fn read_at(ptr: *anyopaque, offset: u64, buffer: []u8, options: iface.ReadOptions) Error!void {

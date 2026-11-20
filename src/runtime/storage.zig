@@ -166,7 +166,17 @@ pub const Blob = struct {
             buffer: []u8,
             options: ReadOptions,
         ) Error!PendingRead = null,
+        /// The `Io` the blob's backend runs on, which readers sharing a page cache wait with;
+        /// null for backends without one (`Blob.io`).
+        io: ?*const fn (ptr: *anyopaque) ?std.Io = null,
     };
+
+    /// The `Io` of the blob's backend, or null if it has none. Wrappers forward their inner
+    /// blob's.
+    pub fn io(blob: Blob) ?std.Io {
+        const get = blob.vtable.io orelse return null;
+        return get(blob.ptr);
+    }
 
     /// Read exactly `buffer.len` bytes at `offset`; `error.BlobInsufficientLength` if the blob
     /// is shorter.

@@ -583,7 +583,13 @@ pub const Blob = struct {
         .resize = resize_erased,
         .sync = sync_erased,
         .close = close_erased,
+        .io = io_erased,
     };
+
+    fn io_erased(ptr: *anyopaque) ?Io {
+        const self: *Blob = @ptrCast(@alignCast(ptr));
+        return self.storage.io;
+    }
 
     const blob_vtable_read_ahead: iface.Blob.VTable = vtable: {
         var with_reads = blob_vtable;

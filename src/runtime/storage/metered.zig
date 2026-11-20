@@ -173,10 +173,15 @@ pub const Storage = struct {
             .resize = resize_erased,
             .sync = sync_erased,
             .close = close_erased,
+            .io = io_erased,
         };
 
         fn from_blob(ptr: *anyopaque) *Blob {
             return @ptrCast(@alignCast(ptr));
+        }
+
+        fn io_erased(ptr: *anyopaque) ?std.Io {
+            return from_blob(ptr).inner.io();
         }
 
         fn read_at_erased(

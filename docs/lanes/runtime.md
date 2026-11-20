@@ -233,6 +233,20 @@ time, files, and network: build on it rather than around it where it fits.
   plus plain load/store bumps cut recv_waiting's best median 174 to 148 us. Pre-encoding each
   task's audit event at spawn and dropping the fiber switch's `stmxcsr`/`fnstcw` measured within
   noise, so neither landed.
+- Shared in-flight page reads (`CacheRef.share_reads`, 6c59ae81) differ from commonware's in one
+  case. There, every waiter drives one shared read future, so when the first fetcher is
+  canceled, its followers still get one read. A canceled zigware read ends with its task (no
+  late completion), so its fetch resolves as abandoned and a follower reads the page again:
+  `test_followers_keep_single_flight_after_first_fetcher_cancellation` sees two reads, not one.
+- Shared reads are on by default, as commonware's page cache always has `page_fetches`. The
+  waiting needs an `Io`, which `CacheRef.init` does not take (131 callers across lanes), so
+  blobs report their backend's (`Blob.io`, forwarded by every storage wrapper) and
+  `paged.Writer` binds its cache on open. A cache reused under a new runner moves to that
+  runner's `Io`, which `share_reads` allows only while no fetch is live. A blob without an
+  `Io` (test mocks) keeps private reads. Schedules change only when a reader joins a fetch in
+  flight: a futex wake with no waiters does nothing on the deterministic runner. Turning it
+  on moved no conformance or replay digest: test-storage passed unchanged, and `just push`
+  ran the full suite.
 
 ## Log
 - 2026-11-13: fibers, rand-compatible shuffle, deterministic executor implementing `std.Io`.
@@ -344,7 +358,7 @@ Open (none are in runtime/src/telemetry/, the runtime-telemetry lane's directory
   one: a canceled zigware read ends with its task),
   `:3572` `test_page_fetch_error_removes_entry_for_all_waiters`,
   `:3658` `test_cancelled_stale_waiter_preserves_new_fetch`: shared in-flight page reads
-  (`CacheRef.share_reads`, opt-in), in paged/shared_reads_test.zig over a gated blob
+  (`CacheRef.share_reads`, on by default), in paged/shared_reads_test.zig over a gated blob
 - [x] `utils/buffer/paged/cache.rs:3866` `test_read_cached_many_across_chunks`,
   `:3926` `test_read_cached_many_stale_hint_after_eviction`,
   `:3957` `test_read_cached_many_cross_blob_hint_collision`,
