@@ -60,5 +60,18 @@ jobs:
               filters="$filters -Dtest-filter=$filter"
             done
           fi
+          if [ -n "$STORAGE" ]; then
+            # Temporary: names the region behind storage's RSS growth (VM_ALLOCATE means
+            # std's debug-info arena, MALLOC_MEDIUM means libmalloc).
+            (while sleep 120; do
+              for pid in $(pgrep -x test-storage || true); do
+                echo "== $(date +%T) pid $pid"
+                vmmap --summary "$pid" 2>&1 | grep -E 'VM_ALLOCATE|MALLOC|TOTAL|Physical' || true
+              done
+            done) > "$RUNNER_TEMP/vmmap.log" 2>&1 &
+          fi
           # A hung test fails with its name instead of running into the job's timeout.
           zig build ${{ matrix.steps }} $filters --test-timeout 10m --summary all
+      - name: vmmap samples
+        if: always() && matrix.storage != ''
+        run: cat "$RUNNER_TEMP/vmmap.log" || true
