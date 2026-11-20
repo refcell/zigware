@@ -200,6 +200,10 @@ const PrefixSlot = struct { prefix: u64, index: u32 };
 /// same in every value (database locations differ in their low two or three bytes only).
 pub fn sort_u64(gpa: Allocator, values: []u64) !void {
     if (values.len < 2) return;
+    // Superseded locations usually arrive in emission order, which is already ascending.
+    for (values[1..], values[0 .. values.len - 1]) |value, previous| {
+        if (value < previous) break;
+    } else return;
     const scratch = try gpa.alloc(u64, values.len);
     defer gpa.free(scratch);
     var counts: [8][256]u32 = @splat(@splat(0));

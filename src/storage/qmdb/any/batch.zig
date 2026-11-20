@@ -413,6 +413,18 @@ fn Walked(comptime D: type) type {
             return self.base + self.ops.items.len;
         }
 
+        /// Sizes the lists for `writes` writes and a proportional walk, which moves about one
+        /// update per write, so neither grows while the batch is emitted (commonware's
+        /// `walked(capacity)`).
+        fn reserve(self: *Self, gpa: Allocator, writes: usize) !void {
+            assert(self.ops.items.len == 0);
+            try self.ops.ensureTotalCapacity(gpa, 2 * writes + 1);
+            try self.diff.ensureTotalCapacity(gpa, writes);
+            try self.floor_diff.ensureTotalCapacity(gpa, writes);
+            try self.superseded.ensureTotalCapacity(gpa, writes + 1);
+            assert(self.ops.capacity >= 2 * writes + 1);
+        }
+
         pub fn push_delete(self: *Self, gpa: Allocator, key: D.Key, base_old_loc: ?u64) !void {
             try self.ops.append(gpa, .{ .delete = key });
             try self.diff.append(gpa, .{ .key = key, .entry = .{ .deleted = .{
@@ -628,6 +640,9 @@ fn Merkleizer(comptime D: type) type {
             assert(at == split);
         }
 
+        /// How many snapshot probes ahead `gather_existing_locations` prefetches.
+        const prefetch_ahead = 8;
+
         /// The previous locations of the written keys: ancestor diff locations of keys the
         /// ancestors keep active, snapshot candidates of keys they do not touch. Sorted.
         /// Ordered databases also gather the snapshot collision siblings of keys the ancestors
@@ -636,9 +651,21 @@ fn Merkleizer(comptime D: type) type {
         pub fn gather_existing_locations(self: *Self, writes: []const Mutation) ![]u64 {
             var locations: std.ArrayList(u64) = .empty;
             errdefer locations.deinit(self.gpa);
+            try locations.ensureTotalCapacity(self.gpa, writes.len + writes.len / 2);
             var cursors = try diff_mod.Cursors(K, V).init(self.gpa, self.ancestor_entries);
             defer cursors.deinit(self.gpa);
-            for (writes) |*write| {
+            const Snapshot = @TypeOf(self.db.snapshot);
+            const prefetches = comptime @hasDecl(Snapshot, "prefetch");
+            if (prefetches) {
+                for (writes[0..@min(writes.len, prefetch_ahead)]) |*write| {
+                    self.db.snapshot.prefetch(value_mod.bytes(K, &write.key));
+                }
+            }
+            for (writes, 0..) |*write, at| {
+                if (prefetches and at + prefetch_ahead < writes.len) {
+                    const ahead = &writes[at + prefetch_ahead].key;
+                    self.db.snapshot.prefetch(value_mod.bytes(K, ahead));
+                }
                 var skip: ?u64 = null;
                 if (cursors.resolve(&write.key)) |entry| {
                     const loc = entry.loc() orelse continue; // Deleted: nothing is active.
@@ -669,6 +696,7 @@ fn Merkleizer(comptime D: type) type {
             const gpa = self.gpa;
             var walked: Walked(D) = .{ .base = self.base_state.size };
             errdefer walked.deinit(gpa);
+            try walked.reserve(gpa, writes.len);
             const consumed = try gpa.alloc(bool, writes.len);
             defer gpa.free(consumed);
             @memset(consumed, false);
@@ -708,6 +736,7 @@ fn Merkleizer(comptime D: type) type {
         fn emit_ordered(self: *Self, writes: []const Mutation) !Walked(D) {
             var walked: Walked(D) = .{ .base = self.base_state.size };
             errdefer walked.deinit(self.gpa);
+            try walked.reserve(self.gpa, writes.len);
             try ordered_mod.Emitter(D).emit(self, &walked, writes);
             assert(walked.next_loc() >= self.base_state.size);
             return walked;

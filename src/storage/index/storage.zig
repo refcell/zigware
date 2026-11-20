@@ -140,6 +140,12 @@ pub fn Index(comptime T: type, comptime V: type, comptime Heads: type) type {
             return self.get_translated(self.translator.transform(key));
         }
 
+        /// Starts loading what `get(key)` reads first, where the heads support it.
+        pub fn prefetch(self: *const Self, key: []const u8) void {
+            if (comptime !@hasDecl(Heads, "prefetch")) return;
+            self.heads.prefetch(self.translator.transform(key));
+        }
+
         pub fn get_translated(self: *const Self, key: Key) Values(V) {
             return self.values_of(key, self.heads.get(key));
         }

@@ -27,6 +27,18 @@ fn Heads(comptime T: type, comptime V: type) type {
             return self.map.getPtrContext(key, self.context);
         }
 
+        /// Starts loading the slot `get(key)` probes first (its metadata, key, and value),
+        /// so a batch of lookups issued a few keys ahead overlaps their cache misses.
+        pub fn prefetch(self: *const Self, key: T.Key) void {
+            const metadata = self.map.metadata orelse return;
+            const capacity = self.map.capacity();
+            assert(std.math.isPowerOfTwo(capacity));
+            const index: usize = @intCast(self.context.hash(key) & (capacity - 1));
+            @prefetch(metadata + index, .{});
+            @prefetch(self.map.keyIterator().items + index, .{});
+            @prefetch(self.map.valueIterator().items + index, .{});
+        }
+
         pub fn get_or_put(self: *Self, gpa: Allocator, key: T.Key) !storage.GetOrPut(V) {
             const entry = try self.map.getOrPutContext(gpa, key, self.context);
             return .{ .value_ptr = entry.value_ptr, .found_existing = entry.found_existing };
