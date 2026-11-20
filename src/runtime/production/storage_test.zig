@@ -694,6 +694,40 @@ test "a sync with nothing changed since the last skips the fsync (test_clean_syn
     try expect_clean_sync_skipped(&ring);
 }
 
+test "a sync write is its own barrier: it owes no sync and leaves earlier changes owed" {
+    // commonware fuses a Linux sync write that fits one submission into `RWF_DSYNC`, so it
+    // records no flush debt of its own (blob.rs `write_at`). Larger writes and the ring write
+    // first and then run a separate barrier, leaving the blob clean.
+    var ring: Ring = undefined;
+    try init_ring(&ring);
+    defer ring.deinit();
+    for ([_]?*Ring{ null, &ring }) |maybe_ring| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const root = try tmp.dir.createDirPathOpen(io, "root", .{});
+        var storage = try file_storage.Storage.init(io, gpa, root, .{ .ring = maybe_ring });
+        defer storage.deinit();
+        const blob = (try storage.storage().open("partition", "fused")).blob;
+        defer blob.close();
+        const handle = blob_handle(blob);
+        const fused = builtin.os.tag == .linux and maybe_ring == null;
+        try blob.write_at(0, "hello", .{ .sync = true });
+        try blob.sync();
+        try testing.expectEqual(@as(u64, 1), handle.syncs_skipped.load(.monotonic));
+        // An unsynced write stays owed across a fused write of other bytes.
+        try blob.write_at(0, "x", .{});
+        try blob.write_at(5, "world", .{ .sync = true });
+        const synced = handle.synced_generation.load(.monotonic);
+        try testing.expectEqual(fused, handle.generation.load(.monotonic) != synced);
+        try blob.sync();
+        const skipped: u64 = if (fused) 1 else 2;
+        try testing.expectEqual(skipped, handle.syncs_skipped.load(.monotonic));
+        var buffer: [10]u8 = undefined;
+        try blob.read_at(0, &buffer);
+        try testing.expectEqualStrings("xelloworld", &buffer);
+    }
+}
+
 /// Storage that syncs inherited partition directories, as commonware does off Linux.
 fn partition_sync_storage(tmp: *testing.TmpDir) !file_storage.Storage {
     const root = try tmp.dir.createDirPathOpen(io, "root", .{});

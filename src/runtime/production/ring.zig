@@ -42,7 +42,8 @@ pub const PerformError = Io.Cancelable || Io.Timeout.Error;
 pub const Operation = union(enum) {
     read: struct { fd: posix.fd_t, buffer: []u8, offset: u64 },
     write: struct { fd: posix.fd_t, bytes: []const u8, offset: u64 },
-    fsync: struct { fd: posix.fd_t },
+    /// `datasync` flushes only the data and the metadata needed to read it (`fdatasync`).
+    fsync: struct { fd: posix.fd_t, datasync: bool = false },
     recv: struct { fd: posix.fd_t, buffer: []u8 },
     sendmsg: struct { fd: posix.fd_t, msg: *const posix.msghdr_const },
     /// Accepts one connection as a blocking, close-on-exec socket, writing the peer's address.
@@ -234,7 +235,7 @@ const LinuxWorker = struct {
         switch (operation) {
             .read => |o| sqe.prep_read(o.fd, o.buffer, o.offset),
             .write => |o| sqe.prep_write(o.fd, o.bytes, o.offset),
-            .fsync => |o| sqe.prep_fsync(o.fd, 0),
+            .fsync => |o| sqe.prep_fsync(o.fd, if (o.datasync) linux.IORING_FSYNC_DATASYNC else 0),
             .recv => |o| sqe.prep_recv(o.fd, o.buffer, 0),
             .sendmsg => |o| sqe.prep_sendmsg(o.fd, o.msg, linux.MSG.NOSIGNAL),
             .accept => |o| sqe.prep_accept(o.fd, o.addr, o.addrlen, linux.SOCK.CLOEXEC),

@@ -293,7 +293,7 @@ pub const Storage = struct {
             try self.partition_sync_once(path.partition, partition_dir);
             if (!self.flushed.contains(key)) {
                 // The previous run may have left writes in the page cache: settle them first.
-                file.sync(self.io) catch |err| return or_canceled(err, error.BlobSyncFailed);
+                try file_sync(self, file);
                 self.flushed.putAssumeCapacityNoClobber(try self.gpa.dupe(u8, key), {});
             }
             return existing;
@@ -595,12 +595,16 @@ pub fn write_all_vectored(writer: anytype, chunks: []const []const u8, offset: u
     }
 }
 
+/// A blob's durability barrier. Like commonware, it is `fdatasync` on Linux: the data and the
+/// metadata needed to read it, including the length, without timestamp-only journal commits.
+/// Header and directory syncs stay full `fsync`s.
 fn file_sync(storage: *const Storage, file: File) Error!void {
-    const worker = ring_worker(storage) orelse
-        return file.sync(storage.io) catch |err| or_canceled(err, error.BlobSyncFailed);
+    const worker = ring_worker(storage) orelse return file_datasync(storage.io, file);
     // Bounded: an interrupted fsync is retried, and any other result ends it.
     while (true) {
-        const result = try ring_perform(worker, .{ .fsync = .{ .fd = file.handle } });
+        const result = try ring_perform(worker, .{
+            .fsync = .{ .fd = file.handle, .datasync = true },
+        });
         switch (request_mod.CqeResult.from_raw(result)) {
             .retry => continue,
             .failure => return error.BlobSyncFailed,
@@ -610,6 +614,57 @@ fn file_sync(storage: *const Storage, file: File) Error!void {
             },
         }
     }
+}
+
+/// `fdatasync` on Linux; elsewhere `std.Io`'s `fsync`, as commonware uses `sync_all` there.
+fn file_datasync(io: Io, file: File) Error!void {
+    if (builtin.os.tag != .linux) {
+        return file.sync(io) catch |err| or_canceled(err, error.BlobSyncFailed);
+    }
+    const linux = std.os.linux;
+    // Bounded: an interrupted call is retried after a cancellation check.
+    while (true) {
+        io.checkCancel() catch return error.Canceled;
+        switch (linux.errno(linux.fdatasync(file.handle))) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => return error.BlobSyncFailed,
+        }
+    }
+}
+
+/// Writes all of `chunks` at `position` with `pwritev2(RWF_DSYNC)`, so each submission is its
+/// own durability barrier (commonware fuses a sync write that fits one submission this way).
+fn file_write_dsync(file: File, chunks: []const []const u8, position: u64) Error!void {
+    comptime assert(builtin.os.tag == .linux);
+    const Dsync = struct {
+        handle: std.posix.fd_t,
+
+        pub fn write(self: @This(), window: []const []const u8, offset: u64) Error!usize {
+            const linux = std.os.linux;
+            var iovecs: [write_iovecs_max]std.posix.iovec_const = undefined;
+            assert(window.len <= iovecs.len);
+            for (window, iovecs[0..window.len]) |chunk, *iovec| {
+                iovec.* = .{ .base = chunk.ptr, .len = chunk.len };
+            }
+            // Bounded: only an interrupt repeats the call.
+            while (true) {
+                const result = linux.pwritev2(
+                    self.handle,
+                    &iovecs,
+                    window.len,
+                    @intCast(offset),
+                    linux.RWF.DSYNC,
+                );
+                switch (linux.errno(result)) {
+                    .SUCCESS => return result,
+                    .INTR => continue,
+                    else => return error.WriteFailed,
+                }
+            }
+        }
+    };
+    return write_all_vectored(Dsync{ .handle = file.handle }, chunks, position);
 }
 
 /// The calling thread's io_uring worker, or null to use `std.Io`.
@@ -808,6 +863,17 @@ pub const Blob = struct {
         // Like commonware, the write must end within the signed file extent, checked before
         // any I/O.
         if (position + total > std.math.maxInt(i64)) return error.OffsetOverflow;
+        // On Linux, a sync write that fits one submission carries its own barrier, so it owes
+        // no sync and leaves earlier unsynced changes owed (commonware's fused `RWF_DSYNC`).
+        if (builtin.os.tag == .linux and options.sync and chunks.len <= write_iovecs_max and
+            ring_worker(self.storage) == null)
+        {
+            // A failed write may have changed bytes it did not make durable: they stay owed.
+            return file_write_dsync(self.file, chunks, position) catch |err| {
+                self.mutated();
+                return err;
+            };
+        }
         {
             defer self.mutated();
             if (ring_worker(self.storage) == null) {
