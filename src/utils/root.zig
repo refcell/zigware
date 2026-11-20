@@ -84,6 +84,9 @@ pub const bytes_eql = @import("bytes_eql.zig").eql;
 /// Rust's `sort_unstable` (ipnsort), faster than `std.sort.pdq`.
 pub const sort = @import("sort.zig");
 
+/// Rust's `binary_search_by` (branchless halving), faster than `std.sort.binarySearch`.
+pub const search = @import("search.zig");
+
 pub const sync = @import("sync.zig");
 
 pub const futures = @import("futures.zig");

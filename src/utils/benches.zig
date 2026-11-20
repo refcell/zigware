@@ -89,7 +89,7 @@ fn SearchWorkload(comptime N: usize) type {
             for (workload.queries) |query| {
                 const query_kept = query;
                 std.mem.doNotOptimizeAway(&query_kept);
-                if (std.sort.binarySearch(Key, workload.sorted, query_kept, compare) != null) {
+                if (utils.search.binary(Key, workload.sorted, query_kept, compare) != null) {
                     found += 1;
                 }
             }
