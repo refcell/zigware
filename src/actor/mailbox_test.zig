@@ -386,6 +386,29 @@ test "empty inbox closes when senders drop" {
     try testing.expectEqual(@as(?Message, null), try pair.receiver.recv());
 }
 
+test "a pending poll parks the receiver until the next receive" {
+    var pair = try open(Message, 1);
+    defer pair.receiver.deinit();
+    const word = &pair.receiver.state.waker.word;
+    try testing.expect(pair.receiver.poll_recv() == .pending);
+    // Parked, so the enqueue takes the waiting-receiver wake path, as after commonware's
+    // pending poll registers its waker.
+    try testing.expectEqual(@as(u32, 1), word.load(.monotonic));
+    try expect_enqueue(pair.sender, .{ .vote = 1 }, .new(.ok));
+    try testing.expectEqual(@as(u32, 0b11), word.load(.monotonic));
+    try expect_recv(&pair.receiver, .{ .vote = 1 });
+    try testing.expectEqual(@as(u32, 0b10), word.load(.monotonic));
+
+    try testing.expect(pair.receiver.poll_recv() == .pending);
+    try testing.expectError(error.Empty, pair.receiver.try_recv());
+    try testing.expectEqual(@as(u32, 0b10), word.load(.monotonic));
+    try expect_enqueue(pair.sender, .{ .vote = 2 }, .new(.ok));
+    try testing.expectEqual(Message{ .vote = 2 }, pair.receiver.poll_recv().ready.?);
+    pair.sender.deinit();
+    try testing.expectEqual(@as(?Message, null), pair.receiver.poll_recv().ready);
+    try testing.expect(!pair.receiver.polled);
+}
+
 test "cloned senders keep the mailbox connected" {
     var pair = try open(Message, 1);
     defer pair.receiver.deinit();

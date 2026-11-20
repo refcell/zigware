@@ -2,10 +2,10 @@
 //! (`mailbox::mailbox::<group>/<params>`, Criterion's group/function ids) and constants.
 //!
 //! `iter_batched(.., BatchSize::LargeInput)` maps to `before_iter`: the mailbox is built and
-//! filled untimed, and the previous one is dropped there too. `recv_waiting` runs on the
-//! deterministic runtime, single-threaded like the reference's `block_on`; each message is
-//! enqueued only after the receiver has parked. `concurrent_enqueue` builds the mailbox inside
-//! the timed loop, like the reference's `iter`.
+//! filled untimed, and the previous one is dropped there too. `recv_waiting` runs in one
+//! task on the deterministic runtime, like the reference's `block_on`: each message is
+//! enqueued after a pending `poll_recv` has parked the receiver. `concurrent_enqueue` builds
+//! the mailbox inside the timed loop, like the reference's `iter`.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -199,35 +199,17 @@ const RecvWaiting = struct {
         try (try deterministic.start(round_trips, .{ workload.gpa, deterministic.io() }));
     }
 
+    /// Commonware's sequence in one task, as under its `block_on`: poll the receive once so
+    /// the receiver parks, enqueue (which wakes the parked receiver), then take the message.
     fn round_trips(gpa: Allocator, io: Io) !void {
         var pair = try mailbox.new(Message, gpa, io, 1);
         defer pair.receiver.deinit();
         defer pair.sender.deinit();
-        var parked: u32 = 0;
-        var consumer = try io.concurrent(consume, .{ &pair.receiver, &parked });
-        errdefer consumer.cancel(io) catch {};
-        for (0..messages) |index| {
-            // Run the receiver until it parks in `recv` for this message. Single-threaded and
-            // cooperative, it only yields once `recv` waits.
-            for (0..parked_cycles_max) |_| {
-                if (parked > index) break;
-                try io.sleep(.fromNanoseconds(1), .awake);
-            }
-            assert(parked == index + 1);
-            try expect(pair.sender, .drop, .new(.ok));
-        }
-        try consumer.await(io);
-        assert(parked == messages);
-    }
-
-    /// Scheduler cycles a parked-receiver wait may take (ready tasks run in seeded order).
-    const parked_cycles_max = 64;
-
-    fn consume(receiver: *mailbox.Receiver(Message), parked: *u32) Io.Cancelable!void {
         for (0..messages) |_| {
-            parked.* += 1;
-            const message = try receiver.recv();
-            std.mem.doNotOptimizeAway(message.?);
+            assert(pair.receiver.poll_recv() == .pending);
+            try expect(pair.sender, .drop, .new(.ok));
+            const message = (try pair.receiver.recv()).?;
+            std.mem.doNotOptimizeAway(&message);
         }
     }
 

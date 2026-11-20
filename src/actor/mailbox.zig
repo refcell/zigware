@@ -61,6 +61,8 @@
 //!   replaces `AtomicWaker`, and an `std.Io.Mutex` guards overflow. Everything goes through
 //!   `std.Io` futexes, so the mailbox runs on any `std.Io`, including the deterministic
 //!   runtime.
+//! - `Receiver.poll_recv` stands in for polling the `recv()` future once: a pending poll
+//!   parks the receiver until the next `recv` or `try_recv`.
 //! - Handles are values, so `Sender.clone`/`Sender.deinit` and `Receiver.deinit` replace Rust's
 //!   `Clone`/`Drop`. Copying a handle without `clone` breaks sender counting.
 //! - `new` takes no metrics context: its backoff counter is detached (commonware's test
@@ -224,12 +226,44 @@ pub fn Receiver(comptime T: type) type {
         const Self = @This();
 
         state: *State(T),
+        /// `poll_recv` returned `.pending` and left the receiver parked.
+        polled: bool = false,
+
+        /// One poll of a receive (commonware's `recv()` future polled once).
+        pub const Poll = union(enum) {
+            /// The next message, or null once disconnected and drained, as `recv` returns.
+            ready: ?T,
+            /// Nothing ready: the receiver is parked, so the next enqueue wakes it, and a
+            /// later `recv` or `try_recv` takes the message.
+            pending,
+        };
+
+        /// Receive without waiting, or park the receiver (commonware registers the waker on a
+        /// pending poll), so a sender that enqueues next takes the waiting-receiver wake path.
+        pub fn poll_recv(receiver: *Self) Poll {
+            const state = receiver.state;
+            assert(!state.closed.load(.monotonic));
+            if (state.pop()) |message| return .{ .ready = message };
+            if (state.is_disconnected()) return .{ .ready = state.pop() };
+            _ = state.waker.park();
+            receiver.polled = true;
+            assert(state.waker.word.load(.monotonic) & Waker.parked_bit != 0);
+            return .pending;
+        }
+
+        /// End a pending poll: the receiver stops being parked.
+        fn end_poll(receiver: *Self) void {
+            if (!receiver.polled) return;
+            receiver.polled = false;
+            receiver.state.waker.unpark();
+        }
 
         /// Receive the next message. Returns null after all senders are gone and every
         /// buffered message has been received.
         pub fn recv(receiver: *Self) Io.Cancelable!?T {
             const state = receiver.state;
             assert(!state.closed.load(.monotonic));
+            receiver.end_poll();
             // Fast path avoids waker churn when a message is already ready.
             if (state.pop()) |message| return message;
             if (state.is_disconnected()) return state.pop();
@@ -248,6 +282,7 @@ pub fn Receiver(comptime T: type) type {
         pub fn try_recv(receiver: *Self) TryRecvError!T {
             const state = receiver.state;
             assert(!state.closed.load(.monotonic));
+            receiver.end_poll();
             if (state.pop()) |message| return message;
             if (state.is_disconnected()) return state.pop() orelse error.Disconnected;
             return error.Empty;
