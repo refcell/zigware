@@ -190,9 +190,7 @@ fn second_sync_waits_for_first(ctx: runtime.deterministic.Context) !void {
 
 test "start_sync: a second sync waits for the first" {
     // commonware `test_start_sync_second_sync_waits_for_first`.
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(second_sync_waits_for_first, .{}));
+    try soak_context(second_sync_waits_for_first, .{});
 }
 
 /// A store over `delayed`, whose started syncs park in `pending`.
@@ -236,9 +234,7 @@ fn dropped_handle_does_not_cancel(ctx: runtime.deterministic.Context) !void {
 
 test "start_sync: a dropped completion does not cancel its sync" {
     // commonware `test_start_sync_dropped_handle_does_not_cancel`, on `DelayedSync`.
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(dropped_handle_does_not_cancel, .{}));
+    try soak_context(dropped_handle_does_not_cancel, .{});
 }
 
 fn failure_fails_next_sync(ctx: runtime.deterministic.Context, dropped: bool) !void {
@@ -268,8 +264,17 @@ test "start_sync: a failed sync fails the next sync" {
     // commonware `test_start_sync_failure_fails_next_sync` and
     // `test_start_sync_dropped_handle_fails_next_sync`, on `DelayedSync`.
     for ([_]bool{ false, true }) |dropped| {
-        var runner = try runtime.deterministic.Runner.init(gpa, .{});
-        defer runner.deinit();
-        try (try runner.start_context(failure_fails_next_sync, .{dropped}));
+        try soak_context(failure_fails_next_sync, .{dropped});
     }
+}
+
+/// Runs `function` with `args` on a deterministic runner once per `-Dfuzz-soak` round, from the
+/// runner's default seed (`runtime.deterministic.soak`).
+fn soak_context(comptime function: anytype, args: anytype) !void {
+    const Args = @TypeOf(args);
+    try runtime.deterministic.soak(gpa, .{}, args, struct {
+        fn run(context: Args, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start_context(function, context));
+        }
+    }.run);
 }

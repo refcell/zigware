@@ -73,9 +73,7 @@ fn dropped_during_repair(ctx: Context) !void {
 }
 
 test "segmented variable replay canceled during repair fails the replay" {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(dropped_during_repair, .{}));
+    try soak_context(dropped_during_repair, .{});
 }
 
 const Wide = [64]u8;
@@ -143,8 +141,17 @@ test "segmented variable replay canceled during a read fails the replay" {
     // next). A call is never dropped before it runs here, so the unpolled drop has no
     // counterpart.
     for ([_]bool{ false, true }) |resume_replay| {
-        var runner = try runtime.deterministic.Runner.init(gpa, .{});
-        defer runner.deinit();
-        try (try runner.start_context(dropped_during_read, .{resume_replay}));
+        try soak_context(dropped_during_read, .{resume_replay});
     }
+}
+
+/// Runs `function` with `args` on a deterministic runner once per `-Dfuzz-soak` round, from the
+/// runner's default seed (`runtime.deterministic.soak`).
+fn soak_context(comptime function: anytype, args: anytype) !void {
+    const Args = @TypeOf(args);
+    try runtime.deterministic.soak(gpa, .{}, args, struct {
+        fn run(context: Args, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start_context(function, context));
+        }
+    }.run);
 }

@@ -120,9 +120,7 @@ fn overlaps_work(ctx: Context) !void {
 }
 
 test "authenticated start_sync overlaps work (test_start_sync_overlaps_work)" {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(overlaps_work, .{}));
+    try soak_context(overlaps_work, .{});
 }
 
 /// A failed in-flight sync surfaces through its completion and the next durability op.
@@ -144,9 +142,7 @@ fn failure_propagates(ctx: Context) !void {
 }
 
 test "authenticated start_sync failure propagates (test_start_sync_failure_propagates)" {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(failure_propagates, .{}));
+    try soak_context(failure_propagates, .{});
 }
 
 /// Release parked syncs until `completion` completes (commonware `drive_pending_syncs`), then
@@ -181,9 +177,7 @@ fn merkle_failure_fails_handle(ctx: Context) !void {
 
 test "authenticated Merkle-only sync failure fails the joined completion" {
     // commonware `test_start_sync_merkle_failure_fails_handle`.
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(merkle_failure_fails_handle, .{}));
+    try soak_context(merkle_failure_fails_handle, .{});
 }
 
 /// The Merkle journal's recovery watermark persisted in `f`'s backing storage.
@@ -216,9 +210,7 @@ fn reopen_persists_merkle_watermark(ctx: Context) !void {
 
 test "authenticated reopen persists the Merkle watermark" {
     // commonware `test_reopen_persists_merkle_watermark`.
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(reopen_persists_merkle_watermark, .{}));
+    try soak_context(reopen_persists_merkle_watermark, .{});
 }
 
 const commit_op: Op = .{ 1, @splat(0), @splat(0) };
@@ -279,9 +271,7 @@ fn destroy_observes_failed_merkle_sync(ctx: Context) !void {
 
 test "authenticated destroy observes a failed Merkle sync before removal" {
     // commonware `issue_5668_regression_destroy_observes_failed_merkle_sync_before_removal`.
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(destroy_observes_failed_merkle_sync, .{}));
+    try soak_context(destroy_observes_failed_merkle_sync, .{});
 }
 
 fn destroying(ctx: Context, journal: *Journal, done: *bool) anyerror!void {
@@ -320,9 +310,7 @@ fn destroy_stages_journal_clear(ctx: Context) !void {
 
 test "authenticated destroy stages the journal clear before removal" {
     // commonware `issue_5668_regression_destroy_stages_journal_clear_before_removal`.
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(destroy_stages_journal_clear, .{}));
+    try soak_context(destroy_stages_journal_clear, .{});
 }
 
 fn finishing(ctx: Context, recovery: *Journal.Recovery, out: *?Journal) anyerror!void {
@@ -403,7 +391,16 @@ fn initialization_sync_order(ctx: Context) !void {
 
 test "authenticated initialization syncs operations before Merkle repair" {
     // commonware `test_initialization_syncs_operations_before_merkle_repair`.
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(initialization_sync_order, .{}));
+    try soak_context(initialization_sync_order, .{});
+}
+
+/// Runs `function` with `args` on a deterministic runner once per `-Dfuzz-soak` round, from the
+/// runner's default seed (`runtime.deterministic.soak`).
+fn soak_context(comptime function: anytype, args: anytype) !void {
+    const Args = @TypeOf(args);
+    try runtime.deterministic.soak(gpa, .{}, args, struct {
+        fn run(context: Args, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start_context(function, context));
+        }
+    }.run);
 }

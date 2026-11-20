@@ -1789,9 +1789,7 @@ fn orphan_value_alignment_sync_concurrency(ctx: runtime.deterministic.Context) !
 
 test "oversized recovery: value alignment truncates sections concurrently" {
     // commonware `test_oversized_orphan_value_alignment_sync_concurrency`.
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(orphan_value_alignment_sync_concurrency, .{}));
+    try soak_context(orphan_value_alignment_sync_concurrency, .{});
 }
 
 fn syncing(ctx: runtime.deterministic.Context, journal: *Journal, done: *bool) anyerror!void {
@@ -1838,7 +1836,16 @@ fn dropped_handle_driven_by_next_sync(ctx: runtime.deterministic.Context) !void 
 
 test "oversized start_sync: a dropped completion is driven by the next sync" {
     // commonware `test_oversized_start_sync_dropped_handle_driven_by_next_sync`.
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(dropped_handle_driven_by_next_sync, .{}));
+    try soak_context(dropped_handle_driven_by_next_sync, .{});
+}
+
+/// Runs `function` with `args` on a deterministic runner once per `-Dfuzz-soak` round, from the
+/// runner's default seed (`runtime.deterministic.soak`).
+fn soak_context(comptime function: anytype, args: anytype) !void {
+    const Args = @TypeOf(args);
+    try runtime.deterministic.soak(gpa, .{}, args, struct {
+        fn run(context: Args, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start_context(function, context));
+        }
+    }.run);
 }

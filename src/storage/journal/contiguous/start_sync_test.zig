@@ -226,9 +226,7 @@ fn Suite(comptime K: type) type {
 }
 
 fn run(comptime body: fn (Context) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(body, .{}));
+    try soak_context(body, .{});
 }
 
 const FixedSuite = Suite(Kind(false));
@@ -282,4 +280,15 @@ test "fixed prune surfaces failed sync (test_fixed_prune_surfaces_failed_sync)" 
 
 test "variable prune surfaces failed sync (test_variable_prune_surfaces_failed_sync)" {
     try run(VariableSuite.prune_surfaces_failure);
+}
+
+/// Runs `function` with `args` on a deterministic runner once per `-Dfuzz-soak` round, from the
+/// runner's default seed (`runtime.deterministic.soak`).
+fn soak_context(comptime function: anytype, args: anytype) !void {
+    const Args = @TypeOf(args);
+    try runtime.deterministic.soak(gpa, .{}, args, struct {
+        fn run(context: Args, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start_context(function, context));
+        }
+    }.run);
 }

@@ -676,7 +676,16 @@ fn interrupted_mutation(ctx: runtime.deterministic.Context) !void {
 
 test "queue: the reader ends after an interrupted mutation" {
     // commonware `test_reader_ends_after_interrupted_mutation`, on `DelayedSync`.
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(interrupted_mutation, .{}));
+    try soak_context(interrupted_mutation, .{});
+}
+
+/// Runs `function` with `args` on a deterministic runner once per `-Dfuzz-soak` round, from the
+/// runner's default seed (`runtime.deterministic.soak`).
+fn soak_context(comptime function: anytype, args: anytype) !void {
+    const Args = @TypeOf(args);
+    try runtime.deterministic.soak(gpa, .{}, args, struct {
+        fn run(context: Args, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start_context(function, context));
+        }
+    }.run);
 }

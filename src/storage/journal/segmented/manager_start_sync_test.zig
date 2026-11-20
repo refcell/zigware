@@ -107,9 +107,7 @@ test "manager start_sync reports a later section's failure at once" {
     // commonware `test_concurrent_sync_reports_later_error` (counts within one join).
     inline for (.{ 1, 2, 8 }) |count| {
         inline for (.{ false, true }) |clear| {
-            var runner = try runtime.deterministic.Runner.init(gpa, .{});
-            defer runner.deinit();
-            try (try runner.start_context(concurrent_sync_reports_later_error, .{ count, clear }));
+            try soak_context(concurrent_sync_reports_later_error, .{ count, clear });
         }
     }
 }
@@ -132,9 +130,7 @@ fn combined(ctx: Context) !void {
 
 test "manager start_sync of several sections returns a combined completion" {
     // commonware `test_start_sync_multiple_sections_returns_combined_handle`.
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(combined, .{}));
+    try soak_context(combined, .{});
 }
 
 fn reuses(ctx: Context) !void {
@@ -156,9 +152,7 @@ fn reuses(ctx: Context) !void {
 
 test "manager start_sync reuses an in-flight section sync without waiting" {
     // commonware `test_start_sync_reuses_in_flight_section_handle_without_waiting`.
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(reuses, .{}));
+    try soak_context(reuses, .{});
 }
 
 fn truncate_waits(ctx: Context, fails: bool) !void {
@@ -188,9 +182,7 @@ fn truncate_waits(ctx: Context, fails: bool) !void {
 test "manager truncate waits for an in-flight start_sync" {
     // commonware `test_truncate_waits_for_in_flight_start_sync`.
     for ([_]bool{ false, true }) |fails| {
-        var runner = try runtime.deterministic.Runner.init(gpa, .{});
-        defer runner.deinit();
-        try (try runner.start_context(truncate_waits, .{fails}));
+        try soak_context(truncate_waits, .{fails});
     }
 }
 
@@ -213,9 +205,7 @@ fn prune_waits(ctx: Context) !void {
 
 test "manager prune waits for an in-flight start_sync" {
     // commonware `test_prune_waits_for_in_flight_start_sync`.
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(prune_waits, .{}));
+    try soak_context(prune_waits, .{});
 }
 
 fn destroy_waits(ctx: Context, fails: bool) !void {
@@ -245,9 +235,7 @@ test "manager destroy waits for, and surfaces, an in-flight start_sync" {
     // commonware `test_destroy_waits_for_in_flight_start_sync`,
     // `test_destroy_surfaces_failed_in_flight_start_sync`.
     for ([_]bool{ false, true }) |fails| {
-        var runner = try runtime.deterministic.Runner.init(gpa, .{});
-        defer runner.deinit();
-        try (try runner.start_context(destroy_waits, .{fails}));
+        try soak_context(destroy_waits, .{fails});
     }
 }
 
@@ -282,7 +270,16 @@ fn skips_clean(ctx: Context) !void {
 test "manager start_sync skips clean sections" {
     // commonware `test_sync_skips_clean_sections` (its sync counts; the metric half is
     // "sync counts every selected section").
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(skips_clean, .{}));
+    try soak_context(skips_clean, .{});
+}
+
+/// Runs `function` with `args` on a deterministic runner once per `-Dfuzz-soak` round, from the
+/// runner's default seed (`runtime.deterministic.soak`).
+fn soak_context(comptime function: anytype, args: anytype) !void {
+    const Args = @TypeOf(args);
+    try runtime.deterministic.soak(gpa, .{}, args, struct {
+        fn run(context: Args, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start_context(function, context));
+        }
+    }.run);
 }

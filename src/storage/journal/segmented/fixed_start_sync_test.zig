@@ -94,9 +94,7 @@ fn waits(ctx: Context, op: Op) !void {
 test "segmented fixed prune, destroy, and clear wait for an in-flight start_sync" {
     // commonware `test_segmented_fixed_{prune,destroy,clear}_waits_for_in_flight_start_sync`.
     for ([_]Op{ .prune, .destroy, .clear }) |op| {
-        var runner = try runtime.deterministic.Runner.init(gpa, .{});
-        defer runner.deinit();
-        try (try runner.start_context(waits, .{op}));
+        try soak_context(waits, .{op});
     }
 }
 
@@ -114,9 +112,7 @@ fn prune_surfaces(ctx: Context) !void {
 
 test "segmented fixed prune surfaces a failed in-flight start_sync" {
     // commonware `test_segmented_fixed_prune_surfaces_failed_in_flight_start_sync`.
-    var runner = try runtime.deterministic.Runner.init(gpa, .{});
-    defer runner.deinit();
-    try (try runner.start_context(prune_surfaces, .{}));
+    try soak_context(prune_surfaces, .{});
 }
 
 const IntJournal = fixed.Journal(u64);
@@ -194,9 +190,7 @@ fn dropped_during_repair(ctx: Context, torn: bool) !void {
 test "segmented fixed replay canceled during repair fails the replay" {
     // commonware `test_segmented_fixed_replay_dropped_during_repair_fails_replay` (tail, torn).
     for ([_]bool{ false, true }) |torn| {
-        var runner = try runtime.deterministic.Runner.init(gpa, .{});
-        defer runner.deinit();
-        try (try runner.start_context(dropped_during_repair, .{torn}));
+        try soak_context(dropped_during_repair, .{torn});
     }
 }
 
@@ -247,9 +241,18 @@ test "segmented fixed replay canceled during a read fails the replay" {
     // drop has no counterpart.
     for ([_]bool{ false, true }) |resume_replay| {
         for ([_]u64{ 0, 2 }) |drained| {
-            var runner = try runtime.deterministic.Runner.init(gpa, .{});
-            defer runner.deinit();
-            try (try runner.start_context(dropped_during_read, .{ resume_replay, drained }));
+            try soak_context(dropped_during_read, .{ resume_replay, drained });
         }
     }
+}
+
+/// Runs `function` with `args` on a deterministic runner once per `-Dfuzz-soak` round, from the
+/// runner's default seed (`runtime.deterministic.soak`).
+fn soak_context(comptime function: anytype, args: anytype) !void {
+    const Args = @TypeOf(args);
+    try runtime.deterministic.soak(gpa, .{}, args, struct {
+        fn run(context: Args, runner: *runtime.deterministic.Runner) anyerror!void {
+            try (try runner.start_context(function, context));
+        }
+    }.run);
 }
