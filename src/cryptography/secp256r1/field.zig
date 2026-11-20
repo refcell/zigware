@@ -4,7 +4,8 @@
 //! shifts, since `-p^-1 = 1 mod 2^64` and `p = 2^256 - 2^224 + 2^192 + 2^96 - 1`. The limbs
 //! are std's (fiat-crypto's) Montgomery limbs, fully reduced, so `mul` returns exactly std's
 //! `Fe.mul`; other builds call std. Addition and subtraction are plain u256 arithmetic, about
-//! twice as fast as std's, with the same limbs.
+//! twice as fast as std's, with the same limbs. Everything here is branch-free, since
+//! signing.zig runs it on secret values.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -49,20 +50,29 @@ pub inline fn sq(a: Fe) Fe {
     return mul(a, a);
 }
 
-/// `a + b`: the same limbs as `a.add(b)` (both fully reduced).
+/// `a + b`: the same limbs as `a.add(b)` (both fully reduced). Branch-free: signing uses it on
+/// secret values.
 pub inline fn add(a: Fe, b: Fe) Fe {
     if (!little_endian) return a.add(b);
     const sum = @addWithOverflow(wide(a), wide(b));
     const diff = @subWithOverflow(sum[0], Fe.field_order);
     // The sum is below p exactly when it did not carry out and subtracting p borrows.
-    return narrow(if (sum[1] == 0 and diff[1] == 1) sum[0] else diff[0]);
+    const below: u256 = (sum[1] ^ 1) & diff[1];
+    return narrow(select(below, sum[0], diff[0]));
 }
 
-/// `a - b`: the same limbs as `a.sub(b)`.
+/// `a - b`: the same limbs as `a.sub(b)`. Branch-free.
 pub inline fn sub(a: Fe, b: Fe) Fe {
     if (!little_endian) return a.sub(b);
     const diff = @subWithOverflow(wide(a), wide(b));
-    return narrow(if (diff[1] == 1) diff[0] +% Fe.field_order else diff[0]);
+    return narrow(diff[0] +% (Fe.field_order & (0 -% @as(u256, diff[1]))));
+}
+
+/// `when_one` if `bit` is 1, else `when_zero`, by masking rather than branching.
+inline fn select(bit: u256, when_one: u256, when_zero: u256) u256 {
+    assert(bit <= 1);
+    const mask = 0 -% bit;
+    return (when_one & mask) | (when_zero & ~mask);
 }
 
 /// `2 a`: the same limbs as `a.dbl()`.

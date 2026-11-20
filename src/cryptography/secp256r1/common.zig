@@ -12,6 +12,8 @@
 //!   additional data), retrying the next `k` when `r` or `s` is zero, then moves `s` into the
 //!   lower half of the order (BIP 62) and flips the recovery id's y parity to match. std's
 //!   ECDSA is not used for signing: its nonce mixes in a noise block, so it is not RFC 6979.
+//! - `k G`, `d G`, and `k^-1` run in constant time in `signing.zig` (a fixed-base table, as
+//!   the `p256` crate's `BasepointTable`), never through verify.zig's variable-time code.
 //! - Verification is plain ECDSA (`verify.zig`, structured as aws-lc's); public-key recovery
 //!   follows the `ecdsa` crate.
 
@@ -20,6 +22,7 @@ const utils = @import("utils");
 const assert = std.debug.assert;
 const codec = @import("codec");
 const Opaque = @import("../secret.zig").Opaque;
+const signing = @import("signing.zig");
 const verify = @import("verify.zig");
 const P256 = std.crypto.ecc.P256;
 const Scalar = P256.scalar.Scalar;
@@ -170,11 +173,10 @@ fn sign_prehashed(secret: *const [32]u8, hash: [32]u8) Signed {
     while (attempts < draws_max) : (attempts += 1) {
         const k = nonces.next();
         // k is in [1, n), so k * G is never the identity.
-        const point = P256.basePoint.mul(k.toBytes(.big), .big) catch unreachable;
-        const affine = point.affineCoordinates();
+        const affine = signing.mul_base(k);
         const x_bytes = affine.x.toBytes(.big);
         const r = reduce(x_bytes);
-        const s = k.invert().mul(z.add(r.mul(d)));
+        const s = signing.invert_scalar(k).mul(z.add(r.mul(d)));
         if (r.isZero() or s.isZero()) continue;
 
         var y_odd = affine.y.isOdd();
@@ -202,8 +204,8 @@ pub const PrivateKeyInner = struct {
     pub fn from_bytes(raw: [private_key_length]u8) ?PrivateKeyInner {
         const d = nonzero_scalar(raw) orelse return null;
         // d is in [1, n), so d * G is never the identity.
-        const point = P256.basePoint.mul(d.toBytes(.big), .big) catch unreachable;
-        return .{ .raw = .{ .value = raw }, .public = .from_point(point) };
+        const point = signing.mul_base(d);
+        return .{ .raw = .{ .value = raw }, .public = .from_affine(point.x, point.y) };
     }
 
     /// Draws 32-byte candidates from `rng` until one is a valid key.
@@ -250,10 +252,15 @@ pub const PublicKeyInner = struct {
     pub fn from_point(point: P256) PublicKeyInner {
         point.rejectIdentity() catch unreachable;
         const affine = point.affineCoordinates();
+        return .from_affine(affine.x, affine.y);
+    }
+
+    /// The key of the curve point `(x, y)`.
+    pub fn from_affine(x: Fe, y: Fe) PublicKeyInner {
         var raw: [public_key_length]u8 = undefined;
-        raw[0] = if (affine.y.isOdd()) 0x03 else 0x02;
-        raw[1..].* = affine.x.toBytes(.big);
-        return .{ .raw = raw, .point = .{ .x = affine.x, .y = affine.y } };
+        raw[0] = if (y.isOdd()) 0x03 else 0x02;
+        raw[1..].* = x.toBytes(.big);
+        return .{ .raw = raw, .point = .{ .x = x, .y = y } };
     }
 
     /// Decodes a compressed point, or returns null when it is not one.

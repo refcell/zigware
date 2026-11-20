@@ -14,8 +14,8 @@
 //!
 //! Every input is public, so branching on it leaks nothing. The answer is the same as std's.
 //! Nothing here is constant time, so secret values must never reach it: the file exports only
-//! `verify` and `Affine`, signing and key generation stay on std's constant-time
-//! `basePoint.mul` and `Scalar.invert`, and a test below pins both facts.
+//! `verify` and `Affine`, signing and key generation use signing.zig's constant-time
+//! `mul_base` and `invert_scalar`, and a test below pins both facts.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -348,7 +348,8 @@ test "secp256r1 verify: only public verification reaches the variable-time code"
         try testing.expect(known);
     }
     // common.zig calls `verify.verify` once, inside `PublicKeyInner`, and nothing that holds
-    // a secret (`sign_prehashed`, `PrivateKeyInner`) names this file or field.zig.
+    // a secret (`sign_prehashed`, `PrivateKeyInner`) names this file or field.zig; they use
+    // signing.zig.
     const common = @embedFile("common.zig");
     try testing.expectEqual(1, std.mem.count(u8, common, "verify.verify("));
     const public_start = std.mem.indexOf(u8, common, "pub const PublicKeyInner = struct {").?;
@@ -360,4 +361,9 @@ test "secp256r1 verify: only public verification reaches the variable-time code"
     try testing.expect(std.mem.indexOf(u8, secret_code, "verify.") == null);
     try testing.expect(std.mem.indexOf(u8, secret_code, "field.") == null);
     try testing.expect(std.mem.indexOf(u8, common, "@import(\"field.zig\")") == null);
+    // The constant-time module builds only on field.zig (branch-free), never on this file.
+    const signing = @embedFile("signing.zig");
+    try testing.expect(std.mem.indexOf(u8, signing, "@import(\"verify.zig\")") == null);
+    try testing.expect(std.mem.indexOf(u8, secret_code, "signing.mul_base(") != null);
+    try testing.expect(std.mem.indexOf(u8, secret_code, "signing.invert_scalar(") != null);
 }
