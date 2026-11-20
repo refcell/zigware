@@ -183,6 +183,12 @@ Read this whole file before you change anything. These rules are not optional.
   cancel then makes the next `checkCancel` pass (the macOS "destroying a pool in a canceled
   task" failure, d301a875). Tests that free after a cancel use an allocator without stack
   traces.
+- Under `--fuzz` (`just fuzz`), the test runner checks `testing.allocator` for leaks after
+  every input but never joins `testing.io`'s workers, and `testing.io` allocates tasks from
+  `testing.allocator`. An `Io.Group` task frees itself just after its group sees it finish, so
+  the check can report one live task as a leak (64 bytes in `fuzz futures`). A fuzz body that
+  starts group tasks runs them on an `Io.Threaded` over another allocator that lives across
+  inputs (`futures_test.zig`'s `fuzz_io`, d13ecf83).
 - `std.Io.Threaded`'s `io.async` runs the function inline on the caller once `async_limit`
   (cpu_count − 1 by default) tasks are running. Code that must not run the work on the
   caller, because the caller later opens a gate the task waits on, uses `io.concurrent` and
