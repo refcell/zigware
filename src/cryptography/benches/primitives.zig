@@ -481,5 +481,7 @@ pub fn run(runner: *bench.Runner) !void {
     try runner.run(bench.Benchmark.init("sake::sake"), &connect);
     const pool = try parallel.ThreadPool.create(runner.allocator, runner.io, .{ .threads = 8 });
     defer pool.destroy();
-    try bench_ipa(runner, parallel.Rayon.init(pool));
+    // commonware's `Rayon::new` decides serial or parallel with its adaptive policy.
+    var policy = parallel.Policy.init(runner.io);
+    try bench_ipa(runner, parallel.Rayon.init(pool).with_policy(&policy));
 }

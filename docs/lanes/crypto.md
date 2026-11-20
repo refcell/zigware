@@ -547,3 +547,6 @@ hold whole units of lanes" over coding's lane-aware `hash_batches`, and `sha512/
   78 -> 50 ns (commonware 59), the mmr pair 106 -> 92 ns (commonware 89.5). The shape test
   covers all four shapes against std on x86-64 and aarch64 under qemu; planted bugs in both
   bit lengths, the node's right words, and its tail digest are caught.
+- 2026-11-20: the ed25519 batch-verify and bulletproofs ipa benches give their pools an
+  adaptive `Policy`, as commonware's `Rayon::new` strategies have, so their conc>1 rows compare
+  like with like (a policy-less `Rayon` always splits; curve25519's came in 1adfe245).

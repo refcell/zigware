@@ -242,7 +242,9 @@ pub fn run(runner: *bench.Runner) !void {
         .threads = concurrency,
     });
     defer pool.destroy();
-    const rayon = parallel.Rayon.init(pool);
+    // commonware's `Rayon::new` decides serial or parallel with its adaptive policy.
+    var policy = parallel.Policy.init(runner.io);
+    const rayon = parallel.Rayon.init(pool).with_policy(&policy);
     try bench_signatures(ed25519.PrivateKey, runner, "ed25519", null);
     try bench_batch_same(runner, rayon, false);
     try bench_batch_same(runner, rayon, true);
