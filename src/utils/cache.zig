@@ -353,7 +353,8 @@ pub fn GhostQueue(comptime K: type) type {
         };
 
         pub fn init(gpa: Allocator, capacity: usize) Allocator.Error!Self {
-            var index = try handles.Table(usize).init_capacity(gpa, capacity);
+            // Room for twice the entries, as commonware's index: short runs keep misses cheap.
+            var index = try handles.Table(usize).init_capacity(gpa, capacity * 2);
             errdefer index.deinit(gpa);
             return .{
                 .index = index,
@@ -491,7 +492,9 @@ pub fn Cache(comptime K: type, comptime V: type) type {
         pub fn init(gpa: Allocator, capacity: usize) Allocator.Error!Self {
             assert(capacity > 0);
             const small_capacity = if (capacity == 1) 0 else @max(capacity / 10, 1);
-            var index = try handles.Table(usize).init_capacity(gpa, capacity);
+            // Room for twice the residents, as commonware's index (`with_capacity(2 * capacity)`):
+            // at a quarter load or less, most runs end at their home slot, so misses stay cheap.
+            var index = try handles.Table(usize).init_capacity(gpa, capacity * 2);
             errdefer index.deinit(gpa);
             var slots: std.ArrayList(Entry) = try .initCapacity(gpa, capacity);
             errdefer slots.deinit(gpa);

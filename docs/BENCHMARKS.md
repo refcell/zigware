@@ -221,6 +221,44 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
   tree, counters around the whole apply: `smp_allocator` 177 faults per batch, all in the tip
   copy; `allocator.Heap` 0 in two runs, as it keeps the freed block mapped.
 
+## utils handles.Table on packed slots (2026-11-20, utils lane)
+
+`handles.Table` keeps each slot's metadata and handle together again, as commonware's packed
+`Slot` does, so an insert into a large cold table touches one cache line instead of the
+metadata and handle lines of 32a9db92's split arrays. Inserts and removes shift a run inside one
+64-byte span of packed slots with masks and one store; lookups walk one slot at a time with
+98687b0e's single-compare stop. The Clock2Q+ cache sizes its indexes for twice its capacity,
+as commonware's `HashTable::with_capacity(2 * capacity)` does, so most runs end at their home
+slot. `bench-compare.sh` against commonware built with `target-cpu=native`, on the
+CCD-pinned queue. Raw rounds of the cache rows: docs/bench/utils-handles.tsv.
+
+| bench | parameters | commonware | zigware | zigware / commonware | rounds | verdict |
+|---|---|---|---|---|---|---|
+| `qmdb::apply_batch` | `case=direct variant=immutable::fixed::mmb chunk=32 updates=16384` | 438 µs | 443 µs | 1.02× | 0.99–1.05× (4) | tie (was 3.50×) |
+| `transfers::plan` | `transfers=16 accounts=128 effects=none conc=1` | 353 ns | 280 ns | 0.80× | 0.78–0.81× (6) | faster |
+| `transfers::plan` | `transfers=16 accounts=4096 effects=none conc=1` | 343 ns | 289 ns | 0.84× | 0.81–0.85× (6) | faster |
+| `transfers::plan` | `transfers=16 accounts=1000000 effects=none conc=1` | 346 ns | 265 ns | 0.76× | 0.74–0.78× (6) | faster |
+| `transfers::plan` | `transfers=16 accounts=4096 effects=nonce conc=1` | 469 ns | 521 ns | 1.12× | 1.08–1.21× (6) | slower |
+| `transfers::plan` | `transfers=16 accounts=1000000 effects=nonce conc=1` | 462 ns | 497 ns | 1.08× | 1.04–1.09× (6) | slower |
+| `cache::get` | `capacity=1024` | 2.17 µs | 1.37 µs | 0.63× | 0.61–0.63× (6) | faster |
+| `cache::insert` | `capacity=1024` | 48 µs | 29.9 µs | 0.62× | 0.58–0.70× (6) | faster |
+| `cache::mixed` | `capacity=1024` | 137 µs | 107 µs | 0.78× | 0.77–0.80× (6) | faster |
+| `cache::refill` | `capacity=1024` | 4.66 µs | 5.36 µs | 1.15× | 1.15–1.16× (6) | slower |
+| `cache::get` | `capacity=16384` | 2.67 µs | 1.57 µs | 0.59× | 0.58–0.60× (6) | faster |
+| `cache::insert` | `capacity=16384` | 63.3 µs | 33.7 µs | 0.53× | 0.51–0.60× (6) | faster |
+| `cache::mixed` | `capacity=16384` | 89.5 µs | 78.1 µs | 0.86× | 0.85–0.95× (6) | faster |
+| `cache::refill` | `capacity=16384` | 90 µs | 96.5 µs | 1.08× | 1.06–1.09× (6) | slower |
+| `cache::get` | `capacity=262144` | 2.77 µs | 1.61 µs | 0.59× | 0.57–0.59× (6) | faster |
+| `cache::insert` | `capacity=262144` | 54.6 µs | 109 µs | 1.27× | 0.78–2.66× (6) | tie |
+| `cache::mixed` | `capacity=262144` | 126 µs | 151 µs | 1.02× | 0.83–1.52× (6) | tie |
+| `cache::refill` | `capacity=262144` | 3.88 ms | 4.24 ms | 1.21× | 0.85–1.57× (6) | tie |
+
+Load 2.6 to 17.3. The glue rows at conc=8 follow conc=1 (none 0.69–0.74× faster, nonce
+0.99–1.04× ties); the nonce rows' remaining gap is in plan's own path (see the glue settle
+section below), not the table. Against the split-array table on the same binary harness,
+cache::refill stayed at 1.02–1.05×, so refill's gap predates this change. The capacity-262144
+rows swing with the queue's load (single rounds from 0.78× to 2.66×) and need a quieter run.
+
 ## qmdb: every bench group, pinned ABBA (2026-11-20, storage-qmdb lane)
 
 One row per qmdb group and family, `BENCH_FILTER=qmdb:: BENCH_WARMUP_MS=300
@@ -232,7 +270,7 @@ docs/bench/storage-qmdb.tsv. Verdicts: 5 faster, 4 tie, 8 slower.
 | bench | parameters | commonware | zigware | zigware / commonware | rounds | verdict |
 |---|---|---|---|---|---|---|
 | `qmdb::apply_batch` | `case=direct variant=any::unordered::fixed::mmb chunk=32 updates=16384` | 610 µs | 705 µs | 1.05× | 0.50–1.28× (8) | slower |
-| `qmdb::apply_batch` | `case=direct variant=immutable::fixed::mmb chunk=32 updates=16384` | 423 µs | 1.51 ms | 3.50× | 1.60–3.78× (8) | slower |
+| `qmdb::apply_batch` | `case=direct variant=immutable::fixed::mmb chunk=32 updates=16384` | 423 µs | 1.51 ms | 3.50× | 1.60–3.78× (8) | slower (1.02× tie after the packed handles.Table; see above) |
 | `qmdb::apply_batch` | `case=direct variant=any::ordered::p256::fixed::mmb chunk=32 updates=16384` | 1.07 ms | 1.02 ms | 0.91× | 0.64–1.21× (8) | tie |
 | `qmdb::apply_batch` | `case=uncomm_ancestor variant=any::unordered::fixed::mmb chunk=32 updates=16384` | 1.63 ms | 1.73 ms | 1.06× | 1.03–1.13× (8) | slower |
 | `qmdb::chained_growth` | `variant=current::unordered::fixed::mmb chunk=32 batches=100` | 1.35 ms | 965 µs | 0.71× | 0.68–0.76× (8) | faster |
