@@ -425,6 +425,7 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
             assert(tip >= self.journal.size());
             const entries = batch_diff.entries;
             const len_before = self.snapshot.len();
+            try self.snapshot.reserve(entries.len);
             for (entries[0..@min(prefetch_distance, entries.len)]) |*entry| {
                 self.prefetch_slot(&entry.key);
             }

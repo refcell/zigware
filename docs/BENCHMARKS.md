@@ -234,7 +234,7 @@ CCD-pinned queue. Raw rounds of the cache rows: docs/bench/utils-handles.tsv.
 
 | bench | parameters | commonware | zigware | zigware / commonware | rounds | verdict |
 |---|---|---|---|---|---|---|
-| `qmdb::apply_batch` | `case=direct variant=immutable::fixed::mmb chunk=32 updates=16384` | 438 µs | 443 µs | 1.02× | 0.99–1.05× (4) | tie (was 3.50×) |
+| `qmdb::apply_batch` | `case=direct variant=immutable::fixed::mmb chunk=32 updates=16384` | 440 µs | 337 µs | 0.76× | 0.37–0.80× (8) | faster (was 3.50×) |
 | `transfers::plan` | `transfers=16 accounts=128 effects=none conc=1` | 353 ns | 280 ns | 0.80× | 0.78–0.81× (6) | faster |
 | `transfers::plan` | `transfers=16 accounts=4096 effects=none conc=1` | 343 ns | 289 ns | 0.84× | 0.81–0.85× (6) | faster |
 | `transfers::plan` | `transfers=16 accounts=1000000 effects=none conc=1` | 346 ns | 265 ns | 0.76× | 0.74–0.78× (6) | faster |
@@ -253,6 +253,15 @@ CCD-pinned queue. Raw rounds of the cache rows: docs/bench/utils-handles.tsv.
 | `cache::mixed` | `capacity=262144` | 126 µs | 151 µs | 1.02× | 0.83–1.52× (6) | tie |
 | `cache::refill` | `capacity=262144` | 3.88 ms | 4.24 ms | 1.21× | 0.85–1.57× (6) | tie |
 
+The qmdb row's 1.02× tie after the packed table alone (4 rounds, 438 µs against 443 µs) became
+0.76× with two follow-ups. The immutable index reserves its key ring once per batch: the ring
+grows by half from a near-empty open, so it ended the 65,536-key seed just past full and the
+measured apply regrew and copied it (Rust's `VecDeque` doubles, so commonware keeps headroom).
+And `Table.prefetch` warms both cache lines of the 64-byte span from the home slot, which an
+insert reads (one line before). Same-binary A/B: about 440 → 370 → 338 µs. Five of the eight
+rounds ran at load 5.8 to 6.3 (0.76–0.80×); three under compiles at load 9.9 read 0.37–0.61×.
+Raw rounds: docs/bench/storage-qmdb-immutable.tsv.
+
 Load 2.6 to 17.3. The glue rows at conc=8 follow conc=1 (none 0.69–0.74× faster, nonce
 0.99–1.04× ties); the nonce rows' remaining gap is in plan's own path (see the glue settle
 section below), not the table. Against the split-array table on the same binary harness,
@@ -270,7 +279,7 @@ docs/bench/storage-qmdb.tsv. Verdicts: 5 faster, 4 tie, 8 slower.
 | bench | parameters | commonware | zigware | zigware / commonware | rounds | verdict |
 |---|---|---|---|---|---|---|
 | `qmdb::apply_batch` | `case=direct variant=any::unordered::fixed::mmb chunk=32 updates=16384` | 610 µs | 705 µs | 1.05× | 0.50–1.28× (8) | slower |
-| `qmdb::apply_batch` | `case=direct variant=immutable::fixed::mmb chunk=32 updates=16384` | 423 µs | 1.51 ms | 3.50× | 1.60–3.78× (8) | slower (1.02× tie after the packed handles.Table; see above) |
+| `qmdb::apply_batch` | `case=direct variant=immutable::fixed::mmb chunk=32 updates=16384` | 423 µs | 1.51 ms | 3.50× | 1.60–3.78× (8) | slower (0.76× faster since; see the utils handles.Table section) |
 | `qmdb::apply_batch` | `case=direct variant=any::ordered::p256::fixed::mmb chunk=32 updates=16384` | 1.07 ms | 1.02 ms | 0.91× | 0.64–1.21× (8) | tie |
 | `qmdb::apply_batch` | `case=uncomm_ancestor variant=any::unordered::fixed::mmb chunk=32 updates=16384` | 1.63 ms | 1.73 ms | 1.06× | 1.03–1.13× (8) | slower |
 | `qmdb::chained_growth` | `variant=current::unordered::fixed::mmb chunk=32 batches=100` | 1.35 ms | 965 µs | 0.71× | 0.68–0.76× (8) | faster |

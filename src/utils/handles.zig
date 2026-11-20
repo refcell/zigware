@@ -263,10 +263,14 @@ pub fn Table(comptime H: type) type {
             return @as(usize, @truncate(hash)) & mask;
         }
 
-        /// Hints the CPU to load the home slot of `hash`.
+        /// Hints the CPU to load the span from the home slot of `hash`.
         pub fn prefetch(self: *const Self, hash: u64) void {
             if (self.slots.len == 0) return;
-            @prefetch(&self.slots[home(self.slots.len, hash)], .{});
+            const start = home(self.slots.len, hash);
+            const bytes: [*]const u8 = @ptrCast(&self.slots[start]);
+            @prefetch(bytes, .{});
+            // A span of packed slots seldom starts on a cache line, so it also reaches the next.
+            if (fits(self.slots, start)) @prefetch(bytes + (SPAN_BYTES - 1), .{});
         }
 
         /// Inserts `handle` under `hash`. Duplicate hashes and handles are allowed.

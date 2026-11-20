@@ -103,6 +103,13 @@ pub fn Index(comptime T: type) type {
             assert(self.table.len == len_before + 1);
         }
 
+        /// Makes room in the key ring for `additional` more positions, so a run of inserts at
+        /// consecutive positions grows it at most once.
+        pub fn reserve(self: *Self, additional: usize) Allocator.Error!void {
+            try self.keys.ensureUnusedCapacity(self.gpa, additional);
+            assert(self.keys.buffer.len >= self.keys.len + additional);
+        }
+
         /// The positions indexed under a translated key, in no particular order.
         pub const Positions = struct {
             index: *const Self,
