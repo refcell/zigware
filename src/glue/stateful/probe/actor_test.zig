@@ -164,20 +164,24 @@ const Runner = struct {
 };
 
 test "stateful probe actor: discovers a floor, then serves peers" {
+    // On simulated time a lost wakeup fails as Stalled; on threads it hung macOS CI for 10 min.
+    try test_io.run_on_deterministic(discovers_a_floor_then_serves_peers);
+}
+
+/// What the discover-and-serve phases share: the committee, the probe's network and mailbox,
+/// and the logs of what it sent and blocked.
+const Scene = struct {
+    fixture: *const Fixture,
+    sender: Sender,
+    blocker: Blocker,
+    network: mpsc.Sender(NetMessage),
+    mailbox: *Probe.ProbeMailbox,
+};
+
+fn discovers_a_floor_then_serves_peers() anyerror!void {
     var rng = utils.rng.test_rng();
     var fixture = try ed25519.fixture(Digest, gpa, &rng, "_COMMONWARE_GLUE_PROBE_TEST", 4);
     defer fixture.deinit(gpa);
-    var low = try finalize_all(&fixture, 10);
-    defer low.deinit(gpa);
-    var high = try finalize_all(&fixture, 13);
-    defer high.deinit(gpa);
-    var latest = try finalize_all(&fixture, 20);
-    defer latest.deinit(gpa);
-    const low_bytes = try codec.encode(WireMessage, gpa, .{ .response = low });
-    defer gpa.free(low_bytes);
-    const high_bytes = try codec.encode(WireMessage, gpa, .{ .response = high });
-    defer gpa.free(high_bytes);
-
     var sent_log: Sender.Log = .{};
     defer Sender.free(&sent_log);
     var block_log: Blocker.Log = .{};
@@ -205,10 +209,40 @@ test "stateful probe actor: discovers a floor, then serves peers" {
         task.cancel(test_io.io) catch {};
     };
 
-    // No subscriber, no request. A subscription solicits the committee, and the retry
-    // deadline solicits it again while no sample completes.
+    const scene: Scene = .{
+        .fixture = &fixture,
+        .sender = sender,
+        .blocker = blocker,
+        .network = network.sender,
+        .mailbox = &mailbox,
+    };
+    try discover_floor(scene);
+    try serve_peers(scene);
+
+    // Closing the network stops the probe.
+    network.sender.deinit();
+    network_open = false;
+    try task.await(test_io.io);
+    joined = true;
+}
+
+/// No subscriber, no request. A subscription solicits the committee, and the retry deadline
+/// solicits it again while no sample completes; two members reply, and the floor is the
+/// higher reply.
+fn discover_floor(scene: Scene) !void {
+    var low = try finalize_all(scene.fixture, 10);
+    defer low.deinit(gpa);
+    var high = try finalize_all(scene.fixture, 13);
+    defer high.deinit(gpa);
+    const low_bytes = try codec.encode(WireMessage, gpa, .{ .response = low });
+    defer gpa.free(low_bytes);
+    const high_bytes = try codec.encode(WireMessage, gpa, .{ .response = high });
+    defer gpa.free(high_bytes);
+    const sender = scene.sender;
+    const participants = scene.fixture.participants;
+
     try testing.expectEqual(0, sender.count());
-    var floor = try mailbox.subscribe();
+    var floor = try scene.mailbox.subscribe();
     defer floor.deinit();
     try wait_for(sender, struct {
         fn done(s: Sender) bool {
@@ -221,52 +255,65 @@ test "stateful probe actor: discovers a floor, then serves peers" {
         try testing.expectEqualSlices(u8, &.{0}, sent.bytes);
     }
 
-    // Two committee members reply; the floor is the higher reply.
-    try deliver(network.sender, fixture.participants[0], low_bytes);
-    try deliver(network.sender, fixture.participants[1], high_bytes);
+    // Each retry round clears the sample, so a round that starts between the two replies
+    // drops the first one (under load on threads this hung the test): resend both whenever
+    // a new round solicits.
+    var round: usize = 0;
+    var waited: u32 = 0;
+    while (!floor.is_resolved()) : (waited += 1) {
+        if (waited > 2_000) return error.TestTimedOut;
+        if (sender.count() != round) {
+            round = sender.count();
+            try deliver(scene.network, participants[0], low_bytes);
+            try deliver(scene.network, participants[1], high_bytes);
+        }
+        try test_io.io.sleep(.fromMilliseconds(5), .awake);
+    }
     var received = try floor.recv();
     defer received.deinit();
     try testing.expectEqual(13, received.finalization.view().get());
+}
 
-    // Attached with no subscriber waiting, the probe serves the source's latest finalization.
+/// Attached, the probe serves its source's latest finalization, blocks an invalid tag, and
+/// answers a new subscription with the floor at once.
+fn serve_peers(scene: Scene) !void {
+    var latest = try finalize_all(scene.fixture, 20);
+    defer latest.deinit(gpa);
+    const sender = scene.sender;
+    const participants = scene.fixture.participants;
+
     // The attachment and peer messages arrive on separate pumps, so a request may still reach
     // discovery (which ignores it): resend until one is served.
-    try mailbox.attach(.{ .finalization = &latest });
+    try scene.mailbox.attach(.{ .finalization = &latest });
     const before = sender.count();
     var attempts: u32 = 0;
     while (sender.count() == before) : (attempts += 1) {
         if (attempts > 2_000) return error.TestTimedOut;
-        try deliver(network.sender, fixture.participants[2], &.{0});
+        try deliver(scene.network, participants[2], &.{0});
         try test_io.io.sleep(.fromMilliseconds(5), .awake);
     }
     const served = sender.at(before);
-    try testing.expect(served.to.?.eql(fixture.participants[2]));
-    const cfg = fixture.verifier.certificate_codec_config();
+    try testing.expect(served.to.?.eql(participants[2]));
+    const cfg = scene.fixture.verifier.certificate_codec_config();
     var decoded = try codec.decode_cfg(WireMessage, gpa, served.bytes, cfg);
     defer decoded.deinit(gpa);
     try testing.expectEqual(20, decoded.response.view().get());
 
     // In service, an invalid tag blocks its sender.
-    try deliver(network.sender, fixture.participants[3], &.{7});
-    try wait_for(blocker, struct {
+    try deliver(scene.network, participants[3], &.{7});
+    try wait_for(scene.blocker, struct {
         fn done(b: Blocker) bool {
             return b.count() == 1;
         }
     }.done);
-    try testing.expect(block_log.blocked.items[0].eql(fixture.participants[3]));
+    try testing.expect(scene.blocker.log.blocked.items[0].eql(participants[3]));
 
     // A subscription in service gets the floor at once.
-    var late = try mailbox.subscribe();
+    var late = try scene.mailbox.subscribe();
     defer late.deinit();
     var late_floor = try late.recv();
     defer late_floor.deinit();
     try testing.expectEqual(13, late_floor.finalization.view().get());
-
-    // Closing the network stops the probe.
-    network.sender.deinit();
-    network_open = false;
-    try task.await(test_io.io);
-    joined = true;
 }
 
 test "stateful probe actor: a canceled probe returns error.Canceled" {
