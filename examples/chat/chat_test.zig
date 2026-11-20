@@ -756,7 +756,7 @@ fn chat_with(io: Io, me: Key, friend: Key, mine: *Net.Registered, theirs: *Net.R
     defer out.deinit();
     var me_hex: [64]u8 = undefined;
     _ = try std.fmt.bufPrint(&me_hex, "{f}", .{me});
-    try handler.run(.{
+    try handler.run(null, .{
         .gpa = gpa,
         .io = io,
         .me = &me_hex,

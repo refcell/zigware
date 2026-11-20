@@ -136,7 +136,9 @@ pub fn main(init: std.process.Init) !u8 {
     var runner: production.Runner = undefined;
     try runner.init(init.gpa, .{ .storage_directory = storage_directory });
     defer runner.deinit();
-    try runner.start(run, .{ &runner, init.gpa, &collector, &zone, configured });
+    // A root `Context`, as commonware's runner gives `main`: tasks spawned from it publish
+    // `runtime_tasks_spawned` and `runtime_tasks_running` (`network`, `handler_keyboard`).
+    try (try runner.start_context(run, .{ &collector, &zone, configured }));
     return 0;
 }
 
@@ -173,22 +175,22 @@ fn network_config(arena: Allocator, configured: Setup) !Net.Config {
 }
 
 fn run(
-    runner: *production.Runner,
-    gpa: Allocator,
+    ctx: production.runner.Context,
     collector: *traces.Collector,
     zone: *const clock.Zone,
     configured: Setup,
 ) !void {
-    const io = runner.io();
+    const gpa = ctx.gpa();
+    const io = ctx.io();
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
-    const scope = runner.metrics();
+    const scope = ctx.scope;
     var config = try network_config(arena_state.allocator(), configured);
     // commonware's chat installs its log writer with `with_max_level(DEBUG)`.
     var subscriber = collector.subscriber();
     subscriber.level = .debug;
     config.tracer = .init(subscriber, "commonware_p2p");
-    const network = try Net.create(gpa, io, runner.network(), scope.child("network"), config);
+    const network = try Net.create(gpa, io, ctx.network, scope.child("network"), config);
     defer network.destroy();
     // In a real-world scenario, this would be updated as new peer sets are created (like when
     // the composition of a validator set changes).
@@ -202,8 +204,9 @@ fn run(
         } else |_| {}
         registered.receiver.deinit();
     }
-    var network_task = try io.concurrent(run_network, .{network});
-    defer network_task.cancel(io) catch {};
+    // commonware's `network.start()` spawns the network under its `network` context.
+    const network_task = try ctx.child("network").spawn(run_network, .{network});
+    defer if (network_task.abort()) |result| result catch {} else |_| {};
 
     var out_buffer: [64 * 1024]u8 = undefined;
     var out_writer = Io.File.stdout().writer(io, &out_buffer);
@@ -214,7 +217,7 @@ fn run(
     defer state.deinit();
     var me: [64]u8 = undefined;
     _ = try std.fmt.bufPrint(&me, "{f}", .{configured.signer.public_key()});
-    try handler.run(.{
+    try handler.run(ctx.child("handler"), .{
         .gpa = gpa,
         .io = io,
         .me = &me,
@@ -229,7 +232,7 @@ fn run(
 /// Runs the network until canceled. Like commonware (whose listener panics with "failed to
 /// bind listener"), a network failure ends the process instead of silently closing every
 /// channel.
-fn run_network(network: *Net) Io.Cancelable!void {
+fn run_network(_: production.runner.Context, network: *Net) Io.Cancelable!void {
     network.run() catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         else => std.debug.panic("network failed: {t}", .{err}),

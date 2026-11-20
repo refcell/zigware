@@ -267,15 +267,49 @@ const Event = union(enum) {
 
 /// Runs the UI until ESC or until input closes (commonware `handler::run`). The caller owns
 /// the terminal's mode; `sender` is a `LimitedSender` and `receiver` a p2p receiver.
-pub fn run(context: Context, sender: anytype, receiver: anytype) !void {
+/// `runtime_ctx` is the handler's runtime `Context` (commonware's `context.child("handler")`),
+/// whose `keyboard` child spawns the keyboard task, so it shows in `runtime_tasks_spawned` as
+/// `handler_keyboard`; null (tests) starts it with `io.concurrent` instead.
+pub fn run(runtime_ctx: anytype, context: Context, sender: anytype, receiver: anytype) !void {
     const io = context.io;
     var buffer: [event_queue_size]Event = undefined;
     var queue: Io.Queue(Event) = .init(&buffer);
     const keyboard = context.terminal.keyboard;
-    var keyboard_task = try io.concurrent(read_keyboard, .{ io, &queue, keyboard });
-    defer keyboard_task.cancel(io) catch {};
+    if (@TypeOf(runtime_ctx) == @TypeOf(null)) {
+        var keyboard_task = try io.concurrent(read_keyboard, .{ io, &queue, keyboard });
+        defer keyboard_task.cancel(io) catch {};
+        return run_events(context, &queue, sender, receiver);
+    }
+    const task = KeyboardTask(@TypeOf(runtime_ctx)).run;
+    const keyboard_task = try runtime_ctx.child("keyboard").spawn(task, .{ io, &queue, keyboard });
+    defer if (keyboard_task.abort()) |result| result catch {} else |_| {};
+    return run_events(context, &queue, sender, receiver);
+}
+
+/// The keyboard task's entry point for a runtime `Context`, which `spawn` passes first.
+fn KeyboardTask(comptime RuntimeContext: type) type {
+    return struct {
+        fn run(
+            _: RuntimeContext,
+            io: Io,
+            queue: *Io.Queue(Event),
+            keyboard: terminal.Keyboard,
+        ) Io.Cancelable!void {
+            return read_keyboard(io, queue, keyboard);
+        }
+    };
+}
+
+/// Receives messages and handles events until ESC or until input closes.
+fn run_events(
+    context: Context,
+    queue: *Io.Queue(Event),
+    sender: anytype,
+    receiver: anytype,
+) !void {
+    const io = context.io;
     const receive = Receiving(@TypeOf(receiver.*)).receive;
-    var receive_task = try io.concurrent(receive, .{ context.gpa, io, &queue, receiver });
+    var receive_task = try io.concurrent(receive, .{ context.gpa, io, queue, receiver });
     defer receive_task.cancel(io) catch {};
     defer {
         queue.close(io);
