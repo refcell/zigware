@@ -223,12 +223,15 @@ pub const CacheRef = struct {
     /// a page read: joiners get the page, the error, or (for `Canceled`) a retry.
     pub fn finish_fetch(self: *CacheRef, ticket: Ticket, result: FetchError![]const u8) void {
         const fetch = &self.fetch_slots[ticket.slot];
-        {
+        // Joiners join only under the lock while the fetch is reading, so a fetch nobody joined
+        // needs neither the copy for joiners nor a wake (a futex syscall per missed page).
+        const joined = joined: {
             self.acquire();
             defer self.release();
             assert(fetch.state == .reading and fetch.refs > 0);
+            const joined = fetch.refs > 1;
             if (result) |page| {
-                @memcpy(self.fetch_page_bytes(ticket.slot), page);
+                if (joined) @memcpy(self.fetch_page_bytes(ticket.slot), page);
                 self.insert(fetch.key, page);
                 fetch.state = .done;
             } else |err| switch (err) {
@@ -240,8 +243,9 @@ pub const CacheRef = struct {
             }
             _ = fetch.resolved.fetchAdd(1, .release);
             drop_ref(fetch);
-        }
-        self.io.?.futexWake(u32, &fetch.resolved.raw, std.math.maxInt(u32));
+            break :joined joined;
+        };
+        if (joined) self.io.?.futexWake(u32, &fetch.resolved.raw, std.math.maxInt(u32));
     }
 
     /// Waits for a joined fetch: true with the page in `dest`, false if its reader was canceled
